@@ -18,4 +18,4 @@ Within your working directory use a terminal to clone the repo to your local fol
 
 2. Create a conda virtual environment with preferred replacement for env-name
 
-```conda create -n env-name python=3.12 
+```conda create -n env-name python=3.12``` 
