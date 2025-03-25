@@ -2,5 +2,6 @@ numpy
 pandas
 matplotlib
 ipympl
-harp
-aeon
+harp-python
+swc-aeon
+utils

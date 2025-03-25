@@ -16,6 +16,12 @@ Within your working directory use a terminal to clone the repo to your local fol
 
 ```git clone https://github.com/vlkuzun/hypnose-processing.git```
 
-2. Create a conda virtual environment with preferred replacement for env-name
+2. Create a conda virtual environment with preferred replacement for env-name and activate
 
 ```conda create -n env-name python=3.12``` 
+
+3. Install required packages using conda initially and then remaining packages using pip
+
+```conda install --file requirements.txt```
+
+```pip install -r requirements.txt```
