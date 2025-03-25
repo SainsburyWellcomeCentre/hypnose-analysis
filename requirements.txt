@@ -4,4 +4,3 @@ matplotlib
 ipympl
 harp-python
 swc-aeon
-utils
