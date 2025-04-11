@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# filepath: reward_analysis.py
+# filepath: reward-analyser-stage1.py
 
 import argparse
 import datetime
