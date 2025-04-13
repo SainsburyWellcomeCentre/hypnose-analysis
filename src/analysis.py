@@ -291,39 +291,51 @@ class RewardAnalyser:
     def _detect_stage(self):
         """
         Extracts the stage from metadata if available.
+        Handles nested structure of sequences in metadata.
         """
         stage_found = None
-        # Debug output to see what's in the metadata
-        print("Checking stage in metadata...")
+        sequences = self.session_settings.iloc[0]['metadata'].sequences
         
-        # Check if sequences exists and has content
-        if 'sequences' in self.session_settings.iloc[0]['metadata']:
-            sequences = self.session_settings.iloc[0]['metadata'].sequences
-            
-            # If sequences is a list, look through each item
-            if isinstance(sequences, list):
-                for seq in sequences:
-                    if isinstance(seq, dict) and 'name' in seq:
-                        print(f"Found sequence name: {seq['name']}")
-                        match = re.search(r'_Stage(\d+)', seq['name'])
-                        if match:
-                            stage_found = match.group(1)
-                            print(f"Detected stage: {stage_found}")
-                            break
+        # Handle the nested list structure
+        if isinstance(sequences, list):
+            # Iterate through outer list
+            for seq_group in sequences:
+                if isinstance(seq_group, list):
+                    # Iterate through inner list
+                    for seq in seq_group:
+                        if isinstance(seq, dict) and 'name' in seq:
+                            print(f"Found sequence name: {seq['name']}")
+                            match = re.search(r'_Stage(\d+)', seq['name'])
+                            if match:
+                                stage_found = match.group(1)
+                                print(f"Detected stage: {stage_found}")
+                                return stage_found
+                elif isinstance(seq_group, dict) and 'name' in seq_group:
+                    # Handle case where outer list contains dicts directly
+                    print(f"Found sequence name: {seq_group['name']}")
+                    match = re.search(r'_Stage(\d+)', seq_group['name'])
+                    if match:
+                        stage_found = match.group(1)
+                        print(f"Detected stage: {stage_found}")
+                        return stage_found
         
-        if stage_found is None:
-            print("Warning: Could not detect stage from metadata, defaulting to 'Unknown'")
-            
-        return stage_found if stage_found else "Unknown"    
+        print(f"Final stage detected: {stage_found}")
+        return stage_found if stage_found else "Unknown"
 
     def run(self, data_path, reward_a=8.0, reward_b=8.0):
         """
         Run the appropriate reward analysis based on stage detection.
         """
+        print("Running stage detection...")
         stage = self._detect_stage()
+        print(f"Stage detection result: '{stage}'")
+        print(f"Type of stage: {type(stage)}")
+        
         if stage == "1":
+            print("Running stage 1 analyzer")
             self._reward_analyser_stage1(data_path, reward_a, reward_b)
         else:
+            print(f"Running stage {stage} analyzer (stage 2-8)")
             self._reward_analyser_stage2to8(data_path, reward_a, reward_b)
 
 if __name__ == "__main__":
