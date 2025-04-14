@@ -85,60 +85,6 @@ class RewardAnalyser:
         Stage2-8: Full session data analysis (reward-analyser-stage2to8).
         With improved error handling for missing or empty data.
         """
-    
-        def calculate_overall_decision_accuracy(events_df):
-            """
-            Calculate decision accuracy for r1/r2 trials.
-            """
-            events_df = events_df.sort_values('timestamp').reset_index(drop=True)
-            r1_correct = 0
-            r1_total = 0
-            r2_correct = 0
-            r2_total = 0
-            end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
-    
-            for end_idx in end_initiation_indices:
-                closest_valve_idx = None
-                trial_type = None
-                for i in range(end_idx - 1, -1, -1):
-                    if events_df.loc[i, 'r1_olf_valve']:
-                        closest_valve_idx = i
-                        trial_type = 'r1'
-                        break
-                    elif events_df.loc[i, 'r2_olf_valve']:
-                        closest_valve_idx = i
-                        trial_type = 'r2'
-                        break
-                if closest_valve_idx is None:
-                    continue
-                if trial_type == 'r1':
-                    r1_total += 1
-                else:
-                    r2_total += 1
-                for j in range(end_idx + 1, len(events_df)):
-                    if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
-                        if trial_type == 'r1' and events_df.loc[j, 'r1_poke']:
-                            r1_correct += 1
-                        elif trial_type == 'r2' and events_df.loc[j, 'r2_poke']:
-                            r2_correct += 1
-                        break
-    
-            r1_accuracy = (r1_correct / r1_total * 100) if r1_total > 0 else 0
-            r2_accuracy = (r2_correct / r2_total * 100) if r2_total > 0 else 0
-            overall_accuracy = (
-                (r1_correct + r2_correct) / (r1_total + r2_total) * 100 
-                if (r1_total + r2_total) > 0 else 0
-            )
-            return {
-                'r1_total': r1_total,
-                'r1_correct': r1_correct,
-                'r1_accuracy': r1_accuracy,
-                'r2_total': r2_total,
-                'r2_correct': r2_correct,
-                'r2_accuracy': r2_accuracy,
-                'overall_accuracy': overall_accuracy
-            }
-    
         root = Path(data_path)
         behavior_reader = harp.reader.create_reader('device_schemas/behavior.yml', epoch=harp.io.REFERENCE_EPOCH)
         olfactometer_reader = harp.reader.create_reader('device_schemas/olfactometer.yml', epoch=harp.io.REFERENCE_EPOCH)
@@ -469,3 +415,56 @@ def detect_stage(root):
         
     print(f"Final stage detected: {stage_found}")
     return stage_found if stage_found else "Unknown"
+
+def calculate_overall_decision_accuracy(events_df):
+            """
+            Calculate decision accuracy for r1/r2 trials.
+            """
+            events_df = events_df.sort_values('timestamp').reset_index(drop=True)
+            r1_correct = 0
+            r1_total = 0
+            r2_correct = 0
+            r2_total = 0
+            end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+    
+            for end_idx in end_initiation_indices:
+                closest_valve_idx = None
+                trial_type = None
+                for i in range(end_idx - 1, -1, -1):
+                    if events_df.loc[i, 'r1_olf_valve']:
+                        closest_valve_idx = i
+                        trial_type = 'r1'
+                        break
+                    elif events_df.loc[i, 'r2_olf_valve']:
+                        closest_valve_idx = i
+                        trial_type = 'r2'
+                        break
+                if closest_valve_idx is None:
+                    continue
+                if trial_type == 'r1':
+                    r1_total += 1
+                else:
+                    r2_total += 1
+                for j in range(end_idx + 1, len(events_df)):
+                    if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
+                        if trial_type == 'r1' and events_df.loc[j, 'r1_poke']:
+                            r1_correct += 1
+                        elif trial_type == 'r2' and events_df.loc[j, 'r2_poke']:
+                            r2_correct += 1
+                        break
+    
+            r1_accuracy = (r1_correct / r1_total * 100) if r1_total > 0 else 0
+            r2_accuracy = (r2_correct / r2_total * 100) if r2_total > 0 else 0
+            overall_accuracy = (
+                (r1_correct + r2_correct) / (r1_total + r2_total) * 100 
+                if (r1_total + r2_total) > 0 else 0
+            )
+            return {
+                'r1_total': r1_total,
+                'r1_correct': r1_correct,
+                'r1_accuracy': r1_accuracy,
+                'r2_total': r2_total,
+                'r2_correct': r2_correct,
+                'r2_accuracy': r2_accuracy,
+                'overall_accuracy': overall_accuracy
+            }
