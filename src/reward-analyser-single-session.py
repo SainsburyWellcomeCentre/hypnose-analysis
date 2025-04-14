@@ -20,8 +20,9 @@ session_settings = utils.load_json(metadata_reader, root/"SessionSettings")
 analyzer = RewardAnalyser(session_settings)
 
 # Step 3: Run the analysis
+reward_value = 8.0  # Single reward value for both A and B
 analyzer.run(
     data_path=root, 
-    reward_a=8.0,  # Default value, can be adjusted as needed
-    reward_b=8.0   # Default value, can be adjusted as needed
+    reward_a=reward_value,
+    reward_b=reward_value
 )
