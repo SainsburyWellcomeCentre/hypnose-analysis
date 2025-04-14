@@ -380,6 +380,151 @@ if __name__ == "__main__":
 
     print("Please instantiate RewardAnalyser with your session_settings and call .run(data_path, reward_a, reward_b).")
 
+# Add this static method to your RewardAnalyser class
+@staticmethod
+def get_decision_accuracy(data_path):
+    """
+    Static method to calculate decision accuracy for a single session.
+    Can be called without instantiating the class.
+    
+    Parameters:
+    -----------
+    data_path : str or Path
+        Path to session data directory
+        
+    Returns:
+    --------
+    dict
+        Dictionary with accuracy metrics or None if calculation fails
+    """
+    root = Path(data_path)
+    behavior_reader = harp.reader.create_reader('device_schemas/behavior.yml', epoch=harp.io.REFERENCE_EPOCH)
+    olfactometer_reader = harp.reader.create_reader('device_schemas/olfactometer.yml', epoch=harp.io.REFERENCE_EPOCH)
+    
+    try:
+        # Load required data with error handling
+        # Digital input for pokes
+        try:
+            digital_input_data = utils.load(behavior_reader.DigitalInputState, root/"Behavior")
+            digital_input_data.reset_index(inplace=True)
+        except Exception:
+            return None  # Cannot proceed without digital input data
+            
+        # Olfactometer data for valve states
+        try:
+            olfactometer_valves_0 = utils.load(olfactometer_reader.OdorValveState, root/"Olfactometer0")
+            olfactometer_valves_0.reset_index(inplace=True)
+        except Exception:
+            return None  # Cannot proceed without olfactometer data
+            
+        # Heartbeat for timestamps
+        try:
+            heartbeat = utils.load(behavior_reader.TimestampSeconds, root/"Behavior")
+            heartbeat.reset_index(inplace=True)
+        except Exception:
+            return None  # Cannot proceed without timestamps
+            
+        # Calculate time offset
+        real_time_str = root.as_posix().split('/')[-1]
+        real_time_ref_utc = datetime.datetime.strptime(real_time_str, '%Y-%m-%dT%H-%M-%S').replace(tzinfo=datetime.timezone.utc)
+        uk_tz = zoneinfo.ZoneInfo("Europe/London")
+        real_time_ref = real_time_ref_utc.astimezone(uk_tz)
+        
+        start_time_hardware = heartbeat['Time'].iloc[0]
+        start_time_dt = start_time_hardware.to_pydatetime()
+        if start_time_dt.tzinfo is None:
+            start_time_dt = start_time_dt.replace(tzinfo=uk_tz)
+        real_time_offset = real_time_ref - start_time_dt
+        
+        # Apply time offset
+        digital_input_data_abs = digital_input_data.copy()
+        olfactometer_valves_0_abs = olfactometer_valves_0.copy()
+        for df_abs in [digital_input_data_abs, olfactometer_valves_0_abs]:
+            df_abs['Time'] = df_abs['Time'] + real_time_offset
+            
+        # Map heartbeat times
+        heartbeat['Time'] = pd.to_datetime(heartbeat['Time'], errors='coerce')
+        timestamp_to_time = pd.Series(data=heartbeat['Time'].values, index=heartbeat['TimestampSeconds'])
+        
+        def interpolate_time(seconds):
+            int_seconds = int(seconds)
+            fractional_seconds = seconds % 1
+            if int_seconds in timestamp_to_time.index:
+                base_time = timestamp_to_time.loc[int_seconds]
+                return base_time + pd.to_timedelta(fractional_seconds, unit='s')
+            return pd.NaT
+        
+        # Get EndInitiation events
+        end_initiation_frames = []
+        experiment_events_dir = root / "ExperimentEvents"
+        
+        if experiment_events_dir.exists():
+            csv_files = list(experiment_events_dir.glob("*.csv"))
+            
+            for csv_file in csv_files:
+                try:
+                    ev_df = pd.read_csv(csv_file)
+                    if "Seconds" in ev_df.columns:
+                        ev_df = ev_df.sort_values("Seconds").reset_index(drop=True)
+                        ev_df["Time"] = ev_df["Seconds"].apply(interpolate_time)
+                    else:
+                        ev_df["Time"] = pd.to_datetime(ev_df["Time"], errors="coerce")
+                    
+                    ev_df["Time"] = ev_df["Time"] + real_time_offset
+                    
+                    if "Value" in ev_df.columns:
+                        eii_df = ev_df[ev_df["Value"] == "EndInitiation"].copy()
+                        if not eii_df.empty:
+                            eii_df["EndInitiation"] = True
+                            end_initiation_frames.append(eii_df[["Time", "EndInitiation"]])
+                except Exception:
+                    continue
+        
+        if not end_initiation_frames:
+            return None  # Cannot proceed without EndInitiation events
+            
+        combined_end_initiation_df = pd.concat(end_initiation_frames, ignore_index=True)
+        
+        # Prepare event frames for analysis
+        event_frames = []
+        
+        # R1 poke events
+        r1_poke_df = digital_input_data_abs[digital_input_data_abs['DIPort1'] == True][['Time']].copy()
+        r1_poke_df['r1_poke'] = True
+        event_frames.append(r1_poke_df)
+        
+        # R2 poke events
+        r2_poke_df = digital_input_data_abs[digital_input_data_abs['DIPort2'] == True][['Time']].copy()
+        r2_poke_df['r2_poke'] = True
+        event_frames.append(r2_poke_df)
+        
+        # R1 valve events
+        r1_olf_df = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve0'] == True][['Time']].copy()
+        r1_olf_df['r1_olf_valve'] = True
+        event_frames.append(r1_olf_df)
+        
+        # R2 valve events
+        r2_olf_df = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve1'] == True][['Time']].copy()
+        r2_olf_df['r2_olf_valve'] = True
+        event_frames.append(r2_olf_df)
+        
+        # Add EndInitiation events
+        event_frames.append(combined_end_initiation_df)
+        
+        # Combine all events for analysis
+        all_events_df = pd.concat(event_frames, ignore_index=True)
+        all_events_df = all_events_df.fillna(False)
+        all_events_df.sort_values('Time', inplace=True)
+        all_events_df.rename(columns={'Time': 'timestamp'}, inplace=True)
+        all_events_df.reset_index(drop=True, inplace=True)
+        
+        # Calculate and return decision accuracy
+        return calculate_overall_decision_accuracy(all_events_df)
+        
+    except Exception as e:
+        print(f"Error calculating decision accuracy for {data_path}: {e}")
+        return None
+
 def detect_stage(root):
     """
     Extracts the stage from metadata if available.
@@ -417,54 +562,80 @@ def detect_stage(root):
     return stage_found if stage_found else "Unknown"
 
 def calculate_overall_decision_accuracy(events_df):
-            """
-            Calculate decision accuracy for r1/r2 trials.
-            """
-            events_df = events_df.sort_values('timestamp').reset_index(drop=True)
-            r1_correct = 0
-            r1_total = 0
-            r2_correct = 0
-            r2_total = 0
-            end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+    """
+    Calculate decision accuracy for r1/r2 trials.
     
-            for end_idx in end_initiation_indices:
-                closest_valve_idx = None
-                trial_type = None
-                for i in range(end_idx - 1, -1, -1):
-                    if events_df.loc[i, 'r1_olf_valve']:
-                        closest_valve_idx = i
-                        trial_type = 'r1'
-                        break
-                    elif events_df.loc[i, 'r2_olf_valve']:
-                        closest_valve_idx = i
-                        trial_type = 'r2'
-                        break
-                if closest_valve_idx is None:
-                    continue
-                if trial_type == 'r1':
-                    r1_total += 1
-                else:
-                    r2_total += 1
-                for j in range(end_idx + 1, len(events_df)):
-                    if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
-                        if trial_type == 'r1' and events_df.loc[j, 'r1_poke']:
-                            r1_correct += 1
-                        elif trial_type == 'r2' and events_df.loc[j, 'r2_poke']:
-                            r2_correct += 1
-                        break
+    Parameters:
+    -----------
+    events_df : pandas.DataFrame
+        DataFrame containing trial events with columns: 'timestamp', 'EndInitiation',
+        'r1_olf_valve', 'r2_olf_valve', 'r1_poke', 'r2_poke'
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing accuracy metrics for r1, r2, and overall trials
+    """
+    # Ensure events are in chronological order
+    events_df = events_df.sort_values('timestamp').reset_index(drop=True)
     
-            r1_accuracy = (r1_correct / r1_total * 100) if r1_total > 0 else 0
-            r2_accuracy = (r2_correct / r2_total * 100) if r2_total > 0 else 0
-            overall_accuracy = (
-                (r1_correct + r2_correct) / (r1_total + r2_total) * 100 
-                if (r1_total + r2_total) > 0 else 0
-            )
-            return {
-                'r1_total': r1_total,
-                'r1_correct': r1_correct,
-                'r1_accuracy': r1_accuracy,
-                'r2_total': r2_total,
-                'r2_correct': r2_correct,
-                'r2_accuracy': r2_accuracy,
-                'overall_accuracy': overall_accuracy
-            }
+    # Initialize counters
+    r1_correct = 0
+    r1_total = 0
+    r2_correct = 0
+    r2_total = 0
+    
+    # Find all trial end points
+    end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+
+    # Process each trial
+    for end_idx in end_initiation_indices:
+        # Determine trial type (r1 or r2) by finding the most recent valve activation
+        closest_valve_idx = None
+        trial_type = None
+        for i in range(end_idx - 1, -1, -1):
+            if events_df.loc[i, 'r1_olf_valve']:
+                closest_valve_idx = i
+                trial_type = 'r1'
+                break
+            elif events_df.loc[i, 'r2_olf_valve']:
+                closest_valve_idx = i
+                trial_type = 'r2'
+                break
+                
+        # Skip if no valve activation found before this trial end
+        if closest_valve_idx is None:
+            continue
+            
+        # Count trial by type
+        if trial_type == 'r1':
+            r1_total += 1
+        else:
+            r2_total += 1
+            
+        # Find the first poke after trial end
+        for j in range(end_idx + 1, len(events_df)):
+            if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
+                # Correct if poke matches trial type
+                if trial_type == 'r1' and events_df.loc[j, 'r1_poke']:
+                    r1_correct += 1
+                elif trial_type == 'r2' and events_df.loc[j, 'r2_poke']:
+                    r2_correct += 1
+                break
+
+    # Calculate accuracy percentages with safety checks for division by zero
+    r1_accuracy = (r1_correct / r1_total * 100) if r1_total > 0 else 0
+    r2_accuracy = (r2_correct / r2_total * 100) if r2_total > 0 else 0
+    overall_accuracy = ((r1_correct + r2_correct) / (r1_total + r2_total) * 100) if (r1_total + r2_total) > 0 else 0
+    
+    # Return detailed accuracy metrics
+    return {
+        'r1_total': r1_total,
+        'r1_correct': r1_correct,
+        'r1_accuracy': r1_accuracy,
+        'r2_total': r2_total,
+        'r2_correct': r2_correct,
+        'r2_accuracy': r2_accuracy,
+        'overall_accuracy': overall_accuracy
+    }
+
