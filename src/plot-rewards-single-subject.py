@@ -175,7 +175,7 @@ def process_subject_sessions(subject_folder):
     sessions_df.index.name = 'session_id'
     return sessions_df
 
-def plot_rewards_by_date(sessions_df, output_file=None):
+def plot_rewards_by_date(sessions_df, output_file=None, subject_name=None):
     """
     Plot total rewards by session date, showing all days in the date range.
     Colors points based on training stage.
@@ -183,6 +183,7 @@ def plot_rewards_by_date(sessions_df, output_file=None):
     Args:
         sessions_df: DataFrame with session data
         output_file: Optional path to save the plot
+        subject_name: Name of the subject for plot title
     """
     # Check if DataFrame is empty or missing required columns
     if sessions_df.empty:
@@ -266,6 +267,13 @@ def plot_rewards_by_date(sessions_df, output_file=None):
     
     # Format the plot
     ax.set_ylabel('Total Rewards')
+    
+    # Add title with subject name if provided
+    if subject_name:
+        ax.set_title(f'{subject_name}')
+    else:
+        ax.set_title('')
+        
     ax.grid(axis='y', linestyle='--', alpha=0.7)
     
     # Remove top and bottom spines
@@ -289,6 +297,17 @@ def main():
     parser.add_argument("--output", "-o", help="Path to save the output plot (optional)")
     args = parser.parse_args()
     
+    # Extract subject name from folder path and keep only the "sub-XXX" part
+    subject_folder = Path(args.subject_folder)
+    full_subject_name = subject_folder.name
+    
+    # Use regex to extract just the "sub-XXX" part
+    subject_match = re.match(r'(sub-\d+).*', full_subject_name)
+    if subject_match:
+        subject_name = subject_match.group(1)
+    else:
+        subject_name = full_subject_name  # Fallback to full name if pattern doesn't match
+    
     # Process subject sessions
     sessions_df = process_subject_sessions(args.subject_folder)
     
@@ -311,8 +330,8 @@ def main():
     else:
         print("No columns available to display.")
     
-    # Plot rewards by date
-    plot_rewards_by_date(sessions_df, args.output)
+    # Plot rewards by date, passing subject name for title
+    plot_rewards_by_date(sessions_df, args.output, subject_name)
     
     # Save CSV of sessions data
     if args.output:
