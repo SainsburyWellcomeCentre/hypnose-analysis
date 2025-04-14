@@ -1,0 +1,265 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import pandas as pd
+import argparse
+import re
+from pathlib import Path
+import harp
+import utils
+
+def process_subject_sessions(subject_folder):
+    """
+    Process all sessions for a subject and return a DataFrame with rewards data
+    
+    Args:
+        subject_folder: Path to the subject's data folder
+    
+    Returns:
+        DataFrame with session information including reward counts
+    """
+    base_dir = Path(subject_folder)
+    
+    # Find all session directories for this subject, filtering out non-directories
+    session_dirs = [d for d in base_dir.glob('ses-*_date-*/behav/*') if d.is_dir()]
+    
+    print(f"Found {len(session_dirs)} sessions for subject {base_dir.name}")
+    
+    # Dictionary to store processed data for each session
+    sessions_data = {}
+    
+    # Group directories by session_id
+    session_groups = {}
+    for session_dir in session_dirs:
+        # Extract session ID from path
+        session_match = re.search(r'ses-(\d+)_date-(\d+)', str(session_dir))
+        if session_match:
+            session_id = session_match.group(1)
+            session_date = session_match.group(2)
+        else:
+            # Use directory name as fallback
+            session_id = session_dir.parent.name
+        
+        # Add directory to the corresponding session group
+        if session_id not in session_groups:
+            session_groups[session_id] = []
+        session_groups[session_id].append(session_dir)
+    
+    # Process each session (potentially with multiple files)
+    for session_id, dirs in sorted(session_groups.items(), key=lambda x: int(x[0]) if x[0].isdigit() else float('inf')):
+        try:
+            print(f"\nProcessing session: {session_id} with {len(dirs)} directories")
+            
+            # Create readers for data formats
+            behavior_reader = harp.reader.create_reader('device_schemas/behavior.yml', epoch=harp.io.REFERENCE_EPOCH)
+            
+            # Initialize counters and data containers for this session
+            r1_poke_count_total = 0
+            r2_poke_count_total = 0
+            r1_reward_count_total = 0
+            r2_reward_count_total = 0
+            
+            total_session_duration_sec = 0
+            earliest_timestamp = None
+            latest_timestamp = None
+            
+            # Store the first directory path for reference
+            first_dir = dirs[0]
+            
+            # Process each directory within the session
+            for session_dir in dirs:
+                print(f"  Processing directory: {session_dir}")
+                
+                # Load the data streams
+                try:
+                    digital_input_data = utils.load(behavior_reader.DigitalInputState, session_dir/"Behavior")
+                    if digital_input_data is not None:
+                        r1_poke_count = digital_input_data['DIPort1'].sum() if 'DIPort1' in digital_input_data else 0
+                        r2_poke_count = digital_input_data['DIPort2'].sum() if 'DIPort2' in digital_input_data else 0
+                        r1_poke_count_total += r1_poke_count
+                        r2_poke_count_total += r2_poke_count
+                except Exception:
+                    print(f"  No digital_input_data found in {session_dir}")
+                
+                try:
+                    heartbeat = utils.load(behavior_reader.TimestampSeconds, session_dir/"Behavior")
+                    if not heartbeat.empty:
+                        start_time = heartbeat['TimestampSeconds'].iloc[0]
+                        end_time = heartbeat['TimestampSeconds'].iloc[-1]
+                        
+                        # Calculate duration for this directory
+                        dir_duration = end_time - start_time
+                        total_session_duration_sec += dir_duration
+                        
+                        # Also keep track of global earliest/latest for reference
+                        if earliest_timestamp is None or start_time < earliest_timestamp:
+                            earliest_timestamp = start_time
+                        
+                        if latest_timestamp is None or end_time > latest_timestamp:
+                            latest_timestamp = end_time
+                        
+                        print(f"  Directory duration: {dir_duration:.2f} seconds")
+                except Exception as e:
+                    print(f"  Error loading heartbeat from {session_dir}: {e}")
+                
+                # Process reward events
+                try:
+                    pulse_supply_1 = utils.load(behavior_reader.PulseSupplyPort1, session_dir/"Behavior")
+                    r1_reward_count_total += len(pulse_supply_1)
+                except Exception:
+                    pass
+                
+                try:
+                    pulse_supply_2 = utils.load(behavior_reader.PulseSupplyPort2, session_dir/"Behavior")
+                    r2_reward_count_total += len(pulse_supply_2)
+                except Exception:
+                    pass
+            
+            # Calculate session duration across all files
+            if total_session_duration_sec > 0:
+                session_duration_sec = total_session_duration_sec
+                
+                # Convert to hours, minutes, seconds
+                hours = int(session_duration_sec // 3600)
+                minutes = int((session_duration_sec % 3600) // 60)
+                seconds = int(session_duration_sec % 60)
+                
+                duration_str = f"{hours}h {minutes}m {seconds}s"
+                
+                # Also calculate total timespan (for reference)
+                if earliest_timestamp is not None and latest_timestamp is not None:
+                    total_span_sec = latest_timestamp - earliest_timestamp
+                    print(f"  Total session duration (sum): {duration_str} ({session_duration_sec:.2f} sec)")
+                    print(f"  Total session timespan (start to end): {total_span_sec:.2f} sec")
+            else:
+                session_duration_sec = None
+                duration_str = "Unknown"
+            
+            # Extract date from directory name
+            date_match = re.search(r'date-(\d{8})', str(first_dir))
+            if date_match:
+                date_str = date_match.group(1)
+                # Format date as YYYY-MM-DD
+                formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+            else:
+                formatted_date = first_dir.stem  # Use directory name as fallback
+            
+            # Store processed results in dictionary
+            sessions_data[session_id] = {
+                'dir': first_dir,  # Using the first directory as reference
+                'date': formatted_date,
+                'num_files': len(dirs),
+                'duration_sec': session_duration_sec,
+                'duration': duration_str,
+                'r1_pokes': r1_poke_count_total,
+                'r2_pokes': r2_poke_count_total, 
+                'r1_rewards': r1_reward_count_total,
+                'r2_rewards': r2_reward_count_total,
+            }
+            
+            print(f"Successfully processed session {session_id}")
+            
+        except Exception as e:
+            print(f"Error processing session {session_id}: {e}")
+    
+    # Create DataFrame from sessions data
+    sessions_df = pd.DataFrame.from_dict(sessions_data, orient='index')
+    sessions_df.index.name = 'session_id'
+    return sessions_df
+
+def plot_rewards_by_date(sessions_df, output_file=None):
+    """
+    Plot total rewards by session date, showing all days in the date range
+    
+    Args:
+        sessions_df: DataFrame with session data
+        output_file: Optional path to save the plot
+    """
+    # Add a column for total rewards and convert the date to a datetime object
+    sessions_df['total_rewards'] = sessions_df['r1_rewards'] + sessions_df['r2_rewards']
+    sessions_df['date'] = pd.to_datetime(sessions_df['date'])
+    
+    # Extract only the calendar date (ignoring time) for each session
+    sessions_df['calendar_date'] = sessions_df['date'].dt.date
+    
+    # Add a column for the day of the week
+    sessions_df['day_of_week'] = pd.to_datetime(sessions_df['calendar_date']).dt.day_name()
+    
+    # Create a complete date range from the first to the last session date
+    full_date_range = pd.date_range(start=sessions_df['calendar_date'].min(), 
+                                   end=sessions_df['calendar_date'].max(), freq='D')
+    
+    # Create a new DataFrame with the full date range
+    full_sessions_df = pd.DataFrame({'calendar_date': full_date_range.date})
+    
+    # Merge the original sessions_df with the full date range DataFrame
+    full_sessions_df = full_sessions_df.merge(sessions_df, on='calendar_date', how='left')
+    
+    # Fill missing day_of_week values for the full date range
+    full_sessions_df['day_of_week'] = pd.to_datetime(full_sessions_df['calendar_date']).dt.day_name()
+    
+    # Plot total rewards vs. session date
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.scatter(full_sessions_df['calendar_date'], full_sessions_df['total_rewards'], 
+               color='blue', alpha=0.7, edgecolor='black', s=60)
+    
+    # Format the x-axis with custom tick labels
+    dates = full_sessions_df['calendar_date']
+    
+    # Create custom tick labels with month/day and weekday
+    date_labels = []
+    for date in dates:
+        dt = pd.to_datetime(date)
+        month_day = dt.strftime('%m/%d')
+        weekday = dt.strftime('%a')
+        date_labels.append(f"{month_day} - {weekday}")
+    
+    # Set the x-ticks and labels
+    ax.set_xticks([pd.Timestamp(d) for d in dates])
+    ax.set_xticklabels(date_labels, rotation=45, ha='right')
+    
+    # Format the plot
+    ax.set_ylabel('Total Rewards')
+    ax.set_title('Total Rewards by Session')
+    ax.grid(axis='y', linestyle='--', alpha=0.7)
+    
+    # Add summary statistics
+    total_sessions = len(sessions_df)
+    total_rewards = sessions_df['total_rewards'].sum()
+    avg_rewards = sessions_df['total_rewards'].mean()
+    
+    # Format the plot
+    fig.tight_layout()
+    
+    # Save the plot if an output file is specified
+    if output_file:
+        plt.savefig(output_file, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {output_file}")
+    
+    # Show the plot
+    plt.show()
+
+def main():
+    parser = argparse.ArgumentParser(description="Plot total rewards across days for a subject")
+    parser.add_argument("subject_folder", help="Path to the subject's data folder")
+    parser.add_argument("--output", "-o", help="Path to save the output plot (optional)")
+    args = parser.parse_args()
+    
+    # Process subject sessions
+    sessions_df = process_subject_sessions(args.subject_folder)
+    
+    # Display summary table
+    print("\nSummary of sessions:")
+    print(sessions_df[['date', 'duration', 'r1_rewards', 'r2_rewards']].to_string())
+    
+    # Plot rewards by date
+    plot_rewards_by_date(sessions_df, args.output)
+    
+    # Save CSV of sessions data
+    if args.output:
+        csv_path = str(Path(args.output).with_suffix('.csv'))
+        sessions_df.to_csv(csv_path)
+        print(f"Session data saved to {csv_path}")
+
+if __name__ == "__main__":
+    main()
