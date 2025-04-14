@@ -548,6 +548,23 @@ if __name__ == "__main__":
 
     print("Please instantiate RewardAnalyser with your session_settings and call .run(data_path, reward_a, reward_b).")
 
+# Add module-level function to expose the static method
+def get_decision_accuracy(data_path):
+    """
+    Calculate decision accuracy for a single session.
+    
+    Parameters:
+    -----------
+    data_path : str or Path
+        Path to session data directory
+        
+    Returns:
+    --------
+    dict
+        Dictionary with accuracy metrics or None if calculation fails
+    """
+    return RewardAnalyser.get_decision_accuracy(data_path)
+
 def detect_stage(root):
     """
     Extracts the stage from metadata if available.
