@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 import harp
 import utils
+from analysis import detect_stage
 
 def process_subject_sessions(subject_folder):
     """
@@ -62,9 +63,27 @@ def process_subject_sessions(subject_folder):
             total_session_duration_sec = 0
             earliest_timestamp = None
             latest_timestamp = None
+            session_duration_sec = None
+            duration_str = "Unknown"
             
             # Store the first directory path for reference
             first_dir = dirs[0]
+
+            # Extract date from directory name first, so it's available regardless of errors
+            date_match = re.search(r'date-(\d{8})', str(first_dir))
+            if date_match:
+                date_str = date_match.group(1)
+                # Format date as YYYY-MM-DD
+                formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
+            else:
+                formatted_date = first_dir.stem  # Use directory name as fallback
+
+            # Detect stage for this session
+            try:
+                stage = detect_stage(first_dir)
+            except Exception as e:
+                print(f"Error detecting stage for session {session_id}: {e}")
+                stage = "Unknown"
             
             # Process each directory within the session
             for session_dir in dirs:
@@ -131,22 +150,10 @@ def process_subject_sessions(subject_folder):
                     total_span_sec = latest_timestamp - earliest_timestamp
                     print(f"  Total session duration (sum): {duration_str} ({session_duration_sec:.2f} sec)")
                     print(f"  Total session timespan (start to end): {total_span_sec:.2f} sec")
-            else:
-                session_duration_sec = None
-                duration_str = "Unknown"
             
-            # Extract date from directory name
-            date_match = re.search(r'date-(\d{8})', str(first_dir))
-            if date_match:
-                date_str = date_match.group(1)
-                # Format date as YYYY-MM-DD
-                formatted_date = f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]}"
-            else:
-                formatted_date = first_dir.stem  # Use directory name as fallback
-            
-            # Store processed results in dictionary
+            # Now create the dictionary after all the variables have been properly set
             sessions_data[session_id] = {
-                'dir': first_dir,  # Using the first directory as reference
+                'dir': first_dir,
                 'date': formatted_date,
                 'num_files': len(dirs),
                 'duration_sec': session_duration_sec,
@@ -155,6 +162,7 @@ def process_subject_sessions(subject_folder):
                 'r2_pokes': r2_poke_count_total, 
                 'r1_rewards': r1_reward_count_total,
                 'r2_rewards': r2_reward_count_total,
+                'stage': stage
             }
             
             print(f"Successfully processed session {session_id}")
@@ -169,12 +177,26 @@ def process_subject_sessions(subject_folder):
 
 def plot_rewards_by_date(sessions_df, output_file=None):
     """
-    Plot total rewards by session date, showing all days in the date range
+    Plot total rewards by session date, showing all days in the date range.
+    Colors points based on training stage.
     
     Args:
         sessions_df: DataFrame with session data
         output_file: Optional path to save the plot
     """
+    # Check if DataFrame is empty or missing required columns
+    if sessions_df.empty:
+        print("No data available to plot.")
+        return
+    
+    # Check if required columns exist
+    required_columns = ['r1_rewards', 'r2_rewards', 'date']
+    missing_columns = [col for col in required_columns if col not in sessions_df.columns]
+    
+    if missing_columns:
+        print(f"Missing required columns for plotting: {missing_columns}")
+        return
+        
     # Add a column for total rewards and convert the date to a datetime object
     sessions_df['total_rewards'] = sessions_df['r1_rewards'] + sessions_df['r2_rewards']
     sessions_df['date'] = pd.to_datetime(sessions_df['date'])
@@ -198,10 +220,34 @@ def plot_rewards_by_date(sessions_df, output_file=None):
     # Fill missing day_of_week values for the full date range
     full_sessions_df['day_of_week'] = pd.to_datetime(full_sessions_df['calendar_date']).dt.day_name()
     
+    # Define a color map for different stages
+    stage_colors = {
+        '1': 'lightblue',
+        '2': 'lightgreen',
+        '3': 'salmon',
+        '4': 'purple',
+        '5': 'orange',
+        '6': 'brown',
+        '7': 'pink',
+        '8': 'gray',
+        'Unknown': 'black'
+    }
+    
     # Plot total rewards vs. session date
     fig, ax = plt.subplots(figsize=(14, 6))
-    ax.scatter(full_sessions_df['calendar_date'], full_sessions_df['total_rewards'], 
-               color='blue', alpha=0.7, edgecolor='black', s=60)
+    
+    # Group by stage and plot each group with its color
+    stages_present = set()
+    has_data = ~full_sessions_df['total_rewards'].isna()
+    
+    for stage in stage_colors:
+        mask = (full_sessions_df['stage'] == stage) & has_data
+        if mask.any():
+            stages_present.add(stage)
+            ax.scatter(full_sessions_df.loc[mask, 'calendar_date'], 
+                       full_sessions_df.loc[mask, 'total_rewards'], 
+                       color=stage_colors[stage], alpha=0.7, edgecolor='black',
+                       s=80, label=f'Stage {stage}')
     
     # Format the x-axis with custom tick labels
     dates = full_sessions_df['calendar_date']
@@ -220,13 +266,11 @@ def plot_rewards_by_date(sessions_df, output_file=None):
     
     # Format the plot
     ax.set_ylabel('Total Rewards')
-    ax.set_title('Total Rewards by Session')
     ax.grid(axis='y', linestyle='--', alpha=0.7)
     
-    # Add summary statistics
-    total_sessions = len(sessions_df)
-    total_rewards = sessions_df['total_rewards'].sum()
-    avg_rewards = sessions_df['total_rewards'].mean()
+    # Remove top and bottom spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
     
     # Format the plot
     fig.tight_layout()
@@ -248,9 +292,24 @@ def main():
     # Process subject sessions
     sessions_df = process_subject_sessions(args.subject_folder)
     
-    # Display summary table
+    # Check if DataFrame is empty
+    if sessions_df.empty:
+        print("\nNo session data was successfully processed.")
+        return
+    
+    # Display summary table - update to use only the columns that actually exist
     print("\nSummary of sessions:")
-    print(sessions_df[['date', 'duration', 'r1_rewards', 'r2_rewards']].to_string())
+    
+    # Check if columns exist before trying to access them
+    display_columns = []
+    for col in ['date', 'duration', 'r1_rewards', 'r2_rewards', 'stage']:
+        if col in sessions_df.columns:
+            display_columns.append(col)
+    
+    if display_columns:
+        print(sessions_df[display_columns].to_string())
+    else:
+        print("No columns available to display.")
     
     # Plot rewards by date
     plot_rewards_by_date(sessions_df, args.output)
