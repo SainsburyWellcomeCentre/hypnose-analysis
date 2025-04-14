@@ -94,3 +94,20 @@ def load_csv(reader: Csv, root: Path) -> pd.DataFrame:
     print([file for file in glob(pattern)])
     data = pd.concat([reader.read(Path(file)) for file in glob(pattern)])
     return data
+
+def create_unique_series(events_df):
+    """Creates a unique-timestamp boolean series adding slight offsets to duplicate timestamps."""
+    timestamps = events_df['Time']
+    if len(timestamps) != len(set(timestamps)):
+        unique_timestamps = []
+        seen = set()
+        for ts in timestamps:
+            counter = 0
+            ts_modified = ts
+            while ts_modified in seen:
+                counter += 1
+                ts_modified = ts + pd.Timedelta(microseconds=counter)
+            seen.add(ts_modified)
+            unique_timestamps.append(ts_modified)
+        timestamps = unique_timestamps
+    return pd.Series(True, index=timestamps)
