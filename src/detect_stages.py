@@ -4,39 +4,7 @@ import argparse
 import pandas as pd
 from pathlib import Path
 from analysis import detect_stage
-
-def find_session_roots(subject_folder):
-    """
-    Find all session root directories for a subject following the structure:
-    subject_folder/ses-*_date-*/behav/*
-    Returns a list of tuples: (session_id, session_date, session_path)
-    """
-    subject_path = Path(subject_folder)
-    session_roots = []
-    
-    # Find all session directories following pattern 'ses-*_date-*'
-    session_dirs = list(subject_path.glob('ses-*_date-*/behav/*'))
-    
-    for session_dir in session_dirs:
-        if not session_dir.is_dir() or not (session_dir / "SessionSettings").exists():
-            continue
-            
-        # Extract session ID and date from parent directory names
-        parent_dir = session_dir.parent.parent.name
-        try:
-            # Parse the ses-X_date-YYYYMMDD format
-            parts = parent_dir.split('_')
-            session_id = parts[0].replace('ses-', '')
-            session_date = parts[1].replace('date-', '')
-            session_roots.append((session_id, session_date, session_dir))
-        except (IndexError, AttributeError):
-            print(f"Warning: Could not parse session information from {parent_dir}")
-            session_roots.append(("unknown", "unknown", session_dir))
-    
-    # Sort session roots by session_id (numerically if possible)
-    session_roots.sort(key=lambda x: int(x[0]) if x[0].isdigit() else float('inf'))
-    
-    return session_roots
+import utils
 
 def main(subject_folder, output_file=None):
     """
@@ -46,7 +14,7 @@ def main(subject_folder, output_file=None):
     subject_path = Path(subject_folder)
     print(f"Processing subject folder: {subject_path}")
     
-    session_roots = find_session_roots(subject_path)
+    session_roots = utils.find_session_roots(subject_path)
     
     if not session_roots:
         print(f"No valid session directories found in {subject_path}")
