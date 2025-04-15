@@ -12,7 +12,7 @@ import os
 # Add the parent directory to sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 import utils  # Now Python can find the utils module
-from analysis import detect_stage
+from ..analysis import detect_stage
 
 def process_subject_sessions(subject_folder):
     """

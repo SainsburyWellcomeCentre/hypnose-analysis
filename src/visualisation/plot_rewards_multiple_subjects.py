@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 import harp
 import utils
-from analysis import detect_stage
+from analyse import detect_stage
 import numpy as np
 
 def process_subject_sessions(subject_folder):

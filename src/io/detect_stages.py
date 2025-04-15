@@ -3,8 +3,8 @@ import json
 import argparse
 import pandas as pd
 from pathlib import Path
-from analysis import detect_stage
-import utils
+from ..analysis import detect_stage
+from .. import utils
 
 def main(subject_folder, output_file=None):
     """

@@ -7,8 +7,8 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
 import matplotlib.dates as mdates
-from analysis import get_decision_accuracy
-import utils
+from ..analysis import get_decision_accuracy
+from .. import utils
 
 def calculate_session_accuracy(session_path):
     """

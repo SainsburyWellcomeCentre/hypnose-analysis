@@ -2,10 +2,11 @@ import argparse
 import pandas as pd
 import numpy as np
 from pathlib import Path
-import utils
-from analysis import RewardAnalyser, get_decision_accuracy, detect_stage
 import warnings
 import harp
+
+from src import utils
+from src.analysis import RewardAnalyser, get_decision_accuracy, detect_stage
 
 # Filter out specific warnings
 warnings.filterwarnings(
@@ -107,7 +108,10 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         
         # Reload data to extract counts (this is more reliable than capturing print output)
         try:
-            behavior_reader = harp.reader.create_reader('device_schemas/behavior.yml', epoch=harp.io.REFERENCE_EPOCH)
+            # Use absolute path to device_schemas directory in project root
+            project_root = Path(__file__).resolve().parents[2]  # Go up from src/analyse to the project root
+            schema_path = project_root / 'device_schemas/behavior.yml'
+            behavior_reader = harp.reader.create_reader(str(schema_path), epoch=harp.io.REFERENCE_EPOCH)
             
             # Fix: Changed 'root' to 'session_dir' to correctly reference the current session directory
             pulse_supply_1 = utils.load(behavior_reader.PulseSupplyPort1, session_dir/"Behavior")
