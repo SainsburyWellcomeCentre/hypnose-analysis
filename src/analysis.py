@@ -200,32 +200,48 @@ class RewardAnalyser:
         
         if experiment_events_dir.exists():
             csv_files = list(experiment_events_dir.glob("*.csv"))
+            print(f"Found {len(csv_files)} experiment event files")
             
             for csv_file in csv_files:
                 try:
                     ev_df = pd.read_csv(csv_file)
+                    print(f"Processing event file: {csv_file.name} with {len(ev_df)} rows")
+                    
+                    # Use Seconds field if available, otherwise use Time field
                     if "Seconds" in ev_df.columns and not timestamp_to_time.empty:
                         ev_df = ev_df.sort_values("Seconds").reset_index(drop=True)
                         ev_df["Time"] = ev_df["Seconds"].apply(interpolate_time)
+                        print(f"Using Seconds column for interpolation")
                     else:
                         ev_df["Time"] = pd.to_datetime(ev_df["Time"], errors="coerce")
+                        print(f"Using Time column directly")
                     
                     if "Time" in ev_df.columns:
                         ev_df["Time"] = ev_df["Time"] + real_time_offset
                         
                         if "Value" in ev_df.columns:
+                            print(f"Found Value column with values: {ev_df['Value'].unique()}")
                             eii_df = ev_df[ev_df["Value"] == "EndInitiation"].copy()
                             if not eii_df.empty:
+                                print(f"Found {len(eii_df)} EndInitiation events")
                                 eii_df["EndInitiation"] = True
                                 end_initiation_frames.append(eii_df[["Time", "EndInitiation"]])
+                            else:
+                                print("No EndInitiation events found in this file")
+                        else:
+                            print(f"No 'Value' column found in {csv_file.name}")
                 except Exception as e:
                     print(f"Error processing event file {csv_file.name}: {e}")
+        else:
+            print("No ExperimentEvents directory found")
     
         # Safely combine EndInitiation frames
         if len(end_initiation_frames) > 0:
             combined_end_initiation_df = pd.concat(end_initiation_frames, ignore_index=True)
+            print(f"Combined {len(combined_end_initiation_df)} EndInitiation events")
         else:
             combined_end_initiation_df = pd.DataFrame(columns=["Time", "EndInitiation"])
+            print("No EndInitiation events found - cannot identify trial endings")
     
         # Reward counting - safe for empty DataFrames
         num_r1_rewards = pulse_supply_1_abs.shape[0] if not pulse_supply_1_abs.empty else 0
@@ -303,23 +319,52 @@ class RewardAnalyser:
             # Add EndInitiation events if available
             if not combined_end_initiation_df.empty and 'EndInitiation' in combined_end_initiation_df.columns:
                 event_frames.append(combined_end_initiation_df)
+                print(f"Added {len(combined_end_initiation_df)} EndInitiation events")
             
             # Only proceed if we have data to analyze
             if event_frames:
                 all_events_df = pd.concat(event_frames, ignore_index=True)
-                all_events_df = all_events_df.fillna(False)
+                print(f"Combined {len(all_events_df)} total events")
+                
+                # Explicitly add missing columns with default values to prevent errors
+                required_columns = ['timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 'EndInitiation']
+                for col in required_columns:
+                    if col not in all_events_df.columns and col != 'timestamp':
+                        all_events_df[col] = False
+                
+                # Handle the warning about downcasting properly
+                all_events_df = all_events_df.fillna(False).infer_objects(copy=False)
                 all_events_df.sort_values('Time', inplace=True)
                 all_events_df.rename(columns={'Time': 'timestamp'}, inplace=True)
                 all_events_df.reset_index(drop=True, inplace=True)
                 
-                # Calculate decision accuracy
-                accuracy_summary = calculate_overall_decision_accuracy(all_events_df)
+                # Check if we have any valid trial data
+                has_end_initiation = 'EndInitiation' in all_events_df.columns and any(all_events_df['EndInitiation'])
+                has_valve_events = (('r1_olf_valve' in all_events_df.columns and any(all_events_df['r1_olf_valve'])) or
+                                    ('r2_olf_valve' in all_events_df.columns and any(all_events_df['r2_olf_valve'])))
+                has_poke_events = (('r1_poke' in all_events_df.columns and any(all_events_df['r1_poke'])) or
+                                  ('r2_poke' in all_events_df.columns and any(all_events_df['r2_poke'])))
                 
-                # Print accuracy results
-                print("Decision Accuracy (using EndInitiation from experiment events):")
-                print(f"  R1 Trials: {accuracy_summary['r1_total']}, Correct: {accuracy_summary['r1_correct']}, Accuracy: {accuracy_summary['r1_accuracy']:.2f}%")
-                print(f"  R2 Trials: {accuracy_summary['r2_total']}, Correct: {accuracy_summary['r2_correct']}, Accuracy: {accuracy_summary['r2_accuracy']:.2f}%")
-                print(f"  Overall Accuracy: {accuracy_summary['overall_accuracy']:.2f}%")
+                print(f"Data check: EndInitiation events: {has_end_initiation}, " 
+                      f"Valve events: {has_valve_events}, Poke events: {has_poke_events}")
+                
+                if has_end_initiation and has_valve_events and has_poke_events:
+                    # Calculate decision accuracy
+                    accuracy_summary = calculate_overall_decision_accuracy(all_events_df)
+                    
+                    # Print accuracy results
+                    print("Decision Accuracy (using EndInitiation from experiment events):")
+                    print(f"  R1 Trials: {accuracy_summary['r1_total']}, Correct: {accuracy_summary['r1_correct']}, Accuracy: {accuracy_summary['r1_accuracy']:.2f}%")
+                    print(f"  R2 Trials: {accuracy_summary['r2_total']}, Correct: {accuracy_summary['r2_correct']}, Accuracy: {accuracy_summary['r2_accuracy']:.2f}%")
+                    print(f"  Overall Accuracy: {accuracy_summary['overall_accuracy']:.2f}%")
+                else:
+                    if not has_end_initiation:
+                        print("No EndInitiation events found - cannot identify trial endings")
+                    if not has_valve_events:
+                        print("No valve activation events found - cannot identify trial types")
+                    if not has_poke_events:
+                        print("No poke events found - cannot identify animal responses")
+                    print("Unable to calculate decision accuracy for this session due to missing event data.")
             else:
                 print("No event data available for decision accuracy calculation.")
                 
@@ -396,148 +441,298 @@ class RewardAnalyser:
         olfactometer_reader = harp.reader.create_reader('device_schemas/olfactometer.yml', epoch=harp.io.REFERENCE_EPOCH)
         
         try:
-            # Digital input for pokes
+            # Data loading with safe fallbacks for missing data
             try:
                 digital_input_data = utils.load(behavior_reader.DigitalInputState, root/"Behavior")
                 if digital_input_data is None or digital_input_data.empty:
                     print("No digital input data found.")
-                    return None
-                digital_input_data.reset_index(inplace=True)
+                    return {
+                        'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                        'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                        'overall_accuracy': 0
+                    }
+            except ValueError:  # No objects to concatenate - no data
+                digital_input_data = pd.DataFrame(columns=['Time', 'DIPort1', 'DIPort2'])
+                print("No digital input data found.")
             except Exception as e:
                 print(f"Error loading digital input data: {e}")
-                return None
+                return {
+                    'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                    'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                    'overall_accuracy': 0
+                }
             
             # Olfactometer data for valve states
             try:
                 olfactometer_valves_0 = utils.load(olfactometer_reader.OdorValveState, root/"Olfactometer0")
                 if olfactometer_valves_0 is None or olfactometer_valves_0.empty:
                     print("No olfactometer valve state data found.")
-                    return None
-                olfactometer_valves_0.reset_index(inplace=True)
+                    return {
+                        'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                        'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                        'overall_accuracy': 0
+                    }
+            except ValueError:
+                olfactometer_valves_0 = pd.DataFrame(columns=['Time', 'Valve0', 'Valve1'])
+                print("No olfactometer valve state data found.")
             except Exception as e:
                 print(f"Error loading olfactometer data: {e}")
-                return None
+                return {
+                    'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                    'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                    'overall_accuracy': 0
+                }
             
             # Heartbeat for timestamps
             try:
                 heartbeat = utils.load(behavior_reader.TimestampSeconds, root/"Behavior")
                 if heartbeat is None or heartbeat.empty:
                     print("No timestamp data found.")
-                    return None
-                heartbeat.reset_index(inplace=True)
+                    return {
+                        'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                        'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                        'overall_accuracy': 0
+                    }
             except Exception as e:
                 print(f"Error loading timestamp data: {e}")
-                return None
+                return {
+                    'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                    'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                    'overall_accuracy': 0
+                }
             
-            # Process experiment events for EndInitiation
+            # Reset indices for non-empty dataframes
+            for df in [digital_input_data, olfactometer_valves_0, heartbeat]:
+                if not df.empty:
+                    df.reset_index(inplace=True)
+            
+            # Calculate real-time offset only if we have heartbeat data
+            real_time_offset = pd.Timedelta(0)
+            if not heartbeat.empty and 'Time' in heartbeat.columns and len(heartbeat) > 0:
+                try:
+                    real_time_str = root.name
+                    match = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', real_time_str)
+                    if match:
+                        real_time_str = match.group(0)
+                    else:
+                        # Try parent directory
+                        real_time_str = root.parent.name
+                        match = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', real_time_str)
+                        if match:
+                            real_time_str = match.group(0)
+                    
+                    if re.match(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', real_time_str):
+                        real_time_ref_utc = datetime.datetime.strptime(real_time_str, '%Y-%m-%dT%H-%M-%S')
+                        real_time_ref_utc = real_time_ref_utc.replace(tzinfo=datetime.timezone.utc)
+                        uk_tz = zoneinfo.ZoneInfo("Europe/London")
+                        real_time_ref = real_time_ref_utc.astimezone(uk_tz)
+                        
+                        start_time_hardware = heartbeat['Time'].iloc[0]
+                        start_time_dt = start_time_hardware.to_pydatetime()
+                        if start_time_dt.tzinfo is None:
+                            start_time_dt = start_time_dt.replace(tzinfo=uk_tz)
+                        real_time_offset = real_time_ref - start_time_dt
+                except Exception as e:
+                    print(f"Error calculating real-time offset: {e}")
+            
+            # Create absolute time versions with checks for empty DataFrames
+            digital_input_data_abs = digital_input_data.copy() if not digital_input_data.empty else pd.DataFrame()
+            olfactometer_valves_0_abs = olfactometer_valves_0.copy() if not olfactometer_valves_0.empty else pd.DataFrame()
+            
+            # Apply time offset to non-empty DataFrames
+            for df_abs in [digital_input_data_abs, olfactometer_valves_0_abs]:
+                if not df_abs.empty and 'Time' in df_abs.columns:
+                    df_abs['Time'] = df_abs['Time'] + real_time_offset
+            
+            # Map heartbeat times if we have data
+            timestamp_to_time = pd.Series()
+            if not heartbeat.empty and 'Time' in heartbeat.columns and 'TimestampSeconds' in heartbeat.columns:
+                heartbeat['Time'] = pd.to_datetime(heartbeat['Time'], errors='coerce')
+                timestamp_to_time = pd.Series(data=heartbeat['Time'].values, index=heartbeat['TimestampSeconds'])
+            
+            def interpolate_time(seconds):
+                """Interpolate timestamps from seconds, with safety checks"""
+                if timestamp_to_time.empty:
+                    return pd.NaT
+                int_seconds = int(seconds)
+                fractional_seconds = seconds % 1
+                if int_seconds in timestamp_to_time.index:
+                    base_time = timestamp_to_time.loc[int_seconds]
+                    return base_time + pd.to_timedelta(fractional_seconds, unit='s')
+                return pd.NaT
+            
+            # Experiment events - with safety checks
             end_initiation_frames = []
             experiment_events_dir = root / "ExperimentEvents"
+            
             if experiment_events_dir.exists():
                 csv_files = list(experiment_events_dir.glob("*.csv"))
+                print(f"Found {len(csv_files)} experiment event files")
                 
                 for csv_file in csv_files:
                     try:
                         ev_df = pd.read_csv(csv_file)
-                        if "Value" in ev_df.columns:
-                            eii_df = ev_df[ev_df["Value"] == "EndInitiation"].copy()
-                            if not eii_df.empty:
-                                eii_df["EndInitiation"] = True
-                                if "Time" in eii_df.columns:
-                                    eii_df["Time"] = pd.to_datetime(eii_df["Time"], errors="coerce")
+                        print(f"Processing event file: {csv_file.name} with {len(ev_df)} rows")
+                        
+                        # Use Seconds field if available, otherwise use Time field
+                        if "Seconds" in ev_df.columns and not timestamp_to_time.empty:
+                            ev_df = ev_df.sort_values("Seconds").reset_index(drop=True)
+                            ev_df["Time"] = ev_df["Seconds"].apply(interpolate_time)
+                            print(f"Using Seconds column for interpolation")
+                        else:
+                            ev_df["Time"] = pd.to_datetime(ev_df["Time"], errors="coerce")
+                            print(f"Using Time column directly")
+                        
+                        if "Time" in ev_df.columns:
+                            ev_df["Time"] = ev_df["Time"] + real_time_offset
+                            
+                            if "Value" in ev_df.columns:
+                                print(f"Found Value column with values: {ev_df['Value'].unique()}")
+                                eii_df = ev_df[ev_df["Value"] == "EndInitiation"].copy()
+                                if not eii_df.empty:
+                                    print(f"Found {len(eii_df)} EndInitiation events")
+                                    eii_df["EndInitiation"] = True
                                     end_initiation_frames.append(eii_df[["Time", "EndInitiation"]])
                     except Exception as e:
                         print(f"Error processing event file {csv_file.name}: {e}")
+            else:
+                print("No ExperimentEvents directory found")
             
-            # Calculate real-time offset if possible
-            real_time_offset = pd.Timedelta(0)
-            try:
-                real_time_str = root.name
-                match = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', real_time_str)
-                if match:
-                    real_time_str = match.group(0)
-                else:
-                    # Try parent directory
-                    real_time_str = root.parent.name
-                    match = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', real_time_str)
-                    if match:
-                        real_time_str = match.group(0)
-                
-                if re.match(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', real_time_str):
-                    real_time_ref_utc = datetime.datetime.strptime(real_time_str, '%Y-%m-%dT%H-%M-%S')
-                    real_time_ref_utc = real_time_ref_utc.replace(tzinfo=datetime.timezone.utc)
-                    uk_tz = zoneinfo.ZoneInfo("Europe/London")
-                    real_time_ref = real_time_ref_utc.astimezone(uk_tz)
-                    
-                    start_time_hardware = heartbeat['Time'].iloc[0]
-                    start_time_dt = start_time_hardware.to_pydatetime()
-                    if start_time_dt.tzinfo is None:
-                        start_time_dt = start_time_dt.replace(tzinfo=uk_tz)
-                    real_time_offset = real_time_ref - start_time_dt
-            except Exception as e:
-                print(f"Error calculating real-time offset: {e}")
-            
-            # Apply time offset
-            digital_input_data_abs = digital_input_data.copy()
-            olfactometer_valves_0_abs = olfactometer_valves_0.copy()
-            
-            digital_input_data_abs['Time'] = digital_input_data_abs['Time'] + real_time_offset
-            olfactometer_valves_0_abs['Time'] = olfactometer_valves_0_abs['Time'] + real_time_offset
-            
-            # Combine EndInitiation events if any
-            if end_initiation_frames:
+            # Safely combine EndInitiation frames
+            if len(end_initiation_frames) > 0:
                 combined_end_initiation_df = pd.concat(end_initiation_frames, ignore_index=True)
-                combined_end_initiation_df['Time'] = combined_end_initiation_df['Time'] + real_time_offset
+                print(f"Combined {len(combined_end_initiation_df)} EndInitiation events")
             else:
                 combined_end_initiation_df = pd.DataFrame(columns=["Time", "EndInitiation"])
+                print("No EndInitiation events found - cannot identify trial endings")
             
             # Prepare event frames for analysis
             event_frames = []
             
             # Add r1 poke events if available
-            if 'DIPort1' in digital_input_data_abs.columns:
-                r1_poke_df = digital_input_data_abs[digital_input_data_abs['DIPort1'] == True][['Time']].copy()
-                r1_poke_df['r1_poke'] = True
-                event_frames.append(r1_poke_df)
+            if not digital_input_data_abs.empty and 'DIPort1' in digital_input_data_abs.columns:
+                try:
+                    r1_poke_df = digital_input_data_abs[digital_input_data_abs['DIPort1'] == True].copy()
+                    if not r1_poke_df.empty:
+                        r1_poke_df = r1_poke_df[['Time']].copy()
+                        r1_poke_df['r1_poke'] = True
+                        event_frames.append(r1_poke_df)
+                        print(f"Added {len(r1_poke_df)} r1 poke events")
+                except Exception as e:
+                    print(f"Error processing r1 poke events: {e}")
             
             # Add r2 poke events if available
-            if 'DIPort2' in digital_input_data_abs.columns:
-                r2_poke_df = digital_input_data_abs[digital_input_data_abs['DIPort2'] == True][['Time']].copy()
-                r2_poke_df['r2_poke'] = True
-                event_frames.append(r2_poke_df)
+            if not digital_input_data_abs.empty and 'DIPort2' in digital_input_data_abs.columns:
+                try:
+                    r2_poke_df = digital_input_data_abs[digital_input_data_abs['DIPort2'] == True].copy()
+                    if not r2_poke_df.empty:
+                        r2_poke_df = r2_poke_df[['Time']].copy()
+                        r2_poke_df['r2_poke'] = True
+                        event_frames.append(r2_poke_df)
+                        print(f"Added {len(r2_poke_df)} r2 poke events")
+                except Exception as e:
+                    print(f"Error processing r2 poke events: {e}")
             
-            # Add r1 valve events if available
-            if 'Valve0' in olfactometer_valves_0_abs.columns:
-                r1_olf_df = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve0'] == True][['Time']].copy()
-                r1_olf_df['r1_olf_valve'] = True
-                event_frames.append(r1_olf_df)
+            # Add r1 olfactometer valve events if available
+            if not olfactometer_valves_0_abs.empty and 'Valve0' in olfactometer_valves_0_abs.columns:
+                try:
+                    r1_olf_df = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve0'] == True].copy()
+                    if not r1_olf_df.empty:
+                        r1_olf_df = r1_olf_df[['Time']].copy()
+                        r1_olf_df['r1_olf_valve'] = True
+                        event_frames.append(r1_olf_df)
+                        print(f"Added {len(r1_olf_df)} r1 valve events")
+                except Exception as e:
+                    print(f"Error processing r1 valve events: {e}")
             
-            # Add r2 valve events if available
-            if 'Valve1' in olfactometer_valves_0_abs.columns:
-                r2_olf_df = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve1'] == True][['Time']].copy()
-                r2_olf_df['r2_olf_valve'] = True
-                event_frames.append(r2_olf_df)
+            # Add r2 olfactometer valve events if available
+            if not olfactometer_valves_0_abs.empty and 'Valve1' in olfactometer_valves_0_abs.columns:
+                try:
+                    r2_olf_df = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve1'] == True].copy()
+                    if not r2_olf_df.empty:
+                        r2_olf_df = r2_olf_df[['Time']].copy()
+                        r2_olf_df['r2_olf_valve'] = True
+                        event_frames.append(r2_olf_df)
+                        print(f"Added {len(r2_olf_df)} r2 valve events")
+                except Exception as e:
+                    print(f"Error processing r2 valve events: {e}")
             
             # Add EndInitiation events if available
-            if not combined_end_initiation_df.empty:
+            if not combined_end_initiation_df.empty and 'EndInitiation' in combined_end_initiation_df.columns:
                 event_frames.append(combined_end_initiation_df)
             
             # Only proceed if we have data to analyze
             if event_frames:
-                all_events_df = pd.concat(event_frames, ignore_index=True)
-                all_events_df = all_events_df.fillna(False)
-                all_events_df.sort_values('Time', inplace=True)
-                all_events_df.rename(columns={'Time': 'timestamp'}, inplace=True)
-                all_events_df.reset_index(drop=True, inplace=True)
+                try:
+                    all_events_df = pd.concat(event_frames, ignore_index=True)
+                    print(f"Combined {len(all_events_df)} total events")
+                    
+                    # Explicitly add missing columns with default values to prevent errors
+                    required_columns = ['timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 'EndInitiation']
+                    for col in required_columns:
+                        if col not in all_events_df.columns and col != 'timestamp':
+                            all_events_df[col] = False
+                    
+                    # Handle the warning about downcasting properly
+                    all_events_df = all_events_df.fillna(False).infer_objects(copy=False)
+                    all_events_df.sort_values('Time', inplace=True)
+                    all_events_df.rename(columns={'Time': 'timestamp'}, inplace=True)
+                    all_events_df.reset_index(drop=True, inplace=True)
+                    
+                    # Check if we have any valid trial data
+                    has_end_initiation = 'EndInitiation' in all_events_df.columns and any(all_events_df['EndInitiation'])
+                    has_valve_events = (('r1_olf_valve' in all_events_df.columns and any(all_events_df['r1_olf_valve'])) or
+                                        ('r2_olf_valve' in all_events_df.columns and any(all_events_df['r2_olf_valve'])))
+                    has_poke_events = (('r1_poke' in all_events_df.columns and any(all_events_df['r1_poke'])) or
+                                      ('r2_poke' in all_events_df.columns and any(all_events_df['r2_poke'])))
+                    
+                    print(f"Data check: EndInitiation events: {has_end_initiation}, " 
+                          f"Valve events: {has_valve_events}, Poke events: {has_poke_events}")
+                    
+                    if has_end_initiation and has_valve_events and has_poke_events:
+                        # Calculate decision accuracy
+                        accuracy_data = calculate_overall_decision_accuracy(all_events_df)
+                        return accuracy_data
+                    else:
+                        if not has_end_initiation:
+                            print("No EndInitiation events found - cannot identify trial endings")
+                        if not has_valve_events:
+                            print("No valve activation events found - cannot identify trial types")
+                        if not has_poke_events:
+                            print("No poke events found - cannot identify animal responses")
+                        
+                        # Return zeros instead of None for better downstream handling
+                        return {
+                            'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                            'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                            'overall_accuracy': 0
+                        }
                 
-                # Calculate decision accuracy
-                return calculate_overall_decision_accuracy(all_events_df)
+                except Exception as e:
+                    print(f"Error processing event data: {e}")
+                    # Return zeros instead of None
+                    return {
+                        'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                        'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                        'overall_accuracy': 0
+                    }
             else:
                 print("No events available for decision accuracy calculation")
-                return None
+                # Return zeros instead of None
+                return {
+                    'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                    'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                    'overall_accuracy': 0
+                }
         
         except Exception as e:
             print(f"Error during decision accuracy calculation: {e}")
-            return None
+            # Return zeros instead of None
+            return {
+                'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                'overall_accuracy': 0
+            }
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Combine Stage1 & Stage2-8 Reward Analysis.")
@@ -547,6 +742,17 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     print("Please instantiate RewardAnalyser with your session_settings and call .run(data_path, reward_a, reward_b).")
+
+def interpolate_time(seconds):
+    """Interpolate timestamps from seconds, with safety checks"""
+    if timestamp_to_time.empty:
+        return pd.NaT
+    int_seconds = int(seconds)
+    fractional_seconds = seconds % 1
+    if int_seconds in timestamp_to_time.index:
+        base_time = timestamp_to_time.loc[int_seconds]
+        return base_time + pd.to_timedelta(fractional_seconds, unit='s')
+    return pd.NaT
 
 # Add module-level function to expose the static method
 def get_decision_accuracy(data_path):

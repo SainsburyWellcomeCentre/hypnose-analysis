@@ -13,7 +13,7 @@ warnings.filterwarnings(
 
 # Step 1: Load session settings
 metadata_reader = utils.SessionData()
-root = Path('/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-21_date-20250413/behav/2025-04-13T15-34-21')
+root = Path('/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-16_date-20250407/behav/2025-04-07T14-52-48')
 session_settings = utils.load_json(metadata_reader, root/"SessionSettings")
 
 # Step 2: Create analyzer instance
