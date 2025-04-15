@@ -123,6 +123,7 @@ def plot_accuracy(results_df, output_file=None):
 def main(subject_folder, output_file=None, plot_file=None):
     """
     Process a subject folder and calculate decision accuracy for all sessions.
+    Combines results from multiple directories within the same session.
     Saves results to CSV file if output_file is provided.
     """
     subject_path = Path(subject_folder)
@@ -135,66 +136,148 @@ def main(subject_folder, output_file=None, plot_file=None):
         print(f"No valid session directories found in {subject_path}")
         return
     
-    # Create a list to store results
+    # Group sessions by session_id and session_date
+    grouped_sessions = {}
+    for session_id, session_date, session_path in session_roots:
+        key = (session_id, session_date)
+        if key not in grouped_sessions:
+            grouped_sessions[key] = []
+        grouped_sessions[key].append(session_path)
+    
+    # Create a list to store combined results
     results = []
     
-    # Process each session (already sorted by session ID)
-    for session_id, session_date, session_path in session_roots:
-        try:
-            accuracy = calculate_session_accuracy(session_path)
-            print(f"Session ID: {session_id}, Date: {session_date}, Path: {session_path.name}")
-            print(f"  Overall Accuracy: {accuracy['overall']:.2%}")
-            print(f"  R1 Accuracy: {accuracy['r1']:.2%} ({accuracy['r1_trials']} trials)")
-            print(f"  R2 Accuracy: {accuracy['r2']:.2%} ({accuracy['r2_trials']} trials)")
+    # Process each grouped session
+    for (session_id, session_date), session_paths in sorted(grouped_sessions.items()):
+        print(f"\nProcessing Session ID: {session_id}, Date: {session_date}")
+        print(f"Found {len(session_paths)} directories within this session")
+        
+        # Initialize combined metrics
+        total_r1_correct = 0
+        total_r1_trials = 0
+        total_r2_correct = 0
+        total_r2_trials = 0
+        
+        # Directory-specific results for detailed information
+        dir_results = []
+        
+        # Process each directory within the session
+        for session_path in session_paths:
+            print(f"  Processing directory: {session_path.name}")
+            try:
+                # Get accuracy data for this directory
+                accuracy = get_decision_accuracy(session_path)
+                
+                if accuracy and accuracy != {
+                    'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                    'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                    'overall_accuracy': 0
+                }:
+                    # Add to totals
+                    total_r1_correct += accuracy['r1_correct']
+                    total_r1_trials += accuracy['r1_total']
+                    total_r2_correct += accuracy['r2_correct']
+                    total_r2_trials += accuracy['r2_total']
+                    
+                    dir_info = {
+                        'directory': session_path.name,
+                        'r1_correct': accuracy['r1_correct'],
+                        'r1_trials': accuracy['r1_total'],
+                        'r1_accuracy': accuracy['r1_accuracy'],
+                        'r2_correct': accuracy['r2_correct'],
+                        'r2_trials': accuracy['r2_total'],
+                        'r2_accuracy': accuracy['r2_accuracy'],
+                        'overall_accuracy': accuracy['overall_accuracy']
+                    }
+                    
+                    print(f"    R1: {accuracy['r1_correct']}/{accuracy['r1_total']} ({accuracy['r1_accuracy']:.1f}%), "
+                          f"R2: {accuracy['r2_correct']}/{accuracy['r2_total']} ({accuracy['r2_accuracy']:.1f}%)")
+                    
+                    dir_results.append(dir_info)
+                else:
+                    print(f"    No valid accuracy data found")
+                    
+            except Exception as e:
+                print(f"    Error processing directory {session_path.name}: {str(e)}")
+        
+        # Calculate combined accuracy values
+        if total_r1_trials + total_r2_trials > 0:
+            # Calculate overall accuracy across all directories in this session
+            r1_accuracy = (total_r1_correct / total_r1_trials) if total_r1_trials > 0 else 0
+            r2_accuracy = (total_r2_correct / total_r2_trials) if total_r2_trials > 0 else 0
+            overall_accuracy = ((total_r1_correct + total_r2_correct) / 
+                               (total_r1_trials + total_r2_trials)) if (total_r1_trials + total_r2_trials) > 0 else 0
             
+            # Store combined session results
+            session_result = {
+                'session_id': session_id,
+                'session_date': session_date,
+                'overall_accuracy': overall_accuracy,
+                'r1_accuracy': r1_accuracy,
+                'r2_accuracy': r2_accuracy,
+                'r1_trials': total_r1_trials,
+                'r2_trials': total_r2_trials,
+                'total_trials': total_r1_trials + total_r2_trials,
+                'r1_correct': total_r1_correct,
+                'r2_correct': total_r2_correct,
+                'directory_count': len(session_paths),
+                'directories': dir_results
+            }
+            
+            print(f"  Combined results for Session {session_id}:")
+            print(f"    R1: {total_r1_correct}/{total_r1_trials} ({r1_accuracy:.1%})")
+            print(f"    R2: {total_r2_correct}/{total_r2_trials} ({r2_accuracy:.1%})")
+            print(f"    Overall: {total_r1_correct + total_r2_correct}/{total_r1_trials + total_r2_trials} ({overall_accuracy:.1%})")
+            
+            results.append(session_result)
+        else:
+            print(f"  No valid trials found for Session {session_id}")
             results.append({
                 'session_id': session_id,
                 'session_date': session_date,
-                'session_path': str(session_path),
-                'overall_accuracy': accuracy['overall'],
-                'r1_accuracy': accuracy['r1'],
-                'r2_accuracy': accuracy['r2'],
-                'r1_trials': accuracy['r1_trials'],
-                'r2_trials': accuracy['r2_trials'],
-                'total_trials': accuracy['total_trials']
-            })
-        except Exception as e:
-            print(f"Error processing session {session_path}: {str(e)}")
-            results.append({
-                'session_id': session_id,
-                'session_date': session_date,
-                'session_path': str(session_path),
                 'overall_accuracy': np.nan,
                 'r1_accuracy': np.nan,
                 'r2_accuracy': np.nan,
                 'r1_trials': 0,
                 'r2_trials': 0,
                 'total_trials': 0,
-                'error': str(e)
+                'r1_correct': 0,
+                'r2_correct': 0,
+                'directory_count': len(session_paths),
+                'directories': dir_results
             })
     
-    # Create DataFrame from results
-    results_df = pd.DataFrame(results)
+    # Create DataFrame from combined results
+    results_df = pd.DataFrame([{k: v for k, v in r.items() if k != 'directories'} for r in results])
     
     # Print summary
-    print("\nSummary of Session Accuracies:")
-    print("==============================")
+    print("\nSummary of Combined Session Accuracies:")
+    print("=======================================")
     for _, row in results_df.iterrows():
         if pd.notna(row['overall_accuracy']):
             print(f"Session {row['session_id']} ({row['session_date']}): " 
                   f"Overall {row['overall_accuracy']:.2%}, "
-                  f"R1 {row['r1_accuracy']:.2%}, "
-                  f"R2 {row['r2_accuracy']:.2%}")
+                  f"R1 {row['r1_accuracy']:.2%} ({row['r1_trials']} trials), "
+                  f"R2 {row['r2_accuracy']:.2%} ({row['r2_trials']} trials)")
         else:
-            print(f"Session {row['session_id']} ({row['session_date']}): Error - {row.get('error', 'Unknown error')}")
+            print(f"Session {row['session_id']} ({row['session_date']}): No valid trials found")
     
     # Save results to CSV if requested
     if output_file:
         results_df.to_csv(output_file, index=False)
         print(f"\nResults saved to {output_file}")
+        
+        # Also save detailed directory results
+        detailed_output = Path(output_file).with_name(f"{Path(output_file).stem}_detailed.json")
+        with open(detailed_output, 'w') as f:
+            json.dump(results, f, indent=2)
+        print(f"Detailed results saved to {detailed_output}")
     
-    # Generate plot
-    plot_accuracy(results_df.dropna(subset=['overall_accuracy']), plot_file)
+    # Generate plot if we have data
+    if not results_df.empty and not results_df['overall_accuracy'].isna().all():
+        plot_accuracy(results_df.dropna(subset=['overall_accuracy']), plot_file)
+    else:
+        print("No valid accuracy data to plot")
     
     return results_df
 
