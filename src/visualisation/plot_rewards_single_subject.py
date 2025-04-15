@@ -6,13 +6,8 @@ import argparse
 import re
 from pathlib import Path
 import harp
-import sys
-import os
-
-# Add the parent directory to sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-import utils  # Now Python can find the utils module
-from ..analysis import detect_stage
+from src.analysis import detect_stage  # Changed from relative to absolute import
+import numpy as np
 
 def process_subject_sessions(subject_folder):
     """

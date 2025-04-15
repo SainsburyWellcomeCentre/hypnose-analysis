@@ -4,8 +4,8 @@ import pandas as pd
 import re
 from pathlib import Path
 import harp
-import utils
-from analyse import detect_stage
+import src.utils as utils
+from src.analysis import detect_stage  # Changed from relative to absolute import
 import numpy as np
 
 def process_subject_sessions(subject_folder):
