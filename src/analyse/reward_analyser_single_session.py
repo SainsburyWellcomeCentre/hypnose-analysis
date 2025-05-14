@@ -258,8 +258,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")
-    parser.add_argument("--reward_a", type=float, default=8.0, help="Volume (µL) per Reward A")
-    parser.add_argument("--reward_b", type=float, default=8.0, help="Volume (µL) per Reward B")
+    parser.add_argument("--reward_a", type=float, default=4.0, help="Volume (µL) per Reward A")
+    parser.add_argument("--reward_b", type=float, default=4.0, help="Volume (µL) per Reward B")
     parser.add_argument("--verbose", action="store_true", help="Print detailed debug information")
     
     args = parser.parse_args()
