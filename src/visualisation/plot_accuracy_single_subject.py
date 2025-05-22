@@ -61,13 +61,14 @@ def calculate_session_accuracy(session_path):
             'total_trials': 0
         }
 
-def plot_accuracy(results_df, output_file=None):
+def plot_accuracy(results_df, output_file=None, subject_id=None):
     """
     Create a scatterplot of decision accuracy across sessions.
     
     Args:
         results_df (DataFrame): Contains session_id, session_date, and accuracy data
         output_file (str): Path to save the plot, if provided
+        subject_id (str): Subject ID to use in the plot title
     """
     # Convert date strings to datetime objects for better x-axis formatting
     results_df['date'] = pd.to_datetime(results_df['session_date'], format='%Y%m%d')
@@ -95,14 +96,28 @@ def plot_accuracy(results_df, output_file=None):
     # Format the plot
     plt.xlabel('Session Date')
     plt.ylabel('Decision Accuracy')
-    plt.title('Decision Accuracy Across Sessions')
+    
+    # Set title with subject ID if provided
+    if subject_id:
+        plt.title(f'Decision Accuracy Across Sessions - sub-{subject_id}')
+    else:
+        plt.title('Decision Accuracy Across Sessions')
+    
     plt.ylim(0, 1.05)  # Assuming accuracy is a proportion between 0 and 1
-    plt.grid(True, linestyle='--', alpha=0.7)
+    
+    # Remove grid and add single line at 0.8
+    plt.grid(False)
+    plt.axhline(y=0.8, color='gray', linestyle='--', alpha=0.7)
+    
     plt.legend()
     
     # Format the x-axis to show dates nicely
     plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
     plt.gcf().autofmt_xdate()
+    
+    # Remove top and right spines
+    plt.gca().spines['top'].set_visible(False)
+    plt.gca().spines['right'].set_visible(False)
     
     # Add session IDs as annotations
     for i, row in results_df.iterrows():
@@ -128,6 +143,11 @@ def main(subject_folder, output_file=None, plot_file=None):
     """
     subject_path = Path(subject_folder)
     print(f"Processing subject folder: {subject_path}")
+    
+    # Extract subject ID from the folder path
+    subject_id = subject_path.name
+    if 'sub-' in subject_id:
+        subject_id = subject_id.split('sub-')[1]
     
     # Use utils.find_session_roots instead of the local function
     session_roots = utils.find_session_roots(subject_path)
@@ -275,7 +295,7 @@ def main(subject_folder, output_file=None, plot_file=None):
     
     # Generate plot if we have data
     if not results_df.empty and not results_df['overall_accuracy'].isna().all():
-        plot_accuracy(results_df.dropna(subset=['overall_accuracy']), plot_file)
+        plot_accuracy(results_df.dropna(subset=['overall_accuracy']), plot_file, subject_id)
     else:
         print("No valid accuracy data to plot")
     
