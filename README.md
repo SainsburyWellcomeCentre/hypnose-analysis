@@ -8,6 +8,10 @@ This repository is utilised for processing and visualising data acquired from Hy
 
 - Analysing and visualising performance metrics
 
+## Working in development mode
+
+During development of the code use ```pip install -e .``` to ensure the modules for utils.py can be accessed from anywhere in the code.
+
 ## How to Use
 
 1. Clone the repository
