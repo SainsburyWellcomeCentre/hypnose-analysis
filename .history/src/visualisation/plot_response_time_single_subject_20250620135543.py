@@ -10,7 +10,7 @@ from datetime import datetime
 import matplotlib.dates as mdates
 import src.analyse.freerun_analyser
 import src.analyse.response_time_analyser_single_session
-from src.analysis import detect_stage, get_response_time
+from src.analysis import get_decision_accuracy, get_response_time, detect_stage
 import src.utils as utils
 import src.analyse
 from src.analyse.response_time_analyser_single_session import analyze_session_folder
@@ -25,10 +25,7 @@ def plot_session_response_time(results_df, plot_file=None, subject_id=None):
         subject_id (str): Subject ID to use in the plot title
     """    
     # Use trial IDs to find if trial is R1/R2 and correct/incorrect
-    trial_id = np.array(results_df['all_trial_id'])
-
-    # Remove non-rewarded [0, 0] trials, if any, from trial_id
-    trial_id = trial_id[~np.all(trial_id == 0, axis=1)]
+    trial_id = np.array(results_df['all_trial_id'][0])
 
     # Create the plot
     fig, ax = plt.subplots(4, 1, sharex=True, figsize=(12,6))
@@ -41,10 +38,10 @@ def plot_session_response_time(results_df, plot_file=None, subject_id=None):
     r2_incorrect_trials = np.where((trial_id[:, 0] == 2) & (trial_id[:, 1] == 1))[0]
 
     labels = ['R1 correct RT', 'R2 correct RT', 'R1 incorrect RT', 'R2 incorrect RT']
-    ax[0].scatter(r1_correct_trials, results_df['all_r1_correct_rt'], s=10, label=labels[0], color='blue')
-    ax[1].scatter(r2_correct_trials, results_df['all_r2_correct_rt'], s=10, label=labels[1], color='red')
-    ax[2].scatter(r1_incorrect_trials, results_df['all_r1_incorrect_rt'], s=10, label=labels[2], color='green')
-    ax[3].scatter(r2_incorrect_trials, results_df['all_r2_incorrect_rt'], s=10, label=labels[3], color='orange')
+    ax[0].scatter(r1_correct_trials, results_df['all_r1_correct_rt'], s=2, label=labels[0], color='blue')
+    ax[1].scatter(r2_correct_trials, results_df['all_r2_correct_rt'], s=2, label=labels[1], color='red')
+    ax[2].scatter(r1_incorrect_trials, results_df['all_r1_incorrect_rt'], s=2, label=labels[2], color='green')
+    ax[3].scatter(r2_incorrect_trials, results_df['all_r2_incorrect_rt'], s=2, label=labels[3], color='orange')
 
     # Add average response time and format the plot
     for i, axis in enumerate(ax):
@@ -91,19 +88,8 @@ def plot_response_time(results_df, plot_file=None, subject_id=None):
     results_df = results_df.sort_values('date')
     
     # Use trial IDs to find if trial is R1/R2 and correct/incorrect
-    cleaned_total_trial_id = []
-    for session in results_df['total_trial_id']:
-        if not session or not session[0]:
-            cleaned_total_trial_id.append([])
-            continue
-        # Remove non-rewarded [0, 0] trials, if any, from trial_id
-        filtered = [pair for pair in session[0] if pair != [0.0, 0.0]]
-        cleaned_total_trial_id.append([filtered])
-
-    results_df['total_trial_id'] = cleaned_total_trial_id
-
-    trial_id = results_df['total_trial_id'].tolist()
-
+    trial_id = np.array(results_df['total_trial_id'])
+    
     # Find indices of trial types in each session 
     r1_correct_trials = []
     for session_idx, sublist in enumerate(trial_id):
@@ -268,8 +254,7 @@ def main(session_folder, across_sessions=True, stage=8, sessions=None, plot_file
                 detected_stage = int(detect_stage(session_path))
 
                 if stage is not None and detected_stage != stage:
-                    print("Ensure the input stage correspongs to the sessions selected.")
-                    print("Continue to next session...")
+                    print('Continue to next session...')
                     continue
 
                 print(f"  Processing directory: {session_path.name}")
@@ -383,13 +368,13 @@ def main(session_folder, across_sessions=True, stage=8, sessions=None, plot_file
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-61_date-20250618")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-61_date-20250618")
 
     parser = argparse.ArgumentParser(description="Calculate and plot response time for a session or across sessions")
     parser.add_argument("session_folder", help="Path to the session folder containing data")
-    parser.add_argument("--across_sessions", default=True, help="Whether to plot results for a single session or across sessions")
-    parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed.")
-    parser.add_argument("--sessions", default=np.arange(55,63), help="List of session IDs (optional)") 
+    parser.add_argument("--across_sessions", default=False, help="Whether to plot results for a single session or across sessions")
+    parser.add_argument("--stage", "--s", default=8, help="Stage to be analysed.")
+    parser.add_argument("--sessions", default=np.arange(55,62), help="List of session IDs (optional)") 
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")  # TODO 
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")
     args = parser.parse_args()

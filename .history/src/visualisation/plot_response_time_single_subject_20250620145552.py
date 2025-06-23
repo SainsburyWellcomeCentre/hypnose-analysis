@@ -10,7 +10,7 @@ from datetime import datetime
 import matplotlib.dates as mdates
 import src.analyse.freerun_analyser
 import src.analyse.response_time_analyser_single_session
-from src.analysis import detect_stage, get_response_time
+from src.analysis import get_decision_accuracy, get_response_time, detect_stage
 import src.utils as utils
 import src.analyse
 from src.analyse.response_time_analyser_single_session import analyze_session_folder
@@ -91,19 +91,11 @@ def plot_response_time(results_df, plot_file=None, subject_id=None):
     results_df = results_df.sort_values('date')
     
     # Use trial IDs to find if trial is R1/R2 and correct/incorrect
-    cleaned_total_trial_id = []
-    for session in results_df['total_trial_id']:
-        if not session or not session[0]:
-            cleaned_total_trial_id.append([])
-            continue
-        # Remove non-rewarded [0, 0] trials, if any, from trial_id
-        filtered = [pair for pair in session[0] if pair != [0.0, 0.0]]
-        cleaned_total_trial_id.append([filtered])
+    trial_id = np.array(results_df['total_trial_id'])
 
-    results_df['total_trial_id'] = cleaned_total_trial_id
-
-    trial_id = results_df['total_trial_id'].tolist()
-
+    # Remove non-rewarded [0, 0] trials, if any, from trial_id
+    trial_id = trial_id[~np.all(trial_id == 0, axis=1)]
+    
     # Find indices of trial types in each session 
     r1_correct_trials = []
     for session_idx, sublist in enumerate(trial_id):
@@ -268,8 +260,7 @@ def main(session_folder, across_sessions=True, stage=8, sessions=None, plot_file
                 detected_stage = int(detect_stage(session_path))
 
                 if stage is not None and detected_stage != stage:
-                    print("Ensure the input stage correspongs to the sessions selected.")
-                    print("Continue to next session...")
+                    print('Continue to next session...')
                     continue
 
                 print(f"  Processing directory: {session_path.name}")
@@ -299,7 +290,8 @@ def main(session_folder, across_sessions=True, stage=8, sessions=None, plot_file
                         total_r2_correct_rt.append(response_time['r2_correct_rt'])
                         total_r1_incorrect_rt.append(response_time['r1_incorrect_rt'])
                         total_r2_incorrect_rt.append(response_time['r2_incorrect_rt'])
-                        total_trial_id.append(response_time['trial_id'].tolist())
+                        # total_trial_id.append(response_time['trial_id'].tolist())
+                        total_trial_id.append(response_time['trial_id'])
 
                         dir_info = {
                             'directory': session_path.name,
@@ -383,12 +375,12 @@ def main(session_folder, across_sessions=True, stage=8, sessions=None, plot_file
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-61_date-20250618")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-61_date-20250618")
 
     parser = argparse.ArgumentParser(description="Calculate and plot response time for a session or across sessions")
     parser.add_argument("session_folder", help="Path to the session folder containing data")
     parser.add_argument("--across_sessions", default=True, help="Whether to plot results for a single session or across sessions")
-    parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed.")
+    parser.add_argument("--stage", "--s", default=8, help="Stage to be analysed.")
     parser.add_argument("--sessions", default=np.arange(55,63), help="List of session IDs (optional)") 
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")  # TODO 
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")

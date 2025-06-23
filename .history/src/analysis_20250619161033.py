@@ -598,13 +598,14 @@ class RewardAnalyser:
                         # Calculate decision accuracy
                         session_data['accuracy_summary'] = calculate_overall_decision_accuracy(all_events_df)
 
+                        # Calculate decision specificity 
+                        if int(detect_stage(root)) == 8:  # freerun
+                            session_data['specificity_summary'] = calculate_overall_decision_specificity_freerun(all_events_df)
+                        elif int(detect_stage(root)) == 9:  # doubles 
+                            session_data['specificity_summary'] = calculate_overall_decision_specificity_doubles(all_events_df)
+                        
                         # Calculate response time
                         session_data['response_time'] = calculate_overall_response_time(all_events_df)
-
-                        # Calculate false alarm rate and decision specificity (freerun and doubles)
-                        if int(detect_stage(root)) > 7:  
-                            session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df)
-                            # session_data['false_alarm'] = calculate_overall_decision_specificity(all_events_df)
                         
                     else:
                         if not has_end_initiation:
@@ -629,7 +630,7 @@ class RewardAnalyser:
                             'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
                         }
                         # Add empty decision specificity data
-                        session_data['false_alarm'] = {
+                        session_data['specificity_summary'] = {
                             'C_pokes': 0, 'C_trials': 0,
                             'D_pokes': 0, 'D_trials': 0,
                             'E_pokes': 0, 'E_trials': 0,
@@ -657,7 +658,7 @@ class RewardAnalyser:
                         'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
                     }
                     # Add empty decision specificity data
-                    session_data['false_alarm'] = {
+                    session_data['specificity_summary'] = {
                         'C_pokes': 0, 'C_trials': 0,
                         'D_pokes': 0, 'D_trials': 0,
                         'E_pokes': 0, 'E_trials': 0,
@@ -668,7 +669,7 @@ class RewardAnalyser:
                         'G_false_alarm': 0, 'overall_false_alarm': 0
                     }
             else:
-                print("No events available for decision accuracy, response time, false alarm rate and specificity calculation")
+                print("No events available for decision accuracy calculation")
                 # Add empty accuracy data
                 session_data['accuracy_summary'] = {
                     'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
@@ -683,8 +684,8 @@ class RewardAnalyser:
                     'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
                     'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
                 }
-                # Add empty false alarm data
-                session_data['false_alarm'] = {
+                # Add empty decision specificity data
+                session_data['specificity_summary'] = {
                     'C_pokes': 0, 'C_trials': 0,
                     'D_pokes': 0, 'D_trials': 0,
                     'E_pokes': 0, 'E_trials': 0,
@@ -715,7 +716,7 @@ class RewardAnalyser:
                     'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
                     'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
                 },
-                'false_alarm': {               
+                'specificity_summary': {               
                     'C_pokes': 0, 'C_trials': 0,
                     'D_pokes': 0, 'D_trials': 0,
                     'E_pokes': 0, 'E_trials': 0,
@@ -761,9 +762,9 @@ class RewardAnalyser:
         })
 
     @staticmethod
-    def get_false_alarm(data_path):
+    def get_decision_specificity(data_path):
         """
-        Static method to calculate false alarms for each trial in a single session.
+        Static method to calculate decision specificity for each trial in a single session.
         
         Parameters:
         -----------
@@ -773,18 +774,18 @@ class RewardAnalyser:
         Returns:
         --------
         dict
-            Dictionary with false alarm metrics or None if calculation fails
+            Dictionary with decision specificity metrics or None if calculation fails
         """
         root = Path(data_path)
         
         # Process the given directory directly
-        print(f"Processing false alarms for: {root}")
+        print(f"Processing decision specificity for: {root}")
         
         # Create a temporary instance to access the _get_session_data method
         temp_instance = RewardAnalyser.__new__(RewardAnalyser)
         session_data = temp_instance._get_session_data(root)
 
-        return session_data.get('false_alarm', {'C_pokes': 0, 'C_trials': 0,
+        return session_data.get('specificity_summary', {'C_pokes': 0, 'C_trials': 0,
                                                 'D_pokes': 0, 'D_trials': 0, 'E_pokes': 0, 'E_trials': 0,
                                                 'F_pokes': 0, 'F_trials': 0, 'G_pokes': 0, 'G_trials': 0,
                                                 'C_false_alarm': 0,
@@ -793,10 +794,6 @@ class RewardAnalyser:
                                                 'overall_false_alarm': 0
                                             })
     
-    @staticmethod
-    def get_decision_specificity(data_path):
-        return
-
     @staticmethod
     def get_response_time(data_path):
         """
@@ -850,10 +847,7 @@ class RewardAnalyser:
                             match = re.search(r'_Stage(\d+)', seq['name'])
                             if match:
                                 if 'FreeRun' in seq['name']:
-                                    stage_found = 8
-                                    # stage_found = int(match.group(1)) + 7
-                                elif 'Doubles' in seq['name']:
-                                    stage_found = 9
+                                    stage_found = int(match.group(1)) + 7
                                 else:
                                     stage_found = match.group(1)
                                 return stage_found
@@ -866,10 +860,7 @@ class RewardAnalyser:
                     match = re.search(r'_Stage(\d+)', seq_group['name'])
                     if match:
                         if 'FreeRun' in seq_group['name']:
-                            # stage_found = int(match.group(1)) + 7
-                            stage_found = 8
-                        elif 'Doubles' in seq['name']:
-                            stage_found = 9
+                            stage_found = int(match.group(1)) + 7
                         else:
                             stage_found = match.group(1)
                         return stage_found
@@ -943,10 +934,7 @@ def detect_stage(root):
                         match = re.search(r'_Stage(\d+)', seq['name'])
                         if match:
                             if 'FreeRun' in seq['name']:
-                                stage_found = 8
-                                # stage_found = int(match.group(1)) + 7
-                            elif 'Doubles' in seq['name']:
-                                stage_found = 9
+                                stage_found = int(match.group(1)) + 7
                             else:
                                 stage_found = match.group(1)
                             return stage_found
@@ -959,10 +947,7 @@ def detect_stage(root):
                 match = re.search(r'_Stage(\d+)', seq_group['name'])
                 if match:
                     if 'FreeRun' in seq_group['name']:
-                        stage_found = 8
-                        # stage_found = int(match.group(1)) + 7
-                    elif 'Doubles' in seq['name']:
-                        stage_found = 9
+                        stage_found = int(match.group(1)) + 7
                     else:
                         stage_found = match.group(1)
                     return stage_found
@@ -1204,8 +1189,7 @@ def calculate_overall_response_time(events_df):
         'trial_id': trial_id
     }
 
-# TODO:
-def calculate_overall_decision_specificity(events_df):
+def calculate_overall_decision_specificity_freerun(events_df): 
     """
     Calculate decision specificity for rewarded and non-rewarded trial in freerun sessions.
     
@@ -1222,26 +1206,6 @@ def calculate_overall_decision_specificity(events_df):
     --------
     dict
         Dictionary containing specificity metrics for r1, r2, and overall trials
-    """
-    return 
-
-def calculate_overall_false_alarm(events_df): 
-    """
-    Calculate false alarm rate for non-rewarded trials in freerun sessions.
-    
-    Parameters:
-    -----------
-    events_df : pandas.DataFrame
-        DataFrame containing trial events with columns: 'timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 
-                                            'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
-                                                'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
-                                                    'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
-                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
-        
-    Returns:
-    --------
-    dict
-        Dictionary containing false alarm metrics 
     """
 
     # Initialize counters
@@ -1344,7 +1308,7 @@ def calculate_overall_false_alarm(events_df):
                     G2_poke += 1
                 break
         
-    # Calculate false alarm rate with safety checks for division by zero
+    # Calculate specificity percentages with safety checks for division by zero
     C_false_alarm = ((C1_poke + C2_poke) / C_total * 100) if C_total else 0
     D_false_alarm = ((D1_poke + D2_poke) / D_total * 100) if D_total else 0
     E_false_alarm = ((E1_poke + E2_poke) / E_total * 100) if E_total else 0
@@ -1373,7 +1337,157 @@ def calculate_overall_false_alarm(events_df):
         'G_false_alarm': G_false_alarm,
         'overall_false_alarm': overall_false_alarm
     }
+
+def calculate_overall_decision_specificity_doubles(events_df): # TODO
+    """
+    Calculate decision specificity for rewarded and non-rewarded trial in freerun sessions.
     
+    Parameters:
+    -----------
+    events_df : pandas.DataFrame
+        DataFrame containing trial events with columns: 'timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 
+                                            'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
+                                                'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
+                                                    'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
+                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing specificity metrics for r1, r2, and overall trials
+    """
+
+    # Initialize counters
+    r1_correct = 0
+    r1_total = 0
+    r2_correct = 0
+    r2_total = 0
+    C_total = C1_poke = C2_poke = 0
+    D_total = D1_poke = D2_poke = 0
+    E_total = E1_poke = E2_poke = 0
+    F_total = F1_poke = F2_poke = 0
+    G_total = G1_poke = G2_poke = 0
+
+    # Find all trial end points
+    end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+
+    # Process each trial
+    for e, end_idx in enumerate(end_initiation_indices[:-1]):
+        # Determine trial type (r1, r2) by finding the most recent valve activation
+        closest_valve_idx = None
+        trial_type = None
+        for i in range(end_idx - 1, -1, -1):
+            if events_df.loc[i, 'r1_olf_valve']:
+                closest_valve_idx = i
+                trial_type = 'r1'
+                break
+            elif events_df.loc[i, 'r2_olf_valve']:
+                closest_valve_idx = i
+                trial_type = 'r2'
+                break 
+
+        # Skip if no valve activation found before this trial end
+        if closest_valve_idx is None:
+            continue
+
+        # Find the first odour in the doubles sequence
+        for k in range(closest_valve_idx - 1, -1, -1):
+            if events_df.loc[i, 'odourC_olf_valve']:
+                first_odour = 'C'
+                break
+            elif events_df.loc[i, 'odourD_olf_valve']:
+                first_odour = 'D'
+                break
+            elif events_df.loc[i, 'odourE_olf_valve']:
+                first_odour = 'E'
+                break
+            elif events_df.loc[i, 'odourF_olf_valve']:
+                first_odour = 'F'
+                break
+            elif events_df.loc[i, 'odourG_olf_valve']:
+                first_odour = 'G'
+                break
+            
+        # Count trial by type
+        if trial_type == 'r1':
+            r1_total += 1
+        elif trial_type == 'r2':
+            r2_total += 1
+        if first_odour == 'C':
+            C_total += 1
+        elif first_odour == 'D':
+            D_total += 1
+        elif first_odour == 'E':
+            E_total += 1
+        elif first_odour == 'F':
+            F_total += 1
+        elif first_odour == 'G':
+            G_total += 1
+
+        # Find the first poke after trial end
+        for j in range(end_idx + 1, end_initiation_indices[e+1]):
+        # for j in range(end_idx + 1, len(events_df)):
+            if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
+                # Correct if poke matches trial type
+                if trial_type == 'r1' and events_df.loc[j, 'r1_poke']:
+                    r1_correct += 1
+                elif trial_type == 'r2' and events_df.loc[j, 'r2_poke']:
+                    r2_correct += 1
+                break
+
+        # Find pokes before trial end 
+                # elif trial_type == 'C' and events_df.loc[j, 'r1_poke']:
+                #     C1_poke += 1
+                # elif trial_type == 'C' and events_df.loc[j, 'r2_poke']:
+                #     C2_poke += 1
+                # elif trial_type == 'D' and events_df.loc[j, 'r1_poke']:
+                #     D1_poke += 1
+                # elif trial_type == 'D' and events_df.loc[j, 'r2_poke']:
+                #     D2_poke += 1
+                # elif trial_type == 'E' and events_df.loc[j, 'r1_poke']:
+                #     E1_poke += 1
+                # elif trial_type == 'E' and events_df.loc[j, 'r2_poke']:
+                #     E2_poke += 1
+                # elif trial_type == 'F' and events_df.loc[j, 'r1_poke']:
+                #     F1_poke += 1
+                # elif trial_type == 'F' and events_df.loc[j, 'r2_poke']:
+                #     F2_poke += 1
+                # elif trial_type == 'G' and events_df.loc[j, 'r1_poke']:
+                #     G1_poke += 1
+                # elif trial_type == 'G' and events_df.loc[j, 'r2_poke']:
+                #     G2_poke += 1
+                # break
+        
+    # Calculate specificity percentages with safety checks for division by zero
+    C_false_alarm = ((C1_poke + C2_poke) / C_total * 100) if C_total else 0
+    D_false_alarm = ((D1_poke + D2_poke) / D_total * 100) if D_total else 0
+    E_false_alarm = ((E1_poke + E2_poke) / E_total * 100) if E_total else 0
+    F_false_alarm = ((F1_poke + F2_poke) / F_total * 100) if F_total else 0
+    G_false_alarm = ((G1_poke + G2_poke) / G_total * 100) if G_total else 0
+
+    nonR_pokes = C1_poke + C2_poke + D1_poke + D2_poke + E1_poke + E2_poke + F1_poke + F2_poke + G1_poke + G2_poke
+    nonR_trials = C_total + D_total + E_total + F_total + G_total
+    overall_false_alarm = (nonR_pokes / nonR_trials * 100) if nonR_trials > 0 else 0
+
+    return {
+        'C_pokes': C1_poke + C2_poke,
+        'C_trials': C_total,
+        'D_pokes': D1_poke + D2_poke,
+        'D_trials': D_total,
+        'E_pokes': E1_poke + E2_poke,
+        'E_trials': E_total,
+        'F_pokes': F1_poke + F2_poke,
+        'F_trials': F_total,
+        'G_pokes': G1_poke + G2_poke,
+        'G_trials': G_total,
+        'C_false_alarm': C_false_alarm,
+        'D_false_alarm': D_false_alarm,
+        'E_false_alarm': E_false_alarm,
+        'F_false_alarm': F_false_alarm,
+        'G_false_alarm': G_false_alarm,
+        'overall_false_alarm': overall_false_alarm
+    }
+
 def get_response_time(data_path):
     """
     Calculate response time for each trial.
@@ -1389,22 +1503,6 @@ def get_response_time(data_path):
         Dictionary with response time metrics or None if calculation fails
     """
     return RewardAnalyser.get_response_time(data_path)
-
-def get_false_alarm(data_path):
-    """
-    Calculate false alarms for each trial in a single session.
-    
-    Parameters:
-    -----------
-    data_path : str or Path
-        Path to session data directory
-        
-    Returns:
-    --------
-    dict
-        Dictionary with false alarm metrics or None if calculation fails
-    """
-    return RewardAnalyser.get_false_alarm(data_path)
 
 def get_decision_specificity(data_path):
     """

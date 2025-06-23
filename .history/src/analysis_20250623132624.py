@@ -1204,7 +1204,6 @@ def calculate_overall_response_time(events_df):
         'trial_id': trial_id
     }
 
-# TODO:
 def calculate_overall_decision_specificity(events_df):
     """
     Calculate decision specificity for rewarded and non-rewarded trial in freerun sessions.
@@ -1223,6 +1222,7 @@ def calculate_overall_decision_specificity(events_df):
     dict
         Dictionary containing specificity metrics for r1, r2, and overall trials
     """
+    # get_false_alarm
     return 
 
 def calculate_overall_false_alarm(events_df): 

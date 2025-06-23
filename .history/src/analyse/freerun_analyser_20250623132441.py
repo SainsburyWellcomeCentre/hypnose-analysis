@@ -130,11 +130,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         # Calculate response time
         response_time = get_response_time(session_dir)
 
-        # Calculate false alarms
+        # Calculate decision false alarm
         false_alarm = get_false_alarm(session_dir)
-
-        # Calculate decision specificity
-        specificity_data = get_decision_specificity(session_dir)
+        # false_alarm = get_decision_specificity(session_dir)
         
         # Extract reward and duration data
         session_info = {}
@@ -257,6 +255,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'false_alarm_rt': response_time['false_alarm_rt'], 
                 'trial_id': response_time['trial_id']
             })
+
         else:
             session_info.update({
                 'r1_correct_rt': np.nan,
@@ -274,7 +273,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'trial_id': np.nan
             })
 
-        # Add false alarms
+        # Add decision specificty
         if false_alarm:
             all_C_pokes.append(false_alarm['C_pokes']) 
             all_C_trials.append(false_alarm['C_trials'])
@@ -324,8 +323,6 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'G_false_alarm': np.nan,
                 'overall_false_alarm': np.nan,
             })
-
-        # TODO: Add specificity data
 
         session_results.append(session_info)
         

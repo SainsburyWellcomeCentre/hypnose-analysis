@@ -8,7 +8,7 @@ import harp
 import re
 
 from src import utils
-from src.analysis import RewardAnalyser, get_decision_accuracy, detect_stage, get_response_time, get_decision_specificity, get_false_alarm
+from src.analysis import RewardAnalyser, get_decision_accuracy, detect_stage, get_response_time, get_decision_specificity
 
 # Filter out specific warnings
 warnings.filterwarnings(
@@ -68,7 +68,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_r2_incorrect_rt = []
     all_trial_id = []
 
-    # false alarm variables 
+    # Specificity variables 
     all_C_pokes = []
     all_C_trials = []
     all_D_pokes = []
@@ -129,9 +129,6 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
         # Calculate response time
         response_time = get_response_time(session_dir)
-
-        # Calculate false alarms
-        false_alarm = get_false_alarm(session_dir)
 
         # Calculate decision specificity
         specificity_data = get_decision_specificity(session_dir)
@@ -257,6 +254,22 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'false_alarm_rt': response_time['false_alarm_rt'], 
                 'trial_id': response_time['trial_id']
             })
+
+            session_info.update({
+                'r1_correct_rt': response_time['r1_correct_rt'],
+                'r1_incorrect_rt': response_time['r1_incorrect_rt'],
+                'r1_avg_correct_rt': response_time['r1_avg_correct_rt'],
+                'r1_avg_incorrect_rt': response_time['r1_avg_incorrect_rt'],
+                'r1_avg_rt': response_time['r1_avg_rt'],
+                'r2_correct_rt': response_time['r2_correct_rt'],
+                'r2_incorrect_rt': response_time['r2_incorrect_rt'],
+                'r2_avg_correct_rt': response_time['r2_avg_correct_rt'],
+                'r2_avg_incorrect_rt': response_time['r2_avg_incorrect_rt'],
+                'r2_avg_rt': response_time['r2_avg_rt'],
+                'hit_rt': response_time['hit_rt'],
+                'false_alarm_rt': response_time['false_alarm_rt'], 
+                'trial_id': response_time['trial_id']
+            })
         else:
             session_info.update({
                 'r1_correct_rt': np.nan,
@@ -274,37 +287,38 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'trial_id': np.nan
             })
 
-        # Add false alarms
-        if false_alarm:
-            all_C_pokes.append(false_alarm['C_pokes']) 
-            all_C_trials.append(false_alarm['C_trials'])
-            all_D_pokes.append(false_alarm['D_pokes']) 
-            all_D_trials.append(false_alarm['D_trials'])
-            all_E_pokes.append(false_alarm['E_pokes']) 
-            all_E_trials.append(false_alarm['E_trials'])
-            all_F_pokes.append(false_alarm['F_pokes']) 
-            all_F_trials.append(false_alarm['F_trials'])
-            all_G_pokes.append(false_alarm['G_pokes']) 
-            all_G_trials.append(false_alarm['G_trials'])
+        # Add decision specificty
+        if specificity_data:
+            all_C_pokes.append(specificity_data['C_pokes']) 
+            all_C_trials.append(specificity_data['C_trials'])
+            all_D_pokes.append(specificity_data['D_pokes']) 
+            all_D_trials.append(specificity_data['D_trials'])
+            all_E_pokes.append(specificity_data['E_pokes']) 
+            all_E_trials.append(specificity_data['E_trials'])
+            all_F_pokes.append(specificity_data['F_pokes']) 
+            all_F_trials.append(specificity_data['F_trials'])
+            all_G_pokes.append(specificity_data['G_pokes']) 
+            all_G_trials.append(specificity_data['G_trials'])
 
             session_info.update({
-                'C_pokes': false_alarm['C_pokes'],
-                'C_trials': false_alarm['C_trials'],
-                'D_pokes': false_alarm['D_pokes'],
-                'D_trials': false_alarm['D_trials'],
-                'E_pokes': false_alarm['E_pokes'],
-                'E_trials': false_alarm['E_trials'],
-                'F_pokes': false_alarm['F_pokes'],
-                'F_trials': false_alarm['F_trials'],
-                'G_pokes': false_alarm['G_pokes'],
-                'G_trials': false_alarm['G_trials'],
-                'C_false_alarm': false_alarm['C_false_alarm'],
-                'D_false_alarm': false_alarm['D_false_alarm'],
-                'E_false_alarm': false_alarm['E_false_alarm'],
-                'F_false_alarm': false_alarm['F_false_alarm'],
-                'G_false_alarm': false_alarm['G_false_alarm'],
-                'overall_false_alarm': false_alarm['overall_false_alarm'],
+                'C_pokes': specificity_data['C_pokes'],
+                'C_trials': specificity_data['C_trials'],
+                'D_pokes': specificity_data['D_pokes'],
+                'D_trials': specificity_data['D_trials'],
+                'E_pokes': specificity_data['E_pokes'],
+                'E_trials': specificity_data['E_trials'],
+                'F_pokes': specificity_data['F_pokes'],
+                'F_trials': specificity_data['F_trials'],
+                'G_pokes': specificity_data['G_pokes'],
+                'G_trials': specificity_data['G_trials'],
+                'C_false_alarm': specificity_data['C_false_alarm'],
+                'D_false_alarm': specificity_data['D_false_alarm'],
+                'E_false_alarm': specificity_data['E_false_alarm'],
+                'F_false_alarm': specificity_data['F_false_alarm'],
+                'G_false_alarm': specificity_data['G_false_alarm'],
+                'overall_false_alarm': specificity_data['overall_false_alarm'],
             })
+
         else:
             session_info.update({
                 'C_pokes': np.nan,
@@ -325,8 +339,6 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'overall_false_alarm': np.nan,
             })
 
-        # TODO: Add specificity data
-
         session_results.append(session_info)
         
         # Print session summary
@@ -341,11 +353,11 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         if response_time:
             print(f"  Response Time: R1={response_time['r1_avg_rt']:.1f}, \
                   R2={response_time['r2_avg_rt']:.1f}")
-        if false_alarm:
-            print(f"  False alarm: C={false_alarm['C_false_alarm']:.1f}% D={false_alarm['D_false_alarm']:.1f}%, "
-                  f"E={false_alarm['E_false_alarm']:.1f}% F={false_alarm['F_false_alarm']:.1f}%, "
-                  f"G={false_alarm['G_false_alarm']:.1f}%")
-            print(f"  Overall false alarm rate: {false_alarm['overall_false_alarm']:.1f}%")
+        if specificity_data:
+            print(f"  False alarm: C={specificity_data['C_false_alarm']:.1f}% D={specificity_data['D_false_alarm']:.1f}%, "
+                  f"E={specificity_data['E_false_alarm']:.1f}% F={specificity_data['F_false_alarm']:.1f}%, "
+                  f"G={specificity_data['G_false_alarm']:.1f}%")
+            print(f"  Overall false alarm rate: {specificity_data['overall_false_alarm']:.1f}%")
     
     # Calculate overall accuracy
     all_r1_accuracy = (all_r1_correct / all_r1_total * 100) if all_r1_total > 0 else 0
@@ -357,7 +369,6 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_r1_incorrect_rt = np.array(sum(all_r1_incorrect_rt, []))
     all_r2_correct_rt = np.array(sum(all_r2_correct_rt, []))
     all_r2_incorrect_rt = np.array(sum(all_r2_incorrect_rt, []))
-    all_trial_id = np.array(np.concatenate(all_trial_id))
     all_rt = np.array(sum(all_rt, []))
 
     window_size = 10
@@ -368,7 +379,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_hit_rt = np.mean(np.concatenate([all_r1_correct_rt, all_r2_correct_rt]))
     all_false_alarm_rt = np.mean(np.concatenate([all_r1_incorrect_rt, all_r2_incorrect_rt]))
 
-    # Calculate overall false alarm 
+    # Calculate overall specificity 
     all_C_pokes = np.sum(all_C_pokes)
     all_D_pokes = np.sum(all_D_pokes)
     all_E_pokes = np.sum(all_E_pokes)
@@ -405,9 +416,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     print(f"Combined total rewards: {all_rewards_r1 + all_rewards_r2} ({all_rewards_r1 * reward_a + all_rewards_r2 * reward_b:.1f}µL)")
     print(f"Response time: R1={all_r1_rt:.1f} s, R2={all_r2_rt:.1f} s")
     print(f"Response time: Hit={all_hit_rt:.1f} s, FalseAlarm={all_false_alarm_rt:.1f} s")
-    if int(stage) > 7:
-        print(f"False alarm rate: C={all_C_false_alarm:.1f}%, D={all_D_false_alarm:.1f}%, E={all_E_false_alarm:.1f}%, F={all_F_false_alarm:.1f}%, G={all_G_false_alarm:.1f}%")
-        print(f"Overall false alarm rate: {all_overall_false_alarm:.1f}%")
+    print(f"False alarm rate: C={all_C_false_alarm:.1f}%, D={all_D_false_alarm:.1f}%, E={all_E_false_alarm:.1f}%, F={all_F_false_alarm:.1f}%, G={all_G_false_alarm:.1f}%")
+    print(f"Overall false alarm rate: {all_overall_false_alarm:.1f}%")
     print(f"Decision accuracy: R1={all_r1_accuracy:.1f}% ({all_r1_correct}/{all_r1_total}), R2={all_r2_accuracy:.1f}% ({all_r2_correct}/{all_r2_total})")
     print(f"Overall accuracy: {all_overall_accuracy:.1f}%")
     
@@ -452,8 +462,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-57_date-20250612")
-        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-53_date-20250606")
+        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-61_date-20250618")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-58_date-20250613")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")

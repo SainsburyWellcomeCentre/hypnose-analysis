@@ -683,7 +683,7 @@ class RewardAnalyser:
                     'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
                     'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
                 }
-                # Add empty false alarm data
+                # Add empty decision specificity data
                 session_data['false_alarm'] = {
                     'C_pokes': 0, 'C_trials': 0,
                     'D_pokes': 0, 'D_trials': 0,
@@ -761,9 +761,9 @@ class RewardAnalyser:
         })
 
     @staticmethod
-    def get_false_alarm(data_path):
+    def get_decision_specificity(data_path):
         """
-        Static method to calculate false alarms for each trial in a single session.
+        Static method to calculate decision specificity for each trial in a single session.
         
         Parameters:
         -----------
@@ -773,12 +773,12 @@ class RewardAnalyser:
         Returns:
         --------
         dict
-            Dictionary with false alarm metrics or None if calculation fails
+            Dictionary with decision specificity metrics or None if calculation fails
         """
         root = Path(data_path)
         
         # Process the given directory directly
-        print(f"Processing false alarms for: {root}")
+        print(f"Processing decision specificity for: {root}")
         
         # Create a temporary instance to access the _get_session_data method
         temp_instance = RewardAnalyser.__new__(RewardAnalyser)
@@ -793,10 +793,6 @@ class RewardAnalyser:
                                                 'overall_false_alarm': 0
                                             })
     
-    @staticmethod
-    def get_decision_specificity(data_path):
-        return
-
     @staticmethod
     def get_response_time(data_path):
         """
@@ -1204,7 +1200,6 @@ def calculate_overall_response_time(events_df):
         'trial_id': trial_id
     }
 
-# TODO:
 def calculate_overall_decision_specificity(events_df):
     """
     Calculate decision specificity for rewarded and non-rewarded trial in freerun sessions.
@@ -1223,6 +1218,7 @@ def calculate_overall_decision_specificity(events_df):
     dict
         Dictionary containing specificity metrics for r1, r2, and overall trials
     """
+    # get_false_alarm
     return 
 
 def calculate_overall_false_alarm(events_df): 
@@ -1344,7 +1340,7 @@ def calculate_overall_false_alarm(events_df):
                     G2_poke += 1
                 break
         
-    # Calculate false alarm rate with safety checks for division by zero
+    # Calculate specificity percentages with safety checks for division by zero
     C_false_alarm = ((C1_poke + C2_poke) / C_total * 100) if C_total else 0
     D_false_alarm = ((D1_poke + D2_poke) / D_total * 100) if D_total else 0
     E_false_alarm = ((E1_poke + E2_poke) / E_total * 100) if E_total else 0
@@ -1389,22 +1385,6 @@ def get_response_time(data_path):
         Dictionary with response time metrics or None if calculation fails
     """
     return RewardAnalyser.get_response_time(data_path)
-
-def get_false_alarm(data_path):
-    """
-    Calculate false alarms for each trial in a single session.
-    
-    Parameters:
-    -----------
-    data_path : str or Path
-        Path to session data directory
-        
-    Returns:
-    --------
-    dict
-        Dictionary with false alarm metrics or None if calculation fails
-    """
-    return RewardAnalyser.get_false_alarm(data_path)
 
 def get_decision_specificity(data_path):
     """

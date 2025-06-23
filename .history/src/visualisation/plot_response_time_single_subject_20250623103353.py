@@ -96,7 +96,6 @@ def plot_response_time(results_df, plot_file=None, subject_id=None):
         if not session or not session[0]:
             cleaned_total_trial_id.append([])
             continue
-        # Remove non-rewarded [0, 0] trials, if any, from trial_id
         filtered = [pair for pair in session[0] if pair != [0.0, 0.0]]
         cleaned_total_trial_id.append([filtered])
 
@@ -104,6 +103,11 @@ def plot_response_time(results_df, plot_file=None, subject_id=None):
 
     trial_id = results_df['total_trial_id'].tolist()
 
+    # trial_id = np.array(results_df['total_trial_id'])
+
+    # Remove non-rewarded [0, 0] trials, if any, from trial_id
+    # trial_id = trial_id[~np.all(trial_id == 0, axis=1)]
+    
     # Find indices of trial types in each session 
     r1_correct_trials = []
     for session_idx, sublist in enumerate(trial_id):
