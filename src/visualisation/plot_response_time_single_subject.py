@@ -389,7 +389,7 @@ if __name__ == "__main__":
     parser.add_argument("session_folder", help="Path to the session folder containing data")
     parser.add_argument("--across_sessions", default=True, help="Whether to plot results for a single session or across sessions")
     parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed.")
-    parser.add_argument("--sessions", default=np.arange(55,63), help="List of session IDs (optional)") 
+    parser.add_argument("--sessions", default=np.arange(55,65), help="List of session IDs (optional)") 
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")  # TODO 
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")
     args = parser.parse_args()

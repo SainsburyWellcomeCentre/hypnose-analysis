@@ -8,7 +8,7 @@ import harp
 import re
 
 from src import utils
-from src.analysis import RewardAnalyser, get_decision_accuracy, detect_stage, get_response_time, get_decision_specificity, get_false_alarm
+from src.analysis import RewardAnalyser, get_decision_accuracy, detect_stage, get_response_time, get_decision_specificity, get_false_alarm, get_sequence_completion
 
 # Filter out specific warnings
 warnings.filterwarnings(
@@ -79,6 +79,10 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_F_trials = []
     all_G_pokes = []
     all_G_trials = []
+
+    # sequence completion variables 
+    all_rew_trials = 0
+    all_non_rew_trials = 0
     
     # Per-session results for detailed output
     session_results = []
@@ -132,6 +136,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
         # Calculate false alarms
         false_alarm = get_false_alarm(session_dir)
+
+        # Calculate sequence completion 
+        sequence_completion = get_sequence_completion(session_dir)
 
         # Calculate decision specificity
         specificity_data = get_decision_specificity(session_dir)
@@ -274,7 +281,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'trial_id': np.nan
             })
 
-        # Add false alarms
+        # Add false alarm data
         if false_alarm:
             all_C_pokes.append(false_alarm['C_pokes']) 
             all_C_trials.append(false_alarm['C_trials'])
@@ -325,6 +332,22 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'overall_false_alarm': np.nan,
             })
 
+        # Add sequence completion data
+        if sequence_completion:
+            all_rew_trials += sequence_completion['rew_trials']
+            all_non_rew_trials += sequence_completion['non_rew_trials']
+            
+            session_info.update({
+                'rew_trials': sequence_completion['rew_trials'],
+                'non_rew_trials': sequence_completion['non_rew_trials'],
+                'completion_ratio': sequence_completion['completion_ratio']
+            })
+        else:
+            session_info.update({
+                'rew_trials': 0,
+                'non_rew_trials': 0,
+                'completion_ratio': 0
+            })    
         # TODO: Add specificity data
 
         session_results.append(session_info)
@@ -346,6 +369,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                   f"E={false_alarm['E_false_alarm']:.1f}% F={false_alarm['F_false_alarm']:.1f}%, "
                   f"G={false_alarm['G_false_alarm']:.1f}%")
             print(f"  Overall false alarm rate: {false_alarm['overall_false_alarm']:.1f}%")
+        if sequence_completion:
+            print(f"  Sequence completion ratio: {sequence_completion['completion_ratio']:.1f}%")
     
     # Calculate overall accuracy
     all_r1_accuracy = (all_r1_correct / all_r1_total * 100) if all_r1_total > 0 else 0
@@ -391,6 +416,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_nonR_trials = all_C_trials + all_D_trials + all_E_trials + all_F_trials + all_G_trials
     all_overall_false_alarm = (all_nonR_pokes / all_nonR_trials * 100) if all_nonR_trials > 0 else 0
 
+    # Calculate overall sequence completion ratio
+    overall_completion_ratio = all_rew_trials / (all_rew_trials + all_non_rew_trials) * 100 if (all_rew_trials + all_non_rew_trials) > 0 else 0
+    
     # Format time in a readable way
     h = int(total_duration_sec // 3600)
     m = int((total_duration_sec % 3600) // 60)
@@ -408,6 +436,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     if int(stage) > 7:
         print(f"False alarm rate: C={all_C_false_alarm:.1f}%, D={all_D_false_alarm:.1f}%, E={all_E_false_alarm:.1f}%, F={all_F_false_alarm:.1f}%, G={all_G_false_alarm:.1f}%")
         print(f"Overall false alarm rate: {all_overall_false_alarm:.1f}%")
+        print(f"Overall sequence completion: {overall_completion_ratio:.1f}%")
     print(f"Decision accuracy: R1={all_r1_accuracy:.1f}% ({all_r1_correct}/{all_r1_total}), R2={all_r2_accuracy:.1f}% ({all_r2_correct}/{all_r2_total})")
     print(f"Overall accuracy: {all_overall_accuracy:.1f}%")
     
@@ -445,14 +474,15 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'all_E_false_alarm': all_E_false_alarm,
         'all_F_false_alarm': all_F_false_alarm,
         'all_G_false_alarm': all_G_false_alarm,
-        'all_overall_false_alarm': all_overall_false_alarm
+        'all_overall_false_alarm': all_overall_false_alarm,
+        'overall_completion_ratio': overall_completion_ratio
     }
     
     return results
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-57_date-20250612")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-59_date-20250616")
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-53_date-20250606")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")

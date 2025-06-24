@@ -872,8 +872,6 @@ class RewardAnalyser:
         # Create a temporary instance to access the _get_session_data method
         temp_instance = RewardAnalyser.__new__(RewardAnalyser)
         session_data = temp_instance._get_session_data(root)
-
-        return session_data.get('sequence_completion', {'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0})
     
     def _detect_stage(self):
         """

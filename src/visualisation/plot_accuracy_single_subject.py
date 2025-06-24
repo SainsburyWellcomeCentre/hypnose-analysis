@@ -122,11 +122,19 @@ def plot_accuracy(results_df, output_file=None, subject_id=None):
     
     # Add session IDs as annotations
     for i, row in results_df.iterrows():
-        plt.annotate(f"Ses-{row['session_id']}", 
-                    (row['date'], row['overall_accuracy']),
-                    textcoords="offset points", 
-                    xytext=(0,10), 
-                    ha='center')
+        y = row['overall_accuracy']
+        if pd.notna(y) and y > 0:
+            plt.annotate(f"Ses-{row['session_id']}", 
+                        (row['date'], y),
+                        textcoords="offset points", 
+                        xytext=(0,10), 
+                        ha='center')
+    # for i, row in results_df.iterrows():
+    #     plt.annotate(f"Ses-{row['session_id']}", 
+    #                 (row['date'], row['overall_accuracy']),
+    #                 textcoords="offset points", 
+    #                 xytext=(0,10), 
+    #                 ha='center')
     
     # Save if requested
     if output_file:
@@ -323,8 +331,8 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Calculate and plot decision accuracy across sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")
-    parser.add_argument("--sessions", default=np.arange(31, 54), help="List of session IDs (optional)") 
-    parser.add_argument("--stage", "--s", default=7, help="Stage to be analysed (optional)")
+    parser.add_argument("--sessions", default=np.arange(55, 65), help="List of session IDs (optional)") 
+    parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed (optional)")
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")
     args = parser.parse_args()

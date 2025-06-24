@@ -606,10 +606,6 @@ class RewardAnalyser:
                             session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df)
                             # session_data['false_alarm'] = calculate_overall_decision_specificity(all_events_df)
                         
-                        # Calculate sequence completion (doubles or other sequences)
-                        if int(detect_stage(root)) == 9:  
-                            session_data['sequence_completion'] = calculate_overall_sequence_completion(all_events_df)
-
                     else:
                         if not has_end_initiation:
                             print("No EndInitiation events found - cannot identify trial endings")
@@ -632,7 +628,7 @@ class RewardAnalyser:
                             'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
                             'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
                         }
-                        # Add empty false alarm data
+                        # Add empty decision specificity data
                         session_data['false_alarm'] = {
                             'C_pokes': 0, 'C_trials': 0,
                             'D_pokes': 0, 'D_trials': 0,
@@ -642,10 +638,6 @@ class RewardAnalyser:
                             'C_false_alarm': 0, 'D_false_alarm': 0,
                             'E_false_alarm': 0, 'F_false_alarm': 0,
                             'G_false_alarm': 0, 'overall_false_alarm': 0
-                        }
-                        # Add empty sequence completion data 
-                        session_data['sequence_completion'] = {
-                            'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
                         }
                 
                 except Exception as e:
@@ -664,7 +656,7 @@ class RewardAnalyser:
                         'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
                         'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
                     }
-                    # Add empty false alarm data
+                    # Add empty decision specificity data
                     session_data['false_alarm'] = {
                         'C_pokes': 0, 'C_trials': 0,
                         'D_pokes': 0, 'D_trials': 0,
@@ -674,10 +666,6 @@ class RewardAnalyser:
                         'C_false_alarm': 0, 'D_false_alarm': 0,
                         'E_false_alarm': 0, 'F_false_alarm': 0,
                         'G_false_alarm': 0, 'overall_false_alarm': 0
-                    }
-                    # Add empty sequence completion data 
-                    session_data['sequence_completion'] = {
-                        'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
                     }
             else:
                 print("No events available for decision accuracy, response time, false alarm rate and specificity calculation")
@@ -705,10 +693,6 @@ class RewardAnalyser:
                     'C_false_alarm': 0, 'D_false_alarm': 0,
                     'E_false_alarm': 0, 'F_false_alarm': 0,
                     'G_false_alarm': 0, 'overall_false_alarm': 0
-                }
-                # Add empty sequence completion data 
-                session_data['sequence_completion'] = {
-                    'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
                 }
         
         except Exception as e:
@@ -740,9 +724,6 @@ class RewardAnalyser:
                     'C_false_alarm': 0, 'D_false_alarm': 0,
                     'E_false_alarm': 0, 'F_false_alarm': 0,
                     'G_false_alarm': 0, 'overall_false_alarm': 0
-                },
-                'sequence_completion': {
-                    'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
                 }
             }
         
@@ -851,29 +832,7 @@ class RewardAnalyser:
 
     @staticmethod
     def get_sequence_completion(data_path):
-        """
-        Static method to calculate sequence completion for each trial in a single session.
-        
-        Parameters:
-        -----------
-        data_path : str or Path
-            Path to session data directory
-            
-        Returns:
-        --------
-        dict
-            Dictionary with sequence completion metrics or None if calculation fails
-        """
-        root = Path(data_path)
-        
-        # Process the given directory directly
-        print(f"Processing false alarms for: {root}")
-        
-        # Create a temporary instance to access the _get_session_data method
-        temp_instance = RewardAnalyser.__new__(RewardAnalyser)
-        session_data = temp_instance._get_session_data(root)
-
-        return session_data.get('sequence_completion', {'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0})
+        return
     
     def _detect_stage(self):
         """

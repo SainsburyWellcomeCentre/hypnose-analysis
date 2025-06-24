@@ -606,10 +606,6 @@ class RewardAnalyser:
                             session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df)
                             # session_data['false_alarm'] = calculate_overall_decision_specificity(all_events_df)
                         
-                        # Calculate sequence completion (doubles or other sequences)
-                        if int(detect_stage(root)) == 9:  
-                            session_data['sequence_completion'] = calculate_overall_sequence_completion(all_events_df)
-
                     else:
                         if not has_end_initiation:
                             print("No EndInitiation events found - cannot identify trial endings")
@@ -632,7 +628,7 @@ class RewardAnalyser:
                             'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
                             'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
                         }
-                        # Add empty false alarm data
+                        # Add empty decision specificity data
                         session_data['false_alarm'] = {
                             'C_pokes': 0, 'C_trials': 0,
                             'D_pokes': 0, 'D_trials': 0,
@@ -642,10 +638,6 @@ class RewardAnalyser:
                             'C_false_alarm': 0, 'D_false_alarm': 0,
                             'E_false_alarm': 0, 'F_false_alarm': 0,
                             'G_false_alarm': 0, 'overall_false_alarm': 0
-                        }
-                        # Add empty sequence completion data 
-                        session_data['sequence_completion'] = {
-                            'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
                         }
                 
                 except Exception as e:
@@ -664,7 +656,7 @@ class RewardAnalyser:
                         'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
                         'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
                     }
-                    # Add empty false alarm data
+                    # Add empty decision specificity data
                     session_data['false_alarm'] = {
                         'C_pokes': 0, 'C_trials': 0,
                         'D_pokes': 0, 'D_trials': 0,
@@ -674,10 +666,6 @@ class RewardAnalyser:
                         'C_false_alarm': 0, 'D_false_alarm': 0,
                         'E_false_alarm': 0, 'F_false_alarm': 0,
                         'G_false_alarm': 0, 'overall_false_alarm': 0
-                    }
-                    # Add empty sequence completion data 
-                    session_data['sequence_completion'] = {
-                        'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
                     }
             else:
                 print("No events available for decision accuracy, response time, false alarm rate and specificity calculation")
@@ -705,10 +693,6 @@ class RewardAnalyser:
                     'C_false_alarm': 0, 'D_false_alarm': 0,
                     'E_false_alarm': 0, 'F_false_alarm': 0,
                     'G_false_alarm': 0, 'overall_false_alarm': 0
-                }
-                # Add empty sequence completion data 
-                session_data['sequence_completion'] = {
-                    'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
                 }
         
         except Exception as e:
@@ -740,9 +724,6 @@ class RewardAnalyser:
                     'C_false_alarm': 0, 'D_false_alarm': 0,
                     'E_false_alarm': 0, 'F_false_alarm': 0,
                     'G_false_alarm': 0, 'overall_false_alarm': 0
-                },
-                'sequence_completion': {
-                    'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
                 }
             }
         
@@ -851,29 +832,7 @@ class RewardAnalyser:
 
     @staticmethod
     def get_sequence_completion(data_path):
-        """
-        Static method to calculate sequence completion for each trial in a single session.
-        
-        Parameters:
-        -----------
-        data_path : str or Path
-            Path to session data directory
-            
-        Returns:
-        --------
-        dict
-            Dictionary with sequence completion metrics or None if calculation fails
-        """
-        root = Path(data_path)
-        
-        # Process the given directory directly
-        print(f"Processing false alarms for: {root}")
-        
-        # Create a temporary instance to access the _get_session_data method
-        temp_instance = RewardAnalyser.__new__(RewardAnalyser)
-        session_data = temp_instance._get_session_data(root)
-
-        return session_data.get('sequence_completion', {'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0})
+        return
     
     def _detect_stage(self):
         """
@@ -1439,8 +1398,15 @@ def calculate_overall_sequence_completion(events_df):
     """
 
     # Initialize counters
-    rew_trials = 0
-    non_rew_trials = 0
+    r1_correct = 0
+    r1_total = 0
+    r2_correct = 0
+    r2_total = 0
+    C_total = C1_poke = C2_poke = 0
+    D_total = D1_poke = D2_poke = 0
+    E_total = E1_poke = E2_poke = 0
+    F_total = F1_poke = F2_poke = 0
+    G_total = G1_poke = G2_poke = 0
     
     # Find all trial end points
     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
@@ -1485,18 +1451,80 @@ def calculate_overall_sequence_completion(events_df):
             continue
             
         # Count trial by type
-        if trial_type == 'r1' or trial_type == 'r2':
-            rew_trials += 1
-        else:
-            non_rew_trials += 1
+        if trial_type == 'r1':
+            r1_total += 1
+        elif trial_type == 'r2':
+            r2_total += 1
+        elif trial_type == 'C':
+            C_total += 1
+        elif trial_type == 'D':
+            D_total += 1
+        elif trial_type == 'E':
+            E_total += 1
+        elif trial_type == 'F':
+            F_total += 1
+        elif trial_type == 'G':
+            G_total += 1
 
-    # Calculate sequence completion ratio with safety checks for division by zero
-    completion_ratio = rew_trials / (rew_trials + non_rew_trials) * 100 if (rew_trials + non_rew_trials) > 0 else 0
+        # Find the first poke after trial end
+        for j in range(end_idx + 1, end_initiation_indices[e+1]):
+        # for j in range(end_idx + 1, len(events_df)):
+            if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
+                # Correct if poke matches trial type
+                if trial_type == 'r1' and events_df.loc[j, 'r1_poke']:
+                    r1_correct += 1
+                elif trial_type == 'r2' and events_df.loc[j, 'r2_poke']:
+                    r2_correct += 1
+                elif trial_type == 'C' and events_df.loc[j, 'r1_poke']:
+                    C1_poke += 1
+                elif trial_type == 'C' and events_df.loc[j, 'r2_poke']:
+                    C2_poke += 1
+                elif trial_type == 'D' and events_df.loc[j, 'r1_poke']:
+                    D1_poke += 1
+                elif trial_type == 'D' and events_df.loc[j, 'r2_poke']:
+                    D2_poke += 1
+                elif trial_type == 'E' and events_df.loc[j, 'r1_poke']:
+                    E1_poke += 1
+                elif trial_type == 'E' and events_df.loc[j, 'r2_poke']:
+                    E2_poke += 1
+                elif trial_type == 'F' and events_df.loc[j, 'r1_poke']:
+                    F1_poke += 1
+                elif trial_type == 'F' and events_df.loc[j, 'r2_poke']:
+                    F2_poke += 1
+                elif trial_type == 'G' and events_df.loc[j, 'r1_poke']:
+                    G1_poke += 1
+                elif trial_type == 'G' and events_df.loc[j, 'r2_poke']:
+                    G2_poke += 1
+                break
+        
+    # Calculate false alarm rate with safety checks for division by zero
+    C_false_alarm = ((C1_poke + C2_poke) / C_total * 100) if C_total else 0
+    D_false_alarm = ((D1_poke + D2_poke) / D_total * 100) if D_total else 0
+    E_false_alarm = ((E1_poke + E2_poke) / E_total * 100) if E_total else 0
+    F_false_alarm = ((F1_poke + F2_poke) / F_total * 100) if F_total else 0
+    G_false_alarm = ((G1_poke + G2_poke) / G_total * 100) if G_total else 0
+
+    nonR_pokes = C1_poke + C2_poke + D1_poke + D2_poke + E1_poke + E2_poke + F1_poke + F2_poke + G1_poke + G2_poke
+    nonR_trials = C_total + D_total + E_total + F_total + G_total
+    overall_false_alarm = (nonR_pokes / nonR_trials * 100) if nonR_trials > 0 else 0
 
     return {
-        'rew_trials': rew_trials,
-        'non_rew_trials': non_rew_trials,
-        'completion_ratio': completion_ratio
+        'C_pokes': C1_poke + C2_poke,
+        'C_trials': C_total,
+        'D_pokes': D1_poke + D2_poke,
+        'D_trials': D_total,
+        'E_pokes': E1_poke + E2_poke,
+        'E_trials': E_total,
+        'F_pokes': F1_poke + F2_poke,
+        'F_trials': F_total,
+        'G_pokes': G1_poke + G2_poke,
+        'G_trials': G_total,
+        'C_false_alarm': C_false_alarm,
+        'D_false_alarm': D_false_alarm,
+        'E_false_alarm': E_false_alarm,
+        'F_false_alarm': F_false_alarm,
+        'G_false_alarm': G_false_alarm,
+        'overall_false_alarm': overall_false_alarm
     }
 
 def get_response_time(data_path):
