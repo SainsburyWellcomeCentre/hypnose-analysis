@@ -15,7 +15,7 @@ import src.utils as utils
 import src.analyse
 from src.analyse.response_time_analyser_single_session import analyze_session_folder
 
-def plot_session_response_time(results_df, plot_file=None, subject_id=None):
+def plot_session_response_time(results_df, stage=None, plot_file=None, subject_id=None):
     """
     Create a scatterplot of response time for each session.
     
@@ -69,6 +69,8 @@ def plot_session_response_time(results_df, plot_file=None, subject_id=None):
     
     # Save if requested
     if plot_file:
+        filename = f"sub-{subject_id}_sess-{session_id}_ResponseTime" + (f"_stage{stage}" if stage is not None else "") + ".png"
+        plot_file = os.path.join(plot_file, filename)
         plt.savefig(plot_file, dpi=300, bbox_inches='tight')
         print(f"Plot saved to {plot_file}")
     
@@ -76,7 +78,7 @@ def plot_session_response_time(results_df, plot_file=None, subject_id=None):
     plt.show()
 
 
-def plot_response_time(results_df, plot_file=None, subject_id=None):
+def plot_response_time(results_df, stage=None, plot_file=None, subject_id=None):
     """
     Create a scatterplot of response time across sessions.
     
@@ -192,9 +194,9 @@ def plot_response_time(results_df, plot_file=None, subject_id=None):
     
     # Set title with subject ID if provided
     if subject_id:
-        plt.suptitle(f'Response time - sub-{subject_id}')
+        plt.suptitle(f'Response time Across Sessions - sub-{subject_id}')
     else:
-        plt.suptitle(f'Response time')
+        plt.suptitle(f'Response time Across Sessions')
         
     plt.grid(False)    
     plt.gca().spines['top'].set_visible(False)
@@ -202,6 +204,8 @@ def plot_response_time(results_df, plot_file=None, subject_id=None):
     
     # Save if requested
     if plot_file:
+        filename = f"sub-{subject_id}_ResponseTime" + (f"_stage{stage}" if stage is not None else "") + ".png"
+        plot_file = os.path.join(plot_file, filename)
         plt.savefig(plot_file, dpi=300, bbox_inches='tight')
         print(f"Plot saved to {plot_file}")
     
@@ -210,7 +214,7 @@ def plot_response_time(results_df, plot_file=None, subject_id=None):
     return 
 
 
-def main(session_folder, across_sessions=True, stage=8, sessions=None, plot_file=None, subject_id=None):
+def main(data_folder, across_sessions=True, stage=8, sessions=None, plot_file=None):
     """
     Process a subject folder and calculate response time for a given session or across sessions.
     Combines results from multiple directories within the same session.
@@ -218,15 +222,18 @@ def main(session_folder, across_sessions=True, stage=8, sessions=None, plot_file
     """    
 
     if across_sessions:
-        subject_path = os.path.split(session_folder)[0]
-        subject_path = Path(subject_path)
-        print(f"Processing subject folder: {subject_path}")
+        # Check if single session on subject folder 
+        datapath = Path(data_folder)
         
         # Extract subject ID from the folder path
-        subject_id = subject_path.name
-        if 'sub-' in subject_id:
-            subject_id = subject_id.split('sub-')[1]
-        
+        if 'sub-' in datapath.name:
+            subject_path = datapath
+            subject_id = datapath.name.split('sub-')[1]
+        elif 'ses-' in datapath.name:
+            subject_path = Path(os.path.split(data_folder)[0])
+            subject_id = subject_path.name.split('sub-')[1]
+        print(f"Processing subject folder: {subject_path}")
+            
         # Use utils.find_session_roots instead of the local function
         session_roots = utils.find_session_roots(subject_path)
            
@@ -347,13 +354,22 @@ def main(session_folder, across_sessions=True, stage=8, sessions=None, plot_file
         results_df = pd.DataFrame([{k: v for k, v in r.items() if k != 'directories'} for r in results])
 
         # Plot response time across sessions
-        plot_response_time(results_df, plot_file, subject_id)
+        plot_response_time(results_df, stage, plot_file, subject_id)
 
     else:
-        # Detect stage 
-        session_folder = Path(session_folder)
-        behav_folder = session_folder / "behav"
+        datapath = Path(data_folder)
+
+        # Check valid session folder 
+        if 'ses-' not in datapath.name:
+            print("Please provide a valid session or choose across-session analysis for this subject.")
+            return None
         
+        # Extract subject ID from the folder path
+        subject_path = Path(os.path.split(data_folder)[0])
+        subject_id = subject_path.name.split('sub-')[1]
+        print(f"Processing subject folder: {subject_path} and session: {datapath.name}")
+          
+        behav_folder = datapath / "behav"
         if not behav_folder.exists():
             print(f"No behavior folder found at {behav_folder}")
             return None
@@ -362,39 +378,43 @@ def main(session_folder, across_sessions=True, stage=8, sessions=None, plot_file
         session_dirs = [d for d in behav_folder.iterdir() if d.is_dir()]
         print(f"Found {len(session_dirs)} behavioral sessions in {behav_folder}")
         
+        # Detect stage
         session_stage = []
         for s, session_dir in enumerate(sorted(session_dirs)):
             session_stage.append(detect_stage(session_dir))
             print(f"Detected stage: {session_stage[s]}")
 
-        # Get the accuracy and response time data
+        # Get the accuracy and response time data. TODO change once freerun_anayzer is merged 
         if all(stage <= 7 for stage in session_stage):
-            results = src.analyse.response_time_analyser_single_session.analyze_session_folder(session_folder)
+            stage = np.unique(session_stage)
+            results_df = src.analyse.response_time_analyser_single_session.analyze_session_folder(data_folder)
         elif all(stage > 7 for stage in session_stage):
-            results = src.analyse.freerun_analyser.analyze_session_folder(session_folder)
+            stage = np.unique(session_stage)
+            results_df = src.analyse.freerun_analyser.analyze_session_folder(data_folder)
         else:
             raise ValueError("Some subfolers were run on different stages.")
         
-        # Plot response time for the session
-        plot_session_response_time(results, plot_file, subject_id)
+        # Plot response time for the session 
+        plot_session_response_time(results_df, stage, plot_file, subject_id)
 
-    return results
+    return results_df
     
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
+        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077")
         sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-61_date-20250618")
 
     parser = argparse.ArgumentParser(description="Calculate and plot response time for a session or across sessions")
-    parser.add_argument("session_folder", help="Path to the session folder containing data")
-    parser.add_argument("--across_sessions", default=True, help="Whether to plot results for a single session or across sessions")
+    parser.add_argument("data_folder", help="Path to the session folder containing data")
+    parser.add_argument("--across_sessions", default=False, help="Whether to plot results for a single session or across sessions")
     parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed.")
-    parser.add_argument("--sessions", default=np.arange(55,65), help="List of session IDs (optional)") 
+    parser.add_argument("--sessions", default=np.arange(55,66), help="List of session IDs (optional)") 
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")  # TODO 
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")
     args = parser.parse_args()
     
-    main(args.session_folder, args.across_sessions, args.stage, args.sessions, args.output, args.plot)
+    main(args.data_folder, args.across_sessions, args.stage, args.sessions, args.output, args.plot)
 
 
 

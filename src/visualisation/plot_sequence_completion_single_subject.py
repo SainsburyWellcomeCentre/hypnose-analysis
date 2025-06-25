@@ -12,13 +12,13 @@ from src.analysis import get_sequence_completion, detect_stage
 import src.utils as utils
 
 
-def plot_sequence_completion(results_df, output_file=None, subject_id=None):
+def plot_sequence_completion(results_df, stage=None, plot_file=None, subject_id=None):
     """
     Create a scatterplot of sequence completion ratio across sessions.
     
     Args:
         results_df (DataFrame): Contains session_id, session_date, and sequence completion data
-        output_file (str): Path to save the plot, if provided
+        plot_file (str): Path to save the plot, if provided
         subject_id (str): Subject ID to use in the plot title
     """
     # Convert date strings to datetime objects for better x-axis formatting
@@ -33,16 +33,6 @@ def plot_sequence_completion(results_df, output_file=None, subject_id=None):
                label='Sequence Completion ratio', marker='o', s=60, color='black')
     plt.plot(results_df['date'], results_df['overall_completion_ratio'], 
             color='black', linestyle='-', alpha=0.7)
-    
-    # plt.scatter(results_df['date'], results_df['r1_accuracy'], 
-    #            label='R1 Accuracy', marker='s', s=60, color='blue')
-    # plt.plot(results_df['date'], results_df['r1_accuracy'], 
-    #         color='blue', linestyle='--', alpha=0.7)
-    
-    # plt.scatter(results_df['date'], results_df['r2_accuracy'], 
-    #            label='R2 Accuracy', marker='^', s=60, color='red')
-    # plt.plot(results_df['date'], results_df['r2_accuracy'], 
-    #         color='red', linestyle='-.', alpha=0.7)
     
     # Format the plot
     plt.xlabel('Session Date')
@@ -81,9 +71,11 @@ def plot_sequence_completion(results_df, output_file=None, subject_id=None):
                         ha='center')
     
     # Save if requested
-    if output_file:
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
-        print(f"Plot saved to {output_file}")
+    if plot_file:
+        filename = f"sub-{subject_id}_Completion" + (f"_stage{stage}" if stage is not None else "") + ".png"
+        plot_file = os.path.join(plot_file, filename)
+        plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {plot_file}")
     
     plt.tight_layout()
     plt.show()
@@ -226,7 +218,7 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
     
     # Generate plot if we have data
     if not results_df.empty and not results_df['overall_completion_ratio'].isna().all():
-        plot_sequence_completion(results_df.dropna(subset=['overall_completion_ratio']), plot_file, subject_id)
+        plot_sequence_completion(results_df.dropna(subset=['overall_completion_ratio']), stage, plot_file, subject_id)
     else:
         print("No valid sequence completion data to plot")
     
@@ -238,7 +230,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Calculate and plot sequence completion data across sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")
-    parser.add_argument("--sessions", default=np.arange(55, 65), help="List of session IDs (optional)") 
+    parser.add_argument("--sessions", default=np.arange(55, 66), help="List of session IDs (optional)") 
     parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed (optional)")
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")

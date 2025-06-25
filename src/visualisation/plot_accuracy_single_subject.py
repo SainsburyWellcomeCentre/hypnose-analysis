@@ -62,13 +62,13 @@ def calculate_session_accuracy(session_path):
             'total_trials': 0
         }
 
-def plot_accuracy(results_df, output_file=None, subject_id=None):
+def plot_accuracy(results_df, stage=None, plot_file=None, subject_id=None):
     """
     Create a scatterplot of decision accuracy across sessions.
     
     Args:
         results_df (DataFrame): Contains session_id, session_date, and accuracy data
-        output_file (str): Path to save the plot, if provided
+        plot_file (str): Path to save the plot, if provided
         subject_id (str): Subject ID to use in the plot title
     """
     # Convert date strings to datetime objects for better x-axis formatting
@@ -129,17 +129,13 @@ def plot_accuracy(results_df, output_file=None, subject_id=None):
                         textcoords="offset points", 
                         xytext=(0,10), 
                         ha='center')
-    # for i, row in results_df.iterrows():
-    #     plt.annotate(f"Ses-{row['session_id']}", 
-    #                 (row['date'], row['overall_accuracy']),
-    #                 textcoords="offset points", 
-    #                 xytext=(0,10), 
-    #                 ha='center')
-    
+     
     # Save if requested
-    if output_file:
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
-        print(f"Plot saved to {output_file}")
+    if plot_file:
+        filename = f"sub-{subject_id}_Accuracy" + (f"_stage{stage}" if stage is not None else "") + ".png"
+        plot_file = os.path.join(plot_file, filename)
+        plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {plot_file}")
     
     plt.tight_layout()
     plt.show()
@@ -164,14 +160,6 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
     if not session_roots:
         print(f"No valid session directories found in {subject_path}")
         return
-    
-    # # Group sessions by session_id and session_date
-    # grouped_sessions = {}
-    # for session_id, session_date, session_path in session_roots:
-    #     key = (session_id, session_date)
-    #     if key not in grouped_sessions:
-    #         grouped_sessions[key] = []
-    #     grouped_sessions[key].append(session_path)
     
     # Group sessions by session_id and session_date
     grouped_sessions = {}
@@ -306,7 +294,7 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
         else:
             print(f"Session {row['session_id']} ({row['session_date']}): No valid trials found")
     
-    # Save results to CSV if requested
+    # Save results to CSV if requested TODO
     if output_file:
         results_df.to_csv(output_file, index=False)
         print(f"\nResults saved to {output_file}")
@@ -319,7 +307,7 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
     
     # Generate plot if we have data
     if not results_df.empty and not results_df['overall_accuracy'].isna().all():
-        plot_accuracy(results_df.dropna(subset=['overall_accuracy']), plot_file, subject_id)
+        plot_accuracy(results_df.dropna(subset=['overall_accuracy']), stage, plot_file, subject_id)
     else:
         print("No valid accuracy data to plot")
     
@@ -331,7 +319,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Calculate and plot decision accuracy across sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")
-    parser.add_argument("--sessions", default=np.arange(55, 65), help="List of session IDs (optional)") 
+    parser.add_argument("--sessions", default=np.arange(55, 66), help="List of session IDs (optional)") 
     parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed (optional)")
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")

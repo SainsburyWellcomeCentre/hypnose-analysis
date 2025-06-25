@@ -11,13 +11,13 @@ import matplotlib.dates as mdates
 from src.analysis import detect_stage, get_false_alarm
 import src.utils as utils
 
-def plot_false_alarms(results_df, output_file=None, subject_id=None):
+def plot_false_alarms(results_df, stage=None, plot_file=None, subject_id=None):
     """
     Create a scatterplot of false alarms across sessions.
     
     Args:
         results_df (DataFrame): Contains session_id, session_date, and false alarm data
-        output_file (str): Path to save the plot, if provided
+        plot_file (str): Path to save the plot, if provided
         subject_id (str): Subject ID to use in the plot title
     """
     # Convert date strings to datetime objects for better x-axis formatting
@@ -95,9 +95,11 @@ def plot_false_alarms(results_df, output_file=None, subject_id=None):
                         ha='center')
     
     # Save if requested
-    if output_file:
-        plt.savefig(output_file, dpi=300, bbox_inches='tight')
-        print(f"Plot saved to {output_file}")
+    if plot_file:
+        filename = f"sub-{subject_id}_FalseAlarm" + (f"_stage{stage}" if stage is not None else "") + ".png"
+        plot_file = os.path.join(plot_file, filename)
+        plt.savefig(plot_file, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {plot_file}")
     
     plt.tight_layout()
     plt.show()
@@ -332,7 +334,7 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
     
     # Generate plot if we have data
     if not results_df.empty and not results_df['total_overall_false_alarm'].isna().all():
-        plot_false_alarms(results_df.dropna(subset=['total_overall_false_alarm']), plot_file, subject_id)
+        plot_false_alarms(results_df.dropna(subset=['total_overall_false_alarm']), stage, plot_file, subject_id)
     else:
         print("No valid false alarm data to plot")
     
@@ -344,7 +346,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Calculate and plot decision false alarm across sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")
-    parser.add_argument("--sessions", default=np.arange(55, 64), help="List of session IDs (optional)") 
+    parser.add_argument("--sessions", default=np.arange(55, 66), help="List of session IDs (optional)") 
     parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed (optional)")
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")
