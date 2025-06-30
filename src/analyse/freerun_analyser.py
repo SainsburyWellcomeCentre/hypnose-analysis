@@ -90,6 +90,19 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_interval_trials = {}
     all_interval_false_alarm = {}
 
+    all_odour_same_olf_pokes = defaultdict(int)
+    all_odour_same_olf_trials = defaultdict(int)
+    all_odour_same_olf_false_alarm = {}
+    all_odour_diff_olf_pokes = defaultdict(int)
+    all_odour_diff_olf_trials = defaultdict(int)
+    all_odour_diff_olf_false_alarm = {}
+    all_same_olf_pokes = 0
+    all_same_olf_trials = 0
+    all_same_olf_false_alarm = {}
+    all_diff_olf_pokes = 0
+    all_diff_olf_trials = 0
+    all_diff_olf_false_alarm = {}
+
     # sequence completion variables 
     all_rew_trials = 0
     all_non_rew_trials = 0
@@ -352,16 +365,40 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             intervals = false_alarm_bias['odour_interval_pokes'][first_odour].keys()
     
             for odour in nonR_odours:
+                # time bias
                 for interval in intervals:
                     all_odour_interval_pokes[odour][interval] += false_alarm_bias['odour_interval_pokes'][odour][interval]
                     all_odour_interval_trials[odour][interval] += false_alarm_bias['odour_interval_trials'][odour][interval]
-                    
+                
+                # olfactometer bias
+                all_odour_same_olf_pokes[odour] += false_alarm_bias['odour_same_olf_pokes'][odour]
+                all_odour_same_olf_trials[odour] += false_alarm_bias['odour_same_olf_trials'][odour]
+                all_odour_diff_olf_pokes[odour] += false_alarm_bias['odour_diff_olf_pokes'][odour]
+                all_odour_diff_olf_trials[odour] += false_alarm_bias['odour_diff_olf_trials'][odour]
+
+            all_same_olf_pokes += false_alarm_bias['same_olf_pokes']
+            all_same_olf_trials += false_alarm_bias['same_olf_trials']
+            all_diff_olf_pokes += false_alarm_bias['diff_olf_pokes']
+            all_diff_olf_trials += false_alarm_bias['diff_olf_trials']
+
             session_info.update({'odour_interval_pokes': false_alarm_bias['odour_interval_pokes'],
                     'odour_interval_trials': false_alarm_bias['odour_interval_trials'],
                     'odour_interval_false_alarm': false_alarm_bias['odour_interval_false_alarm'],
                     'interval_pokes': false_alarm_bias['interval_pokes'],
                     'interval_trials': false_alarm_bias['interval_trials'],
-                    'interval_false_alarm': false_alarm_bias['interval_false_alarm']
+                    'interval_false_alarm': false_alarm_bias['interval_false_alarm'],
+                    'odour_same_olf_pokes': false_alarm_bias['odour_same_olf_pokes'], 
+                    'odour_same_olf_trials': false_alarm_bias['odour_same_olf_trials'], 
+                    'odour_same_olf_false_alarm': false_alarm_bias['odour_same_olf_false_alarm'], 
+                    'odour_diff_olf_pokes': false_alarm_bias['odour_diff_olf_pokes'], 
+                    'odour_diff_olf_trials': false_alarm_bias['odour_diff_olf_trials'], 
+                    'odour_diff_olf_false_alarm': false_alarm_bias['odour_diff_olf_false_alarm'], 
+                    'same_olf_pokes': false_alarm_bias['same_olf_pokes'], 
+                    'same_olf_trials': false_alarm_bias['same_olf_trials'], 
+                    'same_olf_false_alarm': false_alarm_bias['same_olf_false_alarm'], 
+                    'diff_olf_pokes': false_alarm_bias['diff_olf_pokes'], 
+                    'diff_olf_trials': false_alarm_bias['diff_olf_trials'], 
+                    'diff_olf_false_alarm': false_alarm_bias['diff_olf_false_alarm']
                     })
         else:
             session_info.update({'odour_interval_pokes': 0,
@@ -369,7 +406,19 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                     'odour_interval_false_alarm': 0,
                     'interval_pokes': 0,
                     'interval_trials': 0,
-                    'interval_false_alarm': 0
+                    'interval_false_alarm': 0,
+                    'odour_same_olf_pokes': 0, 
+                    'odour_same_olf_trials': 0, 
+                    'odour_same_olf_false_alarm': 0, 
+                    'odour_diff_olf_pokes': 0, 
+                    'odour_diff_olf_trials': 0, 
+                    'odour_diff_olf_false_alarm': 0, 
+                    'same_olf_pokes': 0, 
+                    'same_olf_trials': 0, 
+                    'same_olf_false_alarm': 0, 
+                    'diff_olf_pokes': 0, 
+                    'diff_olf_trials': 0, 
+                    'diff_olf_false_alarm': 0
                     })
             
         # Add sequence completion data
@@ -401,19 +450,25 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             print(f"  Accuracy: R1={accuracy_data['r1_accuracy']:.1f}% ({accuracy_data['r1_correct']}/{accuracy_data['r1_total']}), "
                   f"R2={accuracy_data['r2_accuracy']:.1f}% ({accuracy_data['r2_correct']}/{accuracy_data['r2_total']})")
             print(f"  Overall: {accuracy_data['overall_accuracy']:.1f}%")
+        
         if response_time:
             print(f"  Response Time: R1={response_time['r1_avg_rt']:.1f}, \
                   R2={response_time['r2_avg_rt']:.1f}")
+        
         if false_alarm:
             print(f"  False alarm: C={false_alarm['C_false_alarm']:.1f}% D={false_alarm['D_false_alarm']:.1f}%, "
                   f"E={false_alarm['E_false_alarm']:.1f}% F={false_alarm['F_false_alarm']:.1f}%, "
                   f"G={false_alarm['G_false_alarm']:.1f}%")
             print(f"  Overall false alarm rate: {false_alarm['overall_false_alarm']:.1f}%")
-        # if false_alarm_bias:
-        #     print(f"  False alarm time bias: C={false_alarm['C_false_alarm']:.1f}% D={false_alarm['D_false_alarm']:.1f}%, "
-        #           f"E={false_alarm['E_false_alarm']:.1f}% F={false_alarm['F_false_alarm']:.1f}%, "
-        #           f"G={false_alarm['G_false_alarm']:.1f}%")
-        #     print(f"  Overall false alarm rate: {false_alarm['overall_false_alarm']:.1f}%")
+        
+        if false_alarm_bias:
+            for odour, rate in false_alarm_bias['odour_same_olf_false_alarm'].items():
+                print(f"\nFalse alarm same-olfactometer bias rates for odour {odour}: {rate:.1f}%")
+            for odour, rate in false_alarm_bias['odour_diff_olf_false_alarm'].items():
+                print(f"\nFalse alarm diff-olfactometer bias rates for odour {odour}: {rate:.1f}%")                
+            print(f"  Overall false alarm same-olfactometer bias rate: {false_alarm_bias['same_olf_false_alarm']:.1f}%")
+            print(f"  Overall false alarm diff-olfactometer bias rate: {false_alarm_bias['diff_olf_false_alarm']:.1f}%")
+
         if sequence_completion:
             print(f"  Sequence completion ratio: {sequence_completion['completion_ratio']:.1f}%")
     
@@ -461,11 +516,17 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_nonR_trials = all_C_trials + all_D_trials + all_E_trials + all_F_trials + all_G_trials
     all_overall_false_alarm = (all_nonR_pokes / all_nonR_trials * 100) if all_nonR_trials > 0 else 0
 
-    # Calculate overall false alarm time bias 
+    # Calculate overall false alarm time and olfactometer bias 
     for odour in nonR_odours:
         for interval in intervals:
             all_odour_interval_false_alarm[odour][interval] = (all_odour_interval_pokes[odour][interval] / all_odour_interval_trials[odour][interval] * 100) if all_odour_interval_trials[odour][interval] else 0
-    
+
+        all_odour_same_olf_false_alarm[odour] = (all_odour_same_olf_pokes[odour] / all_odour_same_olf_trials[odour] * 100) if all_odour_same_olf_trials[odour] else 0
+        all_odour_diff_olf_false_alarm[odour] = (all_odour_diff_olf_pokes[odour] / all_odour_diff_olf_trials[odour] * 100) if all_odour_diff_olf_trials[odour] else 0
+
+    all_same_olf_false_alarm = (all_same_olf_pokes / all_same_olf_trials * 100) if all_same_olf_trials else 0
+    all_diff_olf_false_alarm = (all_diff_olf_pokes / all_diff_olf_trials * 100) if all_diff_olf_trials else 0
+
     for interval in intervals:
         all_interval_pokes[interval] = np.sum([all_odour_interval_pokes[odour][interval] for odour in nonR_odours])
         all_interval_trials[interval] = np.sum([all_odour_interval_trials[odour][interval] for odour in nonR_odours])
@@ -492,6 +553,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         print(f"False alarm rate: C={all_C_false_alarm:.1f}%, D={all_D_false_alarm:.1f}%, E={all_E_false_alarm:.1f}%, F={all_F_false_alarm:.1f}%, G={all_G_false_alarm:.1f}%")
         print(f"Overall false alarm rate: {all_overall_false_alarm:.1f}%")
         print(f"Overall sequence completion: {overall_completion_ratio:.1f}%")
+    if int(stage) == 8:
+        print(f"False alarm same-olfactometer bias: {all_same_olf_false_alarm:.1f}%")
+        print(f"False alarm diff-olfactometer bias: {all_diff_olf_false_alarm:.1f}%")
     print(f"Decision accuracy: R1={all_r1_accuracy:.1f}% ({all_r1_correct}/{all_r1_total}), R2={all_r2_accuracy:.1f}% ({all_r2_correct}/{all_r2_total})")
     print(f"Overall accuracy: {all_overall_accuracy:.1f}%")
     
@@ -536,7 +600,19 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'all_odour_interval_false_alarm': all_odour_interval_false_alarm,
         'all_interval_pokes': all_interval_pokes,
         'all_interval_trials': all_interval_trials,
-        'all_interval_false_alarm': all_interval_false_alarm
+        'all_interval_false_alarm': all_interval_false_alarm,
+        'all_odour_same_olf_pokes': all_odour_same_olf_pokes, 
+        'all_odour_same_olf_trials': all_odour_same_olf_trials, 
+        'all_odour_same_olf_false_alarm': all_odour_same_olf_false_alarm, 
+        'all_odour_diff_olf_pokes': all_odour_diff_olf_pokes, 
+        'all_odour_diff_olf_trials': all_odour_diff_olf_trials, 
+        'all_odour_same_olf_false_alarm': all_odour_same_olf_false_alarm, 
+        'all_same_olf_pokes': all_same_olf_pokes, 
+        'all_same_olf_trials': all_same_olf_trials, 
+        'all_same_olf_false_alarm': all_same_olf_false_alarm, 
+        'all_diff_olf_pokes': all_diff_olf_pokes, 
+        'all_diff_olf_trials': all_diff_olf_trials, 
+        'all_diff_olf_false_alarm': all_diff_olf_false_alarm
     }
     
     return results
