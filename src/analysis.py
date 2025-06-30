@@ -270,8 +270,9 @@ class RewardAnalyser:
             else:
                 session_data['session_duration_sec'] = 0
             
-            # Process experiment events for EndInitiation
+            # Process experiment events for EndInitiation and InitiationSequence
             end_initiation_frames = []
+            start_initiation_frames = []
             experiment_events_dir = root / "ExperimentEvents"
             
             if experiment_events_dir.exists():
@@ -302,6 +303,7 @@ class RewardAnalyser:
                                     print(f"Found {len(eii_df)} EndInitiation events")
                                     eii_df["EndInitiation"] = True
                                     end_initiation_frames.append(eii_df[["Time", "EndInitiation"]])
+                                # TODO: Continue here
                     except Exception as e:
                         print(f"Error processing event file {csv_file.name}: {e}")
             else:
@@ -550,8 +552,11 @@ class RewardAnalyser:
                     # all_events_df = pd.concat(event_frames, ignore_index=True)
                     print(f"Combined {len(all_events_df)} total events")
                     
+                    # Detect stage 
+                    stage = int(detect_stage(root))
+
                     # Explicitly add missing columns with default values to prevent errors
-                    if int(detect_stage(root)) > 7:
+                    if stage > 7:
                         required_columns = ['timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', \
                                             'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', \
                                                 'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', \
@@ -601,14 +606,20 @@ class RewardAnalyser:
                         # Calculate response time
                         session_data['response_time'] = calculate_overall_response_time(all_events_df)
 
-                        # Calculate false alarm rate and decision specificity (freerun and doubles)
-                        if int(detect_stage(root)) > 7:  
+                        # Calculate false alarm rate (freerun and doubles)
+                        if stage > 7:  
                             session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df)
-                            # session_data['false_alarm'] = calculate_overall_decision_specificity(all_events_df)
                         
                         # Calculate sequence completion (doubles or other sequences)
-                        if int(detect_stage(root)) == 9:  
+                        if stage == 9:  
                             session_data['sequence_completion'] = calculate_overall_sequence_completion(all_events_df)
+
+                        # Calculate decision sensitivity and specificity (freerun)
+                        if stage == 8:
+                            session_data['false_alarm_bias'] = calculate_overall_false_alarm_bias(all_events_df)
+                        #     session_data['sensitivity'] = calculate_overall_decision_sensitivity(all_events_df)
+
+                        #     session_data['specificity'] = calculate_overall_decision_specificity(all_events_df)
 
                     else:
                         if not has_end_initiation:
@@ -643,6 +654,15 @@ class RewardAnalyser:
                             'E_false_alarm': 0, 'F_false_alarm': 0,
                             'G_false_alarm': 0, 'overall_false_alarm': 0
                         }
+                        # Add empty false alarm bias data 
+                        session_data['false_alarm_bias'] = {
+                            'odour_interval_pokes': 0,
+                            'odour_interval_trials': 0,
+                            'odour_interval_false_alarm': 0,
+                            'interval_pokes': 0,
+                            'interval_trials': 0,
+                            'interval_false_alarm': 0
+                        }
                         # Add empty sequence completion data 
                         session_data['sequence_completion'] = {
                             'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
@@ -675,6 +695,15 @@ class RewardAnalyser:
                         'E_false_alarm': 0, 'F_false_alarm': 0,
                         'G_false_alarm': 0, 'overall_false_alarm': 0
                     }
+                    # Add empty false alarm bias data 
+                    session_data['false_alarm_bias'] = {
+                        'odour_interval_pokes': 0,
+                        'odour_interval_trials': 0,
+                        'odour_interval_false_alarm': 0,
+                        'interval_pokes': 0,
+                        'interval_trials': 0,
+                        'interval_false_alarm': 0
+                    }
                     # Add empty sequence completion data 
                     session_data['sequence_completion'] = {
                         'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
@@ -705,6 +734,15 @@ class RewardAnalyser:
                     'C_false_alarm': 0, 'D_false_alarm': 0,
                     'E_false_alarm': 0, 'F_false_alarm': 0,
                     'G_false_alarm': 0, 'overall_false_alarm': 0
+                }
+                # Add empty false alarm bias data 
+                session_data['false_alarm_bias'] = {
+                    'odour_interval_pokes': 0,
+                    'odour_interval_trials': 0,
+                    'odour_interval_false_alarm': 0,
+                    'interval_pokes': 0,
+                    'interval_trials': 0,
+                    'interval_false_alarm': 0
                 }
                 # Add empty sequence completion data 
                 session_data['sequence_completion'] = {
@@ -740,6 +778,14 @@ class RewardAnalyser:
                     'C_false_alarm': 0, 'D_false_alarm': 0,
                     'E_false_alarm': 0, 'F_false_alarm': 0,
                     'G_false_alarm': 0, 'overall_false_alarm': 0
+                },
+                'false_alarm_bias': {
+                    'odour_interval_pokes': 0,
+                    'odour_interval_trials': 0,
+                    'odour_interval_false_alarm': 0,
+                    'interval_pokes': 0,
+                    'interval_trials': 0,
+                    'interval_false_alarm': 0
                 },
                 'sequence_completion': {
                     'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
@@ -812,6 +858,37 @@ class RewardAnalyser:
                                                 'overall_false_alarm': 0
                                             })
     
+    @staticmethod
+    def get_false_alarm_bias(data_path):
+        """
+        Static method to calculate false alarm bias for non-rewarded trials in a single session.
+        
+        Parameters:
+        -----------
+        data_path : str or Path
+            Path to session data directory
+            
+        Returns:
+        --------
+        dict
+            Dictionary with false alarm bias metrics or None if calculation fails
+        """
+        root = Path(data_path)
+        
+        # Process the given directory directly
+        print(f"Processing false alarm bias for: {root}")
+        
+        # Create a temporary instance to access the _get_session_data method
+        temp_instance = RewardAnalyser.__new__(RewardAnalyser)
+        session_data = temp_instance._get_session_data(root)
+
+        return session_data.get('false_alarm_bias', {'odour_interval_pokes': 0,
+                                                    'odour_interval_trials': 0,
+                                                    'odour_interval_false_alarm': 0,
+                                                    'interval_pokes': 0,
+                                                    'interval_trials': 0,
+                                                    'interval_false_alarm': 0
+                                                })
     @staticmethod
     def get_decision_specificity(data_path):
         return
@@ -963,6 +1040,118 @@ def get_decision_accuracy(data_path):
         Dictionary with accuracy metrics or None if calculation fails
     """
     return RewardAnalyser.get_decision_accuracy(data_path)
+
+def get_response_time(data_path):
+    """
+    Calculate response time for each trial.
+    
+    Parameters:
+    -----------
+    data_path : str or Path
+        Path to session data directory
+        
+    Returns:
+    --------
+    dict
+        Dictionary with response time metrics or None if calculation fails
+    """
+    return RewardAnalyser.get_response_time(data_path)
+
+def get_false_alarm(data_path):
+    """
+    Calculate false alarms for each trial in a single session.
+    
+    Parameters:
+    -----------
+    data_path : str or Path
+        Path to session data directory
+        
+    Returns:
+    --------
+    dict
+        Dictionary with false alarm metrics or None if calculation fails
+    """
+    return RewardAnalyser.get_false_alarm(data_path)
+
+def get_false_alarm_bias(data_path):
+    """
+    Calculate false alarm bias for each trial in a single session.
+    
+    Parameters:
+    -----------
+    data_path : str or Path
+        Path to session data directory
+        
+    Returns:
+    --------
+    dict
+        Dictionary with false alarm bias metrics or None if calculation fails
+    """
+    return RewardAnalyser.get_false_alarm_bias(data_path)
+
+def get_decision_specificity(data_path):
+    """
+    Calculate decision specificity for each trial in a single session.
+    
+    Parameters:
+    -----------
+    data_path : str or Path
+        Path to session data directory
+        
+    Returns:
+    --------
+    dict
+        Dictionary with decision specificity metrics or None if calculation fails
+    """
+    return RewardAnalyser.get_decision_specificity(data_path)
+
+def get_sequence_completion(data_path):
+    """
+    Calculate sequence completion for each trial in a single session.
+    
+    Parameters:
+    -----------
+    data_path : str or Path
+        Path to session data directory
+        
+    Returns:
+    --------
+    dict
+        Dictionary with sequence completion metrics or None if calculation fails
+    """
+    return RewardAnalyser.get_sequence_completion(data_path)
+
+def get_decision_sensitivity(data_path):
+    """
+    Calculate decision sensitivity for a single session.
+    
+    Parameters:
+    -----------
+    data_path : str or Path
+        Path to session data directory
+        
+    Returns:
+    --------
+    dict
+        Dictionary with sensitivity metrics or None if calculation fails
+    """
+    return RewardAnalyser.get_decision_sensitivity(data_path)
+
+def get_decision_specificity(data_path):
+    """
+    Calculate decision specificity for a single session.
+    
+    Parameters:
+    -----------
+    data_path : str or Path
+        Path to session data directory
+        
+    Returns:
+    --------
+    dict
+        Dictionary with specificity metrics or None if calculation fails
+    """
+    return RewardAnalyser.get_decision_specificity(data_path)
 
 def detect_stage(root):
     """
@@ -1249,27 +1438,6 @@ def calculate_overall_response_time(events_df):
         'trial_id': trial_id
     }
 
-# TODO:
-def calculate_overall_decision_specificity(events_df):
-    """
-    Calculate decision specificity for rewarded and non-rewarded trial in freerun sessions.
-    
-    Parameters:
-    -----------
-    events_df : pandas.DataFrame
-        DataFrame containing trial events with columns: 'timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 
-                                            'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
-                                                'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
-                                                    'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
-                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
-        
-    Returns:
-    --------
-    dict
-        Dictionary containing specificity metrics for r1, r2, and overall trials
-    """
-    return 
-
 def calculate_overall_false_alarm(events_df): 
     """
     Calculate false alarm rate for non-rewarded trials.
@@ -1499,66 +1667,232 @@ def calculate_overall_sequence_completion(events_df):
         'completion_ratio': completion_ratio
     }
 
-def get_response_time(data_path):
-    """
-    Calculate response time for each trial.
+# def calculate_overall_decision_sensitivity(events_df):
+#     """
+#     Calculate decision sensitivity for rewarded trials in freerun sessions.
+#     Sensitivity = TP / (TP + FN) = response_trials (A+B) / total_trials (A+B) 
     
-    Parameters:
-    -----------
-    data_path : str or Path
-        Path to session data directory
+#     Parameters:
+#     -----------
+#     events_df : pandas.DataFrame
+#         DataFrame containing trial events with columns: 'timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 
+#                                             'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
+#                                                 'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
+#                                                     'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
+#                                                         'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
         
-    Returns:
-    --------
-    dict
-        Dictionary with response time metrics or None if calculation fails
-    """
-    return RewardAnalyser.get_response_time(data_path)
+#     Returns:
+#     --------
+#     dict
+#         Dictionary containing sensitivity metrics for r1 and r2 trials
+#     """
+    
+#     # Ensure events are in chronological order
+#     events_df = events_df.sort_values('timestamp').reset_index(drop=True)
+    
+#     # Initialize counters
+#     r1_respond = 0
+#     r1_total = 0
+#     r2_respond = 0
+#     r2_total = 0
+    
+#     # Find all trial end points
+#     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
 
-def get_false_alarm(data_path):
-    """
-    Calculate false alarms for each trial in a single session.
-    
-    Parameters:
-    -----------
-    data_path : str or Path
-        Path to session data directory
+#     # Process each trial
+#     for end_idx in end_initiation_indices:
+#         # Determine trial type (r1 or r2 or nonR) by finding the most recent valve activation
+#         closest_valve_idx = None
+#         trial_type = None
+#         for i in range(end_idx - 1, -1, -1):
+#             if events_df.loc[i, 'r1_olf_valve']:
+#                 closest_valve_idx = i
+#                 trial_type = 'r1'
+#                 break
+#             elif events_df.loc[i, 'r2_olf_valve']:
+#                 closest_valve_idx = i
+#                 trial_type = 'r2'
+#                 break
+#             elif ('odourC_olf_valve' in events_df and events_df.loc[i, 'odourC_olf_valve']) or \
+#                     ('odourD_olf_valve' in events_df and events_df.loc[i, 'odourD_olf_valve']) or \
+#                     ('odourE_olf_valve' in events_df and events_df.loc[i, 'odourE_olf_valve']) or \
+#                     ('odourF_olf_valve' in events_df and events_df.loc[i, 'odourF_olf_valve']) or \
+#                     ('odourG_olf_valve' in events_df and events_df.loc[i, 'odourG_olf_valve']):
+#                 closest_valve_idx = i
+#                 trial_type = 'nonR'
+#                 break
+                
+#         # Skip if no valve activation found before this trial end or trial is non-rewarded
+#         if trial_type == 'nonR' or closest_valve_idx is None:
+#             continue
+            
+#         # Count trial by type
+#         if trial_type == 'r1':
+#             r1_total += 1
+#         elif trial_type == 'r2':
+#             r2_total += 1
         
-    Returns:
-    --------
-    dict
-        Dictionary with false alarm metrics or None if calculation fails
-    """
-    return RewardAnalyser.get_false_alarm(data_path)
+#         # Determine if there was a poke after trial end 
 
-def get_decision_specificity(data_path):
-    """
-    Calculate decision specificity for each trial in a single session.
-    
-    Parameters:
-    -----------
-    data_path : str or Path
-        Path to session data directory
-        
-    Returns:
-    --------
-    dict
-        Dictionary with decision specificity metrics or None if calculation fails
-    """
-    return RewardAnalyser.get_decision_specificity(data_path)
+#         # Find the first poke after trial end
+#         for j in range(end_idx + 1, len(events_df)):
+#             if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
+#                 # Correct if poke matches trial type
+#                 if trial_type == 'r1' and events_df.loc[j, 'r1_poke']:
+#                     r1_correct += 1
+#                 elif trial_type == 'r2' and events_df.loc[j, 'r2_poke']:
+#                     r2_correct += 1
+#                 break
 
-def get_sequence_completion(data_path):
+#     # Calculate accuracy percentages with safety checks for division by zero
+#     r1_accuracy = (r1_correct / r1_total * 100) if r1_total > 0 else 0
+#     r2_accuracy = (r2_correct / r2_total * 100) if r2_total > 0 else 0
+#     overall_accuracy = ((r1_correct + r2_correct) / (r1_total + r2_total) * 100) if (r1_total + r2_total) > 0 else 0
+    
+#     # Return detailed accuracy metrics
+#     return {
+#         'r1_total': r1_total,
+#         'r1_correct': r1_correct,
+#         'r1_accuracy': r1_accuracy,
+#         'r2_total': r2_total,
+#         'r2_correct': r2_correct,
+#         'r2_accuracy': r2_accuracy,
+#         'overall_accuracy': overall_accuracy
+#     }
+
+# # TODO:
+# def calculate_overall_decision_specificity(events_df):
+#     """
+#     Calculate decision specificity for non-rewarded trials in freerun sessions.
+#     Specificity = TN / (TN + FP) = non_response_trials (C+D+E+F+G) / total_trials (C+D+E+F+G)
+    
+#     Parameters:
+#     -----------
+#     events_df : pandas.DataFrame
+#         DataFrame containing trial events with columns: 'timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 
+#                                             'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
+#                                                 'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
+#                                                     'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
+#                                                         'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
+        
+#     Returns:
+#     --------
+#     dict
+#         Dictionary containing specificity metrics for non-rewarded trials
+#     """
+#     return 
+
+def calculate_overall_false_alarm_bias(events_df):
     """
-    Calculate sequence completion for each trial in a single session.
+    Calculate false alarm bias for non-rewarded trials.
     
     Parameters:
     -----------
-    data_path : str or Path
-        Path to session data directory
+    events_df : pandas.DataFrame
+        DataFrame containing trial events with columns: 'timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 
+                                            'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
+                                                'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
+                                                    'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
+                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
         
     Returns:
     --------
     dict
-        Dictionary with sequence completion metrics or None if calculation fails
+        Dictionary containing false alarm bias metrics 
     """
-    return RewardAnalyser.get_sequence_completion(data_path)
+
+    # Initialize counters
+    num_inter_reward_poke_odours = 0
+    
+    # Find all trial end points
+    end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+
+    # Process each trial
+    intervals = []
+    binary_poke = np.zeros(len(end_initiation_indices[:-1]))
+    trial_type = []
+
+    for e, end_idx in enumerate(end_initiation_indices[:-1]):
+            
+        # Determine trial type (r1, r2, or non-rewarded odour) by finding the most recent valve activation
+        closest_valve_idx = None
+        for i in range(end_idx - 1, -1, -1):
+            if events_df.loc[i, 'r1_olf_valve']:
+                closest_valve_idx = i
+                trial_type.append('r1')
+                break
+            elif events_df.loc[i, 'r2_olf_valve']:
+                closest_valve_idx = i
+                trial_type.append('r2')
+                break 
+            elif events_df.loc[i, 'odourC_olf_valve']:
+                closest_valve_idx = i
+                trial_type.append('C')
+                break
+            elif events_df.loc[i, 'odourD_olf_valve']:
+                closest_valve_idx = i
+                trial_type.append('D')
+                break
+            elif events_df.loc[i, 'odourE_olf_valve']:
+                closest_valve_idx = i
+                trial_type.append('E')
+                break
+            elif events_df.loc[i, 'odourF_olf_valve']:
+                closest_valve_idx = i
+                trial_type.append('F')
+                break
+            elif events_df.loc[i, 'odourG_olf_valve']:
+                closest_valve_idx = i
+                trial_type.append('G')
+                break
+
+        # Store the previous trial type and keep memory of consecutive non-rewarded odour counts
+        if (trial_type[e] != 'r1') and (trial_type[e] != 'r2'):
+            num_inter_reward_poke_odours += 1
+        else:
+            num_inter_reward_poke_odours = 0 
+        intervals.append(num_inter_reward_poke_odours)
+
+        # Skip if no valve activation found before this trial end
+        if closest_valve_idx is None:
+            continue
+
+        # Find the first poke after trial end
+        for j in range(end_idx + 1, end_initiation_indices[e+1]):
+            if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
+                binary_poke[e] = 1
+                break
+
+    # Calculate false alarm rate for each trial type and interval with safety checks for division by zero
+    binary_poke = np.array(binary_poke)
+    intervals = np.array(intervals)
+    trial_type = np.array(trial_type)
+
+    nonR_odours = ['C', 'D', 'E', 'F', 'G']
+    odour_interval_pokes = {odour: {} for odour in nonR_odours}
+    odour_interval_trials = {odour: {} for odour in nonR_odours}
+    odour_interval_false_alarm = {odour: {} for odour in nonR_odours}
+
+    for odour in nonR_odours:
+        for i in np.unique(intervals):
+            odour_interval_pokes[odour][i] = len(np.where((binary_poke == 1) & (trial_type == odour) & (intervals == i))[0])
+            odour_interval_trials[odour][i] = len(np.where((trial_type == odour) & (intervals == i))[0])
+            odour_interval_false_alarm[odour][i] = (odour_interval_pokes[odour][i] / odour_interval_trials[odour][i] * 100) if odour_interval_trials[odour][i] else 0
+    
+    # Calculate overall false alarm rate for each interval with safety checks for division by zero
+    interval_pokes = {}
+    interval_trials = {}
+    interval_false_alarm = {}
+    for i in np.unique(intervals):
+        interval_pokes[i] = np.sum([odour_interval_pokes[odour][i] for odour in nonR_odours])
+        interval_trials[i] = np.sum([odour_interval_trials[odour][i] for odour in nonR_odours])
+        interval_false_alarm[i] = (interval_pokes[i] / interval_trials[i] * 100) if interval_trials[i] else 0
+   
+    return {
+        'odour_interval_pokes': odour_interval_pokes,
+        'odour_interval_trials': odour_interval_trials,
+        'odour_interval_false_alarm': odour_interval_false_alarm,
+        'interval_pokes': interval_pokes,
+        'interval_trials': interval_trials,
+        'interval_false_alarm': interval_false_alarm        
+    }

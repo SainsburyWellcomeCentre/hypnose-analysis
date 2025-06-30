@@ -244,10 +244,9 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
 
         total_nonR_pokes = total_C_pokes + total_D_pokes + total_E_pokes + total_F_pokes + total_G_pokes
         total_nonR_trials = total_C_trials + total_D_trials + total_E_trials + total_F_trials + total_G_trials
-        
+        total_overall_false_alarm = (total_nonR_pokes / total_nonR_trials * 100) if total_nonR_trials > 0 else 0
+
         if total_nonR_trials > 0:
-            total_overall_false_alarm = (total_nonR_pokes / total_nonR_trials * 100) if total_nonR_trials > 0 else 0
-     
             # Store combined session results
             session_result = {
                 'session_id': session_id,
@@ -342,12 +341,12 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072")
 
     parser = argparse.ArgumentParser(description="Calculate and plot decision false alarm across sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")
-    parser.add_argument("--sessions", default=np.arange(55, 66), help="List of session IDs (optional)") 
-    parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed (optional)")
+    parser.add_argument("--sessions", default=np.arange(55, 68), help="List of session IDs (optional)") 
+    parser.add_argument("--stage", "--s", default=8, help="Stage to be analysed (optional)")
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")
     args = parser.parse_args()

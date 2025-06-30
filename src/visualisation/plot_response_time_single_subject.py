@@ -402,19 +402,19 @@ def main(data_folder, across_sessions=True, stage=8, sessions=None, plot_file=No
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-61_date-20250618")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072")
+        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-61_date-20250618")
 
     parser = argparse.ArgumentParser(description="Calculate and plot response time for a session or across sessions")
     parser.add_argument("data_folder", help="Path to the session folder containing data")
-    parser.add_argument("--across_sessions", default=False, help="Whether to plot results for a single session or across sessions")
-    parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed.")
-    parser.add_argument("--sessions", default=np.arange(55,66), help="List of session IDs (optional)") 
-    parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")  # TODO 
+    parser.add_argument("--across_sessions", default=True, help="Whether to plot results for a single session or across sessions")
+    parser.add_argument("--stage", "--s", default=8, help="Stage to be analysed.")
+    parser.add_argument("--sessions", default=np.arange(55,68), help="List of session IDs (optional)") 
+    # parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")  # TODO 
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")
     args = parser.parse_args()
     
-    main(args.data_folder, args.across_sessions, args.stage, args.sessions, args.output, args.plot)
+    main(args.data_folder, args.across_sessions, args.stage, args.sessions, args.plot)
 
 
 

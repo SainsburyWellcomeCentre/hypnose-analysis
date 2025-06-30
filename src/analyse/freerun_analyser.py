@@ -6,9 +6,11 @@ from pathlib import Path
 import warnings
 import harp
 import re
+from collections import defaultdict
 
 from src import utils
-from src.analysis import RewardAnalyser, get_decision_accuracy, detect_stage, get_response_time, get_decision_specificity, get_false_alarm, get_sequence_completion
+from src.analysis import RewardAnalyser, get_decision_accuracy, detect_stage, get_response_time, \
+    get_decision_specificity, get_false_alarm, get_sequence_completion, get_false_alarm_bias
 
 # Filter out specific warnings
 warnings.filterwarnings(
@@ -80,6 +82,14 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_G_pokes = []
     all_G_trials = []
 
+    # false alarm bias variables 
+    all_odour_interval_pokes = defaultdict(lambda: defaultdict(int))
+    all_odour_interval_trials = defaultdict(lambda: defaultdict(int))
+    all_odour_interval_false_alarm = defaultdict(lambda: defaultdict(lambda: None))
+    all_interval_pokes = {}
+    all_interval_trials = {}
+    all_interval_false_alarm = {}
+
     # sequence completion variables 
     all_rew_trials = 0
     all_non_rew_trials = 0
@@ -136,6 +146,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
         # Calculate false alarms
         false_alarm = get_false_alarm(session_dir)
+
+        # Calculate false alarm bias
+        false_alarm_bias = get_false_alarm_bias(session_dir)
 
         # Calculate sequence completion 
         sequence_completion = get_sequence_completion(session_dir)
@@ -332,6 +345,33 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'overall_false_alarm': np.nan,
             })
 
+        # Add false alarm bias data 
+        if false_alarm_bias:
+            nonR_odours = false_alarm_bias['odour_interval_pokes'].keys()
+            first_odour = next(iter(false_alarm_bias['odour_interval_pokes']))
+            intervals = false_alarm_bias['odour_interval_pokes'][first_odour].keys()
+    
+            for odour in nonR_odours:
+                for interval in intervals:
+                    all_odour_interval_pokes[odour][interval] += false_alarm_bias['odour_interval_pokes'][odour][interval]
+                    all_odour_interval_trials[odour][interval] += false_alarm_bias['odour_interval_trials'][odour][interval]
+                    
+            session_info.update({'odour_interval_pokes': false_alarm_bias['odour_interval_pokes'],
+                    'odour_interval_trials': false_alarm_bias['odour_interval_trials'],
+                    'odour_interval_false_alarm': false_alarm_bias['odour_interval_false_alarm'],
+                    'interval_pokes': false_alarm_bias['interval_pokes'],
+                    'interval_trials': false_alarm_bias['interval_trials'],
+                    'interval_false_alarm': false_alarm_bias['interval_false_alarm']
+                    })
+        else:
+            session_info.update({'odour_interval_pokes': 0,
+                    'odour_interval_trials': 0,
+                    'odour_interval_false_alarm': 0,
+                    'interval_pokes': 0,
+                    'interval_trials': 0,
+                    'interval_false_alarm': 0
+                    })
+            
         # Add sequence completion data
         if sequence_completion:
             all_rew_trials += sequence_completion['rew_trials']
@@ -369,6 +409,11 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                   f"E={false_alarm['E_false_alarm']:.1f}% F={false_alarm['F_false_alarm']:.1f}%, "
                   f"G={false_alarm['G_false_alarm']:.1f}%")
             print(f"  Overall false alarm rate: {false_alarm['overall_false_alarm']:.1f}%")
+        # if false_alarm_bias:
+        #     print(f"  False alarm time bias: C={false_alarm['C_false_alarm']:.1f}% D={false_alarm['D_false_alarm']:.1f}%, "
+        #           f"E={false_alarm['E_false_alarm']:.1f}% F={false_alarm['F_false_alarm']:.1f}%, "
+        #           f"G={false_alarm['G_false_alarm']:.1f}%")
+        #     print(f"  Overall false alarm rate: {false_alarm['overall_false_alarm']:.1f}%")
         if sequence_completion:
             print(f"  Sequence completion ratio: {sequence_completion['completion_ratio']:.1f}%")
     
@@ -416,6 +461,16 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_nonR_trials = all_C_trials + all_D_trials + all_E_trials + all_F_trials + all_G_trials
     all_overall_false_alarm = (all_nonR_pokes / all_nonR_trials * 100) if all_nonR_trials > 0 else 0
 
+    # Calculate overall false alarm time bias 
+    for odour in nonR_odours:
+        for interval in intervals:
+            all_odour_interval_false_alarm[odour][interval] = (all_odour_interval_pokes[odour][interval] / all_odour_interval_trials[odour][interval] * 100) if all_odour_interval_trials[odour][interval] else 0
+    
+    for interval in intervals:
+        all_interval_pokes[interval] = np.sum([all_odour_interval_pokes[odour][interval] for odour in nonR_odours])
+        all_interval_trials[interval] = np.sum([all_odour_interval_trials[odour][interval] for odour in nonR_odours])
+        all_interval_false_alarm[interval] = (all_interval_pokes[interval] / all_interval_trials[interval] * 100) if all_interval_trials[interval] else 0
+   
     # Calculate overall sequence completion ratio
     overall_completion_ratio = all_rew_trials / (all_rew_trials + all_non_rew_trials) * 100 if (all_rew_trials + all_non_rew_trials) > 0 else 0
     
@@ -475,15 +530,21 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'all_F_false_alarm': all_F_false_alarm,
         'all_G_false_alarm': all_G_false_alarm,
         'all_overall_false_alarm': all_overall_false_alarm,
-        'overall_completion_ratio': overall_completion_ratio
+        'overall_completion_ratio': overall_completion_ratio, 
+        'all_odour_interval_pokes': all_odour_interval_pokes,
+        'all_odour_interval_trials': all_odour_interval_trials,
+        'all_odour_interval_false_alarm': all_odour_interval_false_alarm,
+        'all_interval_pokes': all_interval_pokes,
+        'all_interval_trials': all_interval_trials,
+        'all_interval_false_alarm': all_interval_false_alarm
     }
     
     return results
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-59_date-20250616")
-        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-53_date-20250606")
+        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-59_date-20250616")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-65_date-20250624")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")

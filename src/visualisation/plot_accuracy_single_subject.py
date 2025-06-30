@@ -315,12 +315,12 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072")
 
     parser = argparse.ArgumentParser(description="Calculate and plot decision accuracy across sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")
-    parser.add_argument("--sessions", default=np.arange(55, 66), help="List of session IDs (optional)") 
-    parser.add_argument("--stage", "--s", default=9, help="Stage to be analysed (optional)")
+    parser.add_argument("--sessions", default=np.arange(55, 68), help="List of session IDs (optional)") 
+    parser.add_argument("--stage", "--s", default=8, help="Stage to be analysed (optional)")
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")
     args = parser.parse_args()
