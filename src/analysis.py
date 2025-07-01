@@ -553,7 +553,7 @@ class RewardAnalyser:
                     print(f"Combined {len(all_events_df)} total events")
                     
                     # Detect stage 
-                    stage = int(detect_stage(root))
+                    stage = float(detect_stage(root))
 
                     # Explicitly add missing columns with default values to prevent errors
                     if stage > 7:
@@ -615,11 +615,13 @@ class RewardAnalyser:
                             session_data['sequence_completion'] = calculate_overall_sequence_completion(all_events_df)
 
                         # Calculate decision sensitivity and specificity (freerun)
-                        if stage == 8:
+                        if stage > 8 and stage < 9:
                             session_data['false_alarm_bias'] = calculate_overall_false_alarm_bias(all_events_df)
-                        #     session_data['sensitivity'] = calculate_overall_decision_sensitivity(all_events_df)
 
-                        #     session_data['specificity'] = calculate_overall_decision_specificity(all_events_df)
+                            if stage >= 8.2 and stage < 9:
+                                session_data['sensitivity'] = calculate_overall_decision_sensitivity(all_events_df)
+
+                            #     session_data['specificity'] = calculate_overall_decision_specificity(all_events_df)
 
                     else:
                         if not has_end_initiation:
@@ -679,6 +681,15 @@ class RewardAnalyser:
                         session_data['sequence_completion'] = {
                             'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
                         }
+                        # Add empty sensitivity data
+                        session_data['sensitivity'] = {'r1_total': 0,
+                            'r1_respond': 0,
+                            'r1_sensitivity': 0,
+                            'r2_total': 0,
+                            'r2_respond': 0,
+                            'r2_sensitivity': 0,
+                            'overall_sensitivity': 0
+                        }
                 
                 except Exception as e:
                     print(f"Error processing event data: {e}")
@@ -732,6 +743,15 @@ class RewardAnalyser:
                     session_data['sequence_completion'] = {
                         'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
                     }
+                    # Add empty sensitivity data
+                    session_data['sensitivity'] = {'r1_total': 0,
+                        'r1_respond': 0,
+                        'r1_sensitivity': 0,
+                        'r2_total': 0,
+                        'r2_respond': 0,
+                        'r2_sensitivity': 0,
+                        'overall_sensitivity': 0
+                    }
             else:
                 print("No events available for decision accuracy, response time, false alarm rate and specificity calculation")
                 # Add empty accuracy data
@@ -783,6 +803,15 @@ class RewardAnalyser:
                 # Add empty sequence completion data 
                 session_data['sequence_completion'] = {
                     'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
+                }
+                # Add empty sensitivity data
+                session_data['sensitivity'] = {'r1_total': 0,
+                    'r1_respond': 0,
+                    'r1_sensitivity': 0,
+                    'r2_total': 0,
+                    'r2_respond': 0,
+                    'r2_sensitivity': 0,
+                    'overall_sensitivity': 0
                 }
         
         except Exception as e:
@@ -837,6 +866,14 @@ class RewardAnalyser:
                 },
                 'sequence_completion': {
                     'rew_trials': 0, 'non_rew_trials': 0, 'completion_ratio': 0
+                },
+                'sensitivity': {'r1_total': 0,
+                    'r1_respond': 0,
+                    'r1_sensitivity': 0,
+                    'r2_total': 0,
+                    'r2_respond': 0,
+                    'r2_sensitivity': 0,
+                    'overall_sensitivity': 0
                 }
             }
         
@@ -949,9 +986,37 @@ class RewardAnalyser:
                                                     'diff_olf_trials': 0, 
                                                     'diff_olf_false_alarm': 0
                                                 })
+    
     @staticmethod
-    def get_decision_specificity(data_path):
-        return
+    def get_decision_sensitivity(data_path):
+        """
+        Static method to calculate decision sensitivity for a single session.
+        
+        Parameters:
+        -----------
+        data_path : str or Path
+            Path to session data directory
+            
+        Returns:
+        --------
+        dict
+            Dictionary with sensitivity metrics or None if calculation fails
+        """
+        root = Path(data_path)
+        
+        # Process the given directory directly
+        print(f"Processing decision sensitivity for: {root}")
+        
+        # Create a temporary instance to access the _get_session_data method
+        temp_instance = RewardAnalyser.__new__(RewardAnalyser)
+        session_data = temp_instance._get_session_data(root)
+        
+        # Return just the sensitivity summary
+        return session_data.get('sensitivity', {'r1_total': 0, 'r2_total': 0,
+                            'r1_respond': 0, 'r1_sensitivity': 0,
+                            'r2_respond': 0, 'r2_sensitivity': 0,
+                            'overall_sensitivity': 0
+            })
 
     @staticmethod
     def get_response_time(data_path):
@@ -1032,10 +1097,13 @@ class RewardAnalyser:
                             match = re.search(r'_Stage(\d+)', seq['name'])
                             if match:
                                 if 'FreeRun' in seq['name']:
-                                    stage_found = 8
+                                    stage_number = int(match.group(1))
+                                    stage_found = 8 + 0.1 * stage_number
                                     # stage_found = int(match.group(1)) + 7
                                 elif 'Doubles' in seq['name']:
                                     stage_found = 9
+                                elif 'Triples' in seq['name']:
+                                    stage_found = 10
                                 else:
                                     stage_found = match.group(1)
                                 return stage_found
@@ -1048,10 +1116,13 @@ class RewardAnalyser:
                     match = re.search(r'_Stage(\d+)', seq_group['name'])
                     if match:
                         if 'FreeRun' in seq_group['name']:
+                            stage_number = int(match.group(1))
+                            stage_found = 8 + 0.1 * stage_number
                             # stage_found = int(match.group(1)) + 7
-                            stage_found = 8
-                        elif 'Doubles' in seq['name']:
+                        elif 'Doubles' in seq_group['name']:
                             stage_found = 9
+                        elif 'Triples' in seq_group['name']:
+                            stage_found = 10
                         else:
                             stage_found = match.group(1)
                         return stage_found
@@ -1149,22 +1220,6 @@ def get_false_alarm_bias(data_path):
     """
     return RewardAnalyser.get_false_alarm_bias(data_path)
 
-def get_decision_specificity(data_path):
-    """
-    Calculate decision specificity for each trial in a single session.
-    
-    Parameters:
-    -----------
-    data_path : str or Path
-        Path to session data directory
-        
-    Returns:
-    --------
-    dict
-        Dictionary with decision specificity metrics or None if calculation fails
-    """
-    return RewardAnalyser.get_decision_specificity(data_path)
-
 def get_sequence_completion(data_path):
     """
     Calculate sequence completion for each trial in a single session.
@@ -1237,10 +1292,13 @@ def detect_stage(root):
                         match = re.search(r'_Stage(\d+)', seq['name'])
                         if match:
                             if 'FreeRun' in seq['name']:
-                                stage_found = 8
+                                stage_number = int(match.group(1))
+                                stage_found = 8 + 0.1 * stage_number
                                 # stage_found = int(match.group(1)) + 7
                             elif 'Doubles' in seq['name']:
                                 stage_found = 9
+                            elif 'Triples' in seq['name']:
+                                stage_found = 10
                             else:
                                 stage_found = match.group(1)
                             return stage_found
@@ -1253,10 +1311,13 @@ def detect_stage(root):
                 match = re.search(r'_Stage(\d+)', seq_group['name'])
                 if match:
                     if 'FreeRun' in seq_group['name']:
-                        stage_found = 8
+                        stage_number = int(match.group(1))
+                        stage_found = 8 + 0.1 * stage_number
                         # stage_found = int(match.group(1)) + 7
-                    elif 'Doubles' in seq['name']:
+                    elif 'Doubles' in seq_group['name']:
                         stage_found = 9
+                    elif 'Triples' in seq_group['name']:
+                        stage_found = 10
                     else:
                         stage_found = match.group(1)
                     return stage_found
@@ -1727,98 +1788,100 @@ def calculate_overall_sequence_completion(events_df):
         'completion_ratio': completion_ratio
     }
 
-# def calculate_overall_decision_sensitivity(events_df):
-#     """
-#     Calculate decision sensitivity for rewarded trials in freerun sessions.
-#     Sensitivity = TP / (TP + FN) = response_trials (A+B) / total_trials (A+B) 
+def calculate_overall_decision_sensitivity(events_df):
+    """
+    Calculate decision sensitivity for rewarded trials in freerun sessions.
+    Sensitivity = TP / (TP + FN) = response_trials (A+B) / total_trials (A+B) 
     
-#     Parameters:
-#     -----------
-#     events_df : pandas.DataFrame
-#         DataFrame containing trial events with columns: 'timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 
-#                                             'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
-#                                                 'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
-#                                                     'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
-#                                                         'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
+    Parameters:
+    -----------
+    events_df : pandas.DataFrame
+        DataFrame containing trial events with columns: 'timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 
+                                            'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
+                                                'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
+                                                    'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
+                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
         
-#     Returns:
-#     --------
-#     dict
-#         Dictionary containing sensitivity metrics for r1 and r2 trials
-#     """
+    Returns:
+    --------
+    dict
+        Dictionary containing sensitivity metrics for r1 and r2 trials
+    """
     
-#     # Ensure events are in chronological order
-#     events_df = events_df.sort_values('timestamp').reset_index(drop=True)
+    # Ensure events are in chronological order
+    events_df = events_df.sort_values('timestamp').reset_index(drop=True)
     
-#     # Initialize counters
-#     r1_respond = 0
-#     r1_total = 0
-#     r2_respond = 0
-#     r2_total = 0
+    # Initialize counters
+    r1_respond = 0
+    r1_total = 0
+    r2_respond = 0
+    r2_total = 0
     
-#     # Find all trial end points
-#     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+    # Find all trial end points
+    end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
 
-#     # Process each trial
-#     for end_idx in end_initiation_indices:
-#         # Determine trial type (r1 or r2 or nonR) by finding the most recent valve activation
-#         closest_valve_idx = None
-#         trial_type = None
-#         for i in range(end_idx - 1, -1, -1):
-#             if events_df.loc[i, 'r1_olf_valve']:
-#                 closest_valve_idx = i
-#                 trial_type = 'r1'
-#                 break
-#             elif events_df.loc[i, 'r2_olf_valve']:
-#                 closest_valve_idx = i
-#                 trial_type = 'r2'
-#                 break
-#             elif ('odourC_olf_valve' in events_df and events_df.loc[i, 'odourC_olf_valve']) or \
-#                     ('odourD_olf_valve' in events_df and events_df.loc[i, 'odourD_olf_valve']) or \
-#                     ('odourE_olf_valve' in events_df and events_df.loc[i, 'odourE_olf_valve']) or \
-#                     ('odourF_olf_valve' in events_df and events_df.loc[i, 'odourF_olf_valve']) or \
-#                     ('odourG_olf_valve' in events_df and events_df.loc[i, 'odourG_olf_valve']):
-#                 closest_valve_idx = i
-#                 trial_type = 'nonR'
-#                 break
+    # Process each trial
+    for end_idx in end_initiation_indices:
+        # Determine trial type (r1 or r2 or nonR) by finding the most recent valve activation
+        closest_valve_idx = None
+        trial_type = None
+        for i in range(end_idx - 1, -1, -1):
+            if events_df.loc[i, 'r1_olf_valve']:
+                closest_valve_idx = i
+                trial_type = 'r1'
+                break
+            elif events_df.loc[i, 'r2_olf_valve']:
+                closest_valve_idx = i
+                trial_type = 'r2'
+                break
+            elif ('odourC_olf_valve' in events_df and events_df.loc[i, 'odourC_olf_valve']) or \
+                    ('odourD_olf_valve' in events_df and events_df.loc[i, 'odourD_olf_valve']) or \
+                    ('odourE_olf_valve' in events_df and events_df.loc[i, 'odourE_olf_valve']) or \
+                    ('odourF_olf_valve' in events_df and events_df.loc[i, 'odourF_olf_valve']) or \
+                    ('odourG_olf_valve' in events_df and events_df.loc[i, 'odourG_olf_valve']):
+                closest_valve_idx = i
+                trial_type = 'nonR'
+                break
                 
-#         # Skip if no valve activation found before this trial end or trial is non-rewarded
-#         if trial_type == 'nonR' or closest_valve_idx is None:
-#             continue
-            
-#         # Count trial by type
-#         if trial_type == 'r1':
-#             r1_total += 1
-#         elif trial_type == 'r2':
-#             r2_total += 1
-        
-#         # Determine if there was a poke after trial end 
+        # Skip if no valve activation found before this trial end or trial is non-rewarded
+        if trial_type == 'nonR' or closest_valve_idx is None:
+            continue
 
-#         # Find the first poke after trial end
-#         for j in range(end_idx + 1, len(events_df)):
-#             if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
-#                 # Correct if poke matches trial type
-#                 if trial_type == 'r1' and events_df.loc[j, 'r1_poke']:
-#                     r1_correct += 1
-#                 elif trial_type == 'r2' and events_df.loc[j, 'r2_poke']:
-#                     r2_correct += 1
-#                 break
+        # Count trial by type
+        if trial_type == 'r1':
+            r1_total += 1
+        elif trial_type == 'r2':
+            r2_total += 1
+          
+        # Determine if there was a reward poke or a new odour poke after trial end 
+        for j in range(end_idx + 1, len(events_df)):
+            if trial_type == 'r1' and (events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']):
+                r1_respond += 1
+                break
+            if trial_type == 'r2' and (events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']):
+                r2_respond += 1
+                break
+            elif events_df.loc[j, 'r1_olf_valve'] or events_df.loc[j, 'r2_olf_valve'] or \
+                    events_df.loc[j, 'odourC_olf_valve'] or events_df.loc[j, 'odourD_olf_valve'] or \
+                    events_df.loc[j, 'odourE_olf_valve'] or events_df.loc[j, 'odourF_olf_valve'] or \
+                    events_df.loc[j, 'odourG_olf_valve']:  
+                break
 
-#     # Calculate accuracy percentages with safety checks for division by zero
-#     r1_accuracy = (r1_correct / r1_total * 100) if r1_total > 0 else 0
-#     r2_accuracy = (r2_correct / r2_total * 100) if r2_total > 0 else 0
-#     overall_accuracy = ((r1_correct + r2_correct) / (r1_total + r2_total) * 100) if (r1_total + r2_total) > 0 else 0
+    # Calculate sensitivity percentages with safety checks for division by zero
+    r1_sensitivity = (r1_respond / r1_total * 100) if r1_total > 0 else 0
+    r2_sensitivity = (r2_respond / r2_total * 100) if r2_total > 0 else 0
+    overall_sensitivity = ((r1_respond + r2_respond) / (r1_total + r2_total) * 100) if (r1_total + r2_total) > 0 else 0
     
-#     # Return detailed accuracy metrics
-#     return {
-#         'r1_total': r1_total,
-#         'r1_correct': r1_correct,
-#         'r1_accuracy': r1_accuracy,
-#         'r2_total': r2_total,
-#         'r2_correct': r2_correct,
-#         'r2_accuracy': r2_accuracy,
-#         'overall_accuracy': overall_accuracy
-#     }
+    # Return detailed sensitivity metrics
+    return {
+        'r1_total': r1_total,
+        'r1_respond': r1_respond,
+        'r1_sensitivity': r1_sensitivity,
+        'r2_total': r2_total,
+        'r2_respond': r2_respond,
+        'r2_sensitivity': r2_sensitivity,
+        'overall_sensitivity': overall_sensitivity
+    }
 
 # # TODO:
 # def calculate_overall_decision_specificity(events_df):

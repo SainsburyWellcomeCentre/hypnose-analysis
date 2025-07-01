@@ -10,7 +10,7 @@ from collections import defaultdict
 
 from src import utils
 from src.analysis import RewardAnalyser, get_decision_accuracy, detect_stage, get_response_time, \
-    get_decision_specificity, get_false_alarm, get_sequence_completion, get_false_alarm_bias
+    get_decision_sensitivity, get_false_alarm, get_sequence_completion, get_false_alarm_bias
 
 # Filter out specific warnings
 warnings.filterwarnings(
@@ -107,6 +107,12 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_rew_trials = 0
     all_non_rew_trials = 0
     
+    # sensitivity varibles 
+    all_r1_respond = 0
+    all_r1_total = 0
+    all_r2_respond = 0
+    all_r2_total = 0
+    
     # Per-session results for detailed output
     session_results = []
     
@@ -144,7 +150,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         try:
             # Get basic session info by running the appropriate analyzer
             print(f"Running reward analysis for stage {stage}")
-            if stage == "1":
+            if stage == 1:
                 analyzer._reward_analyser_stage1(session_dir, reward_a, reward_b)
             else:
                 analyzer._reward_analyser_stage2to8(session_dir, reward_a, reward_b)
@@ -166,8 +172,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         # Calculate sequence completion 
         sequence_completion = get_sequence_completion(session_dir)
 
-        # Calculate decision specificity
-        specificity_data = get_decision_specificity(session_dir)
+        # Calculate decision sensitivity
+        sensitivity = get_decision_sensitivity(session_dir)
         
         # Extract reward and duration data
         session_info = {}
@@ -437,8 +443,33 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'non_rew_trials': 0,
                 'completion_ratio': 0
             })    
-        # TODO: Add specificity data
+        
+        # Add sensitivity data
+        if sensitivity:
+            all_r1_respond += sensitivity['r1_respond']
+            # all_r1_total += sensitivity['r1_total']
+            all_r2_respond += sensitivity['r2_respond']
+            # all_r2_total += sensitivity['r2_total']
 
+            session_info.update({
+                'r1_respond': sensitivity['r1_respond'],
+                'r1_total': sensitivity['r1_total'],
+                'r1_sensitivity': sensitivity['r1_sensitivity'],
+                'r2_respond': sensitivity['r2_respond'],
+                'r2_total': sensitivity['r2_total'],
+                'r2_sensitivity': sensitivity['r2_sensitivity'],
+                'overall_sensitivity': sensitivity['overall_sensitivity']
+            })
+        else:
+            session_info.update({
+                'r1_respond': 0,
+                'r1_total': 0,
+                'r1_sensitivity': 0,
+                'r2_respond': 0,
+                'r2_total': 0,
+                'r2_sensitivity': 0,
+                'overall_sensitivity': 0
+            })
         session_results.append(session_info)
         
         # Print session summary
@@ -472,6 +503,11 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         if sequence_completion:
             print(f"  Sequence completion ratio: {sequence_completion['completion_ratio']:.1f}%")
     
+        if sensitivity:
+            print(f"  Sensitivity: A={sensitivity['r1_sensitivity']:.1f}% ({sensitivity['r1_respond']}/{sensitivity['r1_total']}), "
+                  f"B={sensitivity['r2_sensitivity']:.1f}% ({sensitivity['r2_respond']}/{sensitivity['r2_total']})")
+            print(f"  Overall: {sensitivity['overall_sensitivity']:.1f}%")
+        
     # Calculate overall accuracy
     all_r1_accuracy = (all_r1_correct / all_r1_total * 100) if all_r1_total > 0 else 0
     all_r2_accuracy = (all_r2_correct / all_r2_total * 100) if all_r2_total > 0 else 0
@@ -535,6 +571,11 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     # Calculate overall sequence completion ratio
     overall_completion_ratio = all_rew_trials / (all_rew_trials + all_non_rew_trials) * 100 if (all_rew_trials + all_non_rew_trials) > 0 else 0
     
+    # Calculate overall sensitivity
+    all_r1_sensitivity = (all_r1_respond / all_r1_total * 100) if all_r1_total > 0 else 0
+    all_r2_sensitivity = (all_r2_respond / all_r2_total * 100) if all_r2_total > 0 else 0
+    all_overall_sensitivity = ((all_r1_respond + all_r2_respond) / (all_r1_total + all_r2_total) * 100) if (all_r1_total + all_r2_total) > 0 else 0
+    
     # Format time in a readable way
     h = int(total_duration_sec // 3600)
     m = int((total_duration_sec % 3600) // 60)
@@ -549,13 +590,17 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     print(f"Combined total rewards: {all_rewards_r1 + all_rewards_r2} ({all_rewards_r1 * reward_a + all_rewards_r2 * reward_b:.1f}µL)")
     print(f"Response time: R1={all_r1_rt:.1f} s, R2={all_r2_rt:.1f} s")
     print(f"Response time: Hit={all_hit_rt:.1f} s, FalseAlarm={all_false_alarm_rt:.1f} s")
-    if int(stage) > 7:
+    if stage > 7:
         print(f"False alarm rate: C={all_C_false_alarm:.1f}%, D={all_D_false_alarm:.1f}%, E={all_E_false_alarm:.1f}%, F={all_F_false_alarm:.1f}%, G={all_G_false_alarm:.1f}%")
         print(f"Overall false alarm rate: {all_overall_false_alarm:.1f}%")
+    if stage >= 9:
         print(f"Overall sequence completion: {overall_completion_ratio:.1f}%")
-    if int(stage) == 8:
+    if stage >= 8:
         print(f"False alarm same-olfactometer bias: {all_same_olf_false_alarm:.1f}%")
         print(f"False alarm diff-olfactometer bias: {all_diff_olf_false_alarm:.1f}%")
+    if stage >= 8.2:
+        print(f"Sensitivity: A={all_r1_sensitivity:.1f}% ({all_r1_respond}/{all_r1_total}), B={all_r2_sensitivity:.1f}% ({all_r2_respond}/{all_r2_total})")
+        print(f"Overall sensitivity: {all_overall_sensitivity:.1f}%")
     print(f"Decision accuracy: R1={all_r1_accuracy:.1f}% ({all_r1_correct}/{all_r1_total}), R2={all_r2_accuracy:.1f}% ({all_r2_correct}/{all_r2_total})")
     print(f"Overall accuracy: {all_overall_accuracy:.1f}%")
     
@@ -612,7 +657,12 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'all_same_olf_false_alarm': all_same_olf_false_alarm, 
         'all_diff_olf_pokes': all_diff_olf_pokes, 
         'all_diff_olf_trials': all_diff_olf_trials, 
-        'all_diff_olf_false_alarm': all_diff_olf_false_alarm
+        'all_diff_olf_false_alarm': all_diff_olf_false_alarm,
+        'r1_respond': all_r1_respond,
+        'r1_sensitivity': all_r1_sensitivity,
+        'r2_respond': all_r2_respond,
+        'r2_sensitivity': all_r2_sensitivity,
+        'overall_sensitivity': all_overall_sensitivity,
     }
     
     return results
@@ -620,7 +670,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-59_date-20250616")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-65_date-20250624")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-66_date-20250625")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")

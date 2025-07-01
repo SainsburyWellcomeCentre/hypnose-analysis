@@ -18,6 +18,7 @@ def plot_sequence_completion(results_df, stage=None, plot_file=None, subject_id=
     
     Args:
         results_df (DataFrame): Contains session_id, session_date, and sequence completion data
+        stage (float): Behavioural stage, if provided
         plot_file (str): Path to save the plot, if provided
         subject_id (str): Subject ID to use in the plot title
     """

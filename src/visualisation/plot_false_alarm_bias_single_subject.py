@@ -34,8 +34,8 @@ def plot_false_alarm_time_bias(results_df, num_intervals=5, stage=None, plot_fil
 
     # Same interval setup
     sample_row = results_df['total_odour_interval_false_alarm'].dropna().iloc[0]
-    all_intervals = sorted({intv for odour_data in sample_row.values() for intv in odour_data})[1:num_intervals+1]
-    interval_to_axis = {interval: idx for idx, interval in enumerate(all_intervals)}
+    total_intervals = sorted({intv for odour_data in sample_row.values() for intv in odour_data})[1:num_intervals+1]
+    interval_to_axis = {interval: idx for idx, interval in enumerate(total_intervals)}
 
     # Loop over rows
     for idx, row in results_df.iterrows():
@@ -43,7 +43,7 @@ def plot_false_alarm_time_bias(results_df, num_intervals=5, stage=None, plot_fil
             continue
 
         for o, odour in enumerate(nonR_odours):
-            for interval in all_intervals:
+            for interval in total_intervals:
                 val = row['total_odour_interval_false_alarm'][odour].get(interval, None)
                 if val is not None:
                     i = interval_to_axis[interval]
@@ -60,7 +60,7 @@ def plot_false_alarm_time_bias(results_df, num_intervals=5, stage=None, plot_fil
         axis.spines['top'].set_visible(False)
         axis.spines['right'].set_visible(False)
         axis.set_xlim(0, 105)
-        axis.set_xlabel(f'FA (%)\nInterval {all_intervals[i]}')
+        axis.set_xlabel(f'FA (%)\nInterval {total_intervals[i]}')
         axis.axvline(x=40, color='gray', linestyle='--', alpha=0.7)
         # axis.invert_yaxis()
         if i == 0:
@@ -125,33 +125,33 @@ def plot_false_alarm_olfactometer_bias(results_df, stage=None, plot_file=None, s
     # Loop over rows
     for idx, row in results_df.iterrows():
         for o, odour in enumerate(nonR_odours):
-            ax[o].scatter(row['date'], row['all_odour_same_olf_false_alarm'][odour],
+            ax[o].scatter(row['date'], row['total_odour_same_olf_false_alarm'][odour],
                         color=colors[o], marker='o', s=60, alpha=1)
-            ax[o].scatter(row['date'], row['all_odour_diff_olf_false_alarm'][odour],
+            ax[o].scatter(row['date'], row['total_odour_diff_olf_false_alarm'][odour],
                         color=colors[o], marker='o', s=60, alpha=0.4)
-            ax[o].plot(results_df['date'], [row['all_odour_same_olf_false_alarm'][odour] for _, row in results_df.iterrows()], 
+            ax[o].plot(results_df['date'], [row['total_odour_same_olf_false_alarm'][odour] for _, row in results_df.iterrows()], 
                     label='same-olf' if idx == 0 else "", color=colors[o], linestyle='-', alpha=1)
-            ax[o].plot(results_df['date'], [row['all_odour_diff_olf_false_alarm'][odour] for _, row in results_df.iterrows()],
+            ax[o].plot(results_df['date'], [row['total_odour_diff_olf_false_alarm'][odour] for _, row in results_df.iterrows()],
                     label='diff-olf' if idx == 0 else "", color=colors[o], linestyle='--', alpha=0.4)
             ax[o].set_ylabel(f'FA (%)\nodour {odour}')
             ax[o].annotate(f"Ses-{row['session_id']}",
-                        (row['date'], row['all_odour_same_olf_false_alarm'][odour]),
+                        (row['date'], row['total_odour_same_olf_false_alarm'][odour]),
                         textcoords="offset points",
                         xytext=(0, 10),
                         ha='center')
 
         # Overall false alarm bias 
-        ax[-1].scatter(row['date'], row['all_same_olf_false_alarm'],
+        ax[-1].scatter(row['date'], row['total_same_olf_false_alarm'],
                     color='black', marker='o', s=60, alpha=1)
-        ax[-1].scatter(row['date'], row['all_diff_olf_false_alarm'],
+        ax[-1].scatter(row['date'], row['total_diff_olf_false_alarm'],
                     color='black', marker='o', s=60, alpha=0.4)
-        ax[-1].plot(results_df['date'], [row['all_same_olf_false_alarm'] for _, row in results_df.iterrows()], 
+        ax[-1].plot(results_df['date'], [row['total_same_olf_false_alarm'] for _, row in results_df.iterrows()], 
                 label='same-olf' if idx == 0 else "", color='black', linestyle='-', alpha=1)
-        ax[-1].plot(results_df['date'], [row['all_diff_olf_false_alarm'] for _, row in results_df.iterrows()],
+        ax[-1].plot(results_df['date'], [row['total_diff_olf_false_alarm'] for _, row in results_df.iterrows()],
                 label='diff-olf' if idx == 0 else "", color='black', linestyle='--', alpha=0.4)
         ax[-1].set_ylabel(f'FA (%)\n average')
         ax[-1].annotate(f"Ses-{row['session_id']}",
-                        (row['date'], row['all_same_olf_false_alarm']),
+                        (row['date'], row['total_same_olf_false_alarm']),
                         textcoords="offset points",
                         xytext=(0, 10),
                         ha='center')
@@ -177,8 +177,8 @@ def plot_false_alarm_olfactometer_bias(results_df, stage=None, plot_file=None, s
 
     # # Add session annotations
     for _, row in results_df.iterrows():
-        if isinstance(row['all_odour_same_olf_false_alarm'], dict):
-            for i, (odour, y) in enumerate(row['all_odour_same_olf_false_alarm'].items()): 
+        if isinstance(row['total_odour_same_olf_false_alarm'], dict):
+            for i, (odour, y) in enumerate(row['total_odour_same_olf_false_alarm'].items()): 
                 if pd.notna(y) and y > 0:
                     ax[i].annotate(
                         f"Ses-{row['session_id']}",
@@ -246,18 +246,18 @@ def main(subject_folder, sessions=None, num_intervals=None, stage=None, output_f
         total_interval_trials = {}
         total_interval_false_alarm = {}
 
-        all_odour_same_olf_pokes = defaultdict(int)
-        all_odour_same_olf_trials = defaultdict(int)
-        all_odour_same_olf_false_alarm = {}
-        all_odour_diff_olf_pokes = defaultdict(int)
-        all_odour_diff_olf_trials = defaultdict(int)
-        all_odour_diff_olf_false_alarm = {}
-        all_same_olf_pokes = 0
-        all_same_olf_trials = 0
-        all_same_olf_false_alarm = {}
-        all_diff_olf_pokes = 0
-        all_diff_olf_trials = 0
-        all_diff_olf_false_alarm = {}
+        total_odour_same_olf_pokes = defaultdict(int)
+        total_odour_same_olf_trials = defaultdict(int)
+        total_odour_same_olf_false_alarm = {}
+        total_odour_diff_olf_pokes = defaultdict(int)
+        total_odour_diff_olf_trials = defaultdict(int)
+        total_odour_diff_olf_false_alarm = {}
+        total_same_olf_pokes = 0
+        total_same_olf_trials = 0
+        total_same_olf_false_alarm = {}
+        total_diff_olf_pokes = 0
+        total_diff_olf_trials = 0
+        total_diff_olf_false_alarm = {}
         
         # Directory-specific results for detailed information
         dir_results = []
@@ -306,15 +306,15 @@ def main(subject_folder, sessions=None, num_intervals=None, stage=None, output_f
                             total_odour_interval_trials[odour][interval] += false_alarm_bias['odour_interval_trials'][odour][interval]
                             
                         # olfactometer bias 
-                        all_odour_same_olf_pokes[odour] += false_alarm_bias['odour_same_olf_pokes'][odour]
-                        all_odour_same_olf_trials[odour] += false_alarm_bias['odour_same_olf_trials'][odour]
-                        all_odour_diff_olf_pokes[odour] += false_alarm_bias['odour_diff_olf_pokes'][odour]
-                        all_odour_diff_olf_trials[odour] += false_alarm_bias['odour_diff_olf_trials'][odour]
+                        total_odour_same_olf_pokes[odour] += false_alarm_bias['odour_same_olf_pokes'][odour]
+                        total_odour_same_olf_trials[odour] += false_alarm_bias['odour_same_olf_trials'][odour]
+                        total_odour_diff_olf_pokes[odour] += false_alarm_bias['odour_diff_olf_pokes'][odour]
+                        total_odour_diff_olf_trials[odour] += false_alarm_bias['odour_diff_olf_trials'][odour]
 
-                    all_same_olf_pokes += false_alarm_bias['same_olf_pokes']
-                    all_same_olf_trials += false_alarm_bias['same_olf_trials']
-                    all_diff_olf_pokes += false_alarm_bias['diff_olf_pokes']
-                    all_diff_olf_trials += false_alarm_bias['diff_olf_trials']
+                    total_same_olf_pokes += false_alarm_bias['same_olf_pokes']
+                    total_same_olf_trials += false_alarm_bias['same_olf_trials']
+                    total_diff_olf_pokes += false_alarm_bias['diff_olf_pokes']
+                    total_diff_olf_trials += false_alarm_bias['diff_olf_trials']
 
                     dir_info = {
                         'directory': session_path.name,
@@ -358,11 +358,11 @@ def main(subject_folder, sessions=None, num_intervals=None, stage=None, output_f
             for interval in intervals:
                 total_odour_interval_false_alarm[odour][interval] = (total_odour_interval_pokes[odour][interval] / total_odour_interval_trials[odour][interval] * 100) if total_odour_interval_trials[odour][interval] else 0
         
-            all_odour_same_olf_false_alarm[odour] = (all_odour_same_olf_pokes[odour] / all_odour_same_olf_trials[odour] * 100) if all_odour_same_olf_trials[odour] else 0
-            all_odour_diff_olf_false_alarm[odour] = (all_odour_diff_olf_pokes[odour] / all_odour_diff_olf_trials[odour] * 100) if all_odour_diff_olf_trials[odour] else 0
+            total_odour_same_olf_false_alarm[odour] = (total_odour_same_olf_pokes[odour] / total_odour_same_olf_trials[odour] * 100) if total_odour_same_olf_trials[odour] else 0
+            total_odour_diff_olf_false_alarm[odour] = (total_odour_diff_olf_pokes[odour] / total_odour_diff_olf_trials[odour] * 100) if total_odour_diff_olf_trials[odour] else 0
 
-        all_same_olf_false_alarm = (all_same_olf_pokes / all_same_olf_trials * 100) if all_same_olf_trials else 0
-        all_diff_olf_false_alarm = (all_diff_olf_pokes / all_diff_olf_trials * 100) if all_diff_olf_trials else 0
+        total_same_olf_false_alarm = (total_same_olf_pokes / total_same_olf_trials * 100) if total_same_olf_trials else 0
+        total_diff_olf_false_alarm = (total_diff_olf_pokes / total_diff_olf_trials * 100) if total_diff_olf_trials else 0
 
         for interval in intervals:
             total_interval_pokes[interval] = np.sum([total_odour_interval_pokes[odour][interval] for odour in nonR_odours])
@@ -380,18 +380,18 @@ def main(subject_folder, sessions=None, num_intervals=None, stage=None, output_f
                 'total_interval_pokes': total_interval_pokes,
                 'total_interval_trials': total_interval_trials,
                 'total_interval_false_alarm': total_interval_false_alarm,
-                'all_odour_same_olf_pokes': all_odour_same_olf_pokes, 
-                'all_odour_same_olf_trials': all_odour_same_olf_trials, 
-                'all_odour_same_olf_false_alarm': all_odour_same_olf_false_alarm, 
-                'all_odour_diff_olf_pokes': all_odour_diff_olf_pokes, 
-                'all_odour_diff_olf_trials': all_odour_diff_olf_trials, 
-                'all_odour_diff_olf_false_alarm': all_odour_diff_olf_false_alarm, 
-                'all_same_olf_pokes': all_same_olf_pokes, 
-                'all_same_olf_trials': all_same_olf_trials, 
-                'all_same_olf_false_alarm': all_same_olf_false_alarm, 
-                'all_diff_olf_pokes': all_diff_olf_pokes, 
-                'all_diff_olf_trials': all_diff_olf_trials, 
-                'all_diff_olf_false_alarm': all_diff_olf_false_alarm,
+                'total_odour_same_olf_pokes': total_odour_same_olf_pokes, 
+                'total_odour_same_olf_trials': total_odour_same_olf_trials, 
+                'total_odour_same_olf_false_alarm': total_odour_same_olf_false_alarm, 
+                'total_odour_diff_olf_pokes': total_odour_diff_olf_pokes, 
+                'total_odour_diff_olf_trials': total_odour_diff_olf_trials, 
+                'total_odour_diff_olf_false_alarm': total_odour_diff_olf_false_alarm, 
+                'total_same_olf_pokes': total_same_olf_pokes, 
+                'total_same_olf_trials': total_same_olf_trials, 
+                'total_same_olf_false_alarm': total_same_olf_false_alarm, 
+                'total_diff_olf_pokes': total_diff_olf_pokes, 
+                'total_diff_olf_trials': total_diff_olf_trials, 
+                'total_diff_olf_false_alarm': total_diff_olf_false_alarm,
                 'directory_count': len(session_paths),
                 'directories': dir_results
             }
@@ -405,8 +405,8 @@ def main(subject_folder, sessions=None, num_intervals=None, stage=None, output_f
             for interval, rate in total_interval_false_alarm.items():
                 print(f"  Overall false alarm bias rate for Interval {interval}: {rate:.1f}%")
         
-            print(f"False alarm same-olfactometer bias: {all_same_olf_false_alarm:.1f}%")
-            print(f"False alarm diff-olfactometer bias: {all_diff_olf_false_alarm:.1f}%")
+            print(f"False alarm same-olfactometer bias: {total_same_olf_false_alarm:.1f}%")
+            print(f"False alarm diff-olfactometer bias: {total_diff_olf_false_alarm:.1f}%")
 
             results.append(session_result)
         else:
@@ -420,18 +420,18 @@ def main(subject_folder, sessions=None, num_intervals=None, stage=None, output_f
                 'total_interval_pokes': total_interval_pokes,
                 'total_interval_trials': total_interval_trials,
                 'total_interval_false_alarm': total_interval_false_alarm,
-                'all_odour_same_olf_pokes': all_odour_same_olf_pokes, 
-                'all_odour_same_olf_trials': all_odour_same_olf_trials, 
-                'all_odour_same_olf_false_alarm': all_odour_same_olf_false_alarm, 
-                'all_odour_diff_olf_pokes': all_odour_diff_olf_pokes, 
-                'all_odour_diff_olf_trials': all_odour_diff_olf_trials, 
-                'all_odour_diff_olf_false_alarm': all_odour_diff_olf_false_alarm, 
-                'all_same_olf_pokes': all_same_olf_pokes, 
-                'all_same_olf_trials': all_same_olf_trials, 
-                'all_same_olf_false_alarm': all_same_olf_false_alarm, 
-                'all_diff_olf_pokes': all_diff_olf_pokes, 
-                'all_diff_olf_trials': all_diff_olf_trials, 
-                'all_diff_olf_false_alarm': all_diff_olf_false_alarm,
+                'total_odour_same_olf_pokes': total_odour_same_olf_pokes, 
+                'total_odour_same_olf_trials': total_odour_same_olf_trials, 
+                'total_odour_same_olf_false_alarm': total_odour_same_olf_false_alarm, 
+                'total_odour_diff_olf_pokes': total_odour_diff_olf_pokes, 
+                'total_odour_diff_olf_trials': total_odour_diff_olf_trials, 
+                'total_odour_diff_olf_false_alarm': total_odour_diff_olf_false_alarm, 
+                'total_same_olf_pokes': total_same_olf_pokes, 
+                'total_same_olf_trials': total_same_olf_trials, 
+                'total_same_olf_false_alarm': total_same_olf_false_alarm, 
+                'total_diff_olf_pokes': total_diff_olf_pokes, 
+                'total_diff_olf_trials': total_diff_olf_trials, 
+                'total_diff_olf_false_alarm': total_diff_olf_false_alarm,
                 'directory_count': len(session_paths),
                 'directories': dir_results
             })
@@ -454,8 +454,8 @@ def main(subject_folder, sessions=None, num_intervals=None, stage=None, output_f
             for interval, rate in row['total_interval_false_alarm'].items():
                 print(f"  Overall false alarm bias rate for Interval {interval}: {rate:.1f}%")
             
-            print(f"False alarm same-olfactometer bias: {row['all_same_olf_false_alarm']:.1f}%")
-            print(f"False alarm diff-olfactometer bias: {row['all_diff_olf_false_alarm']:.1f}%")
+            print(f"False alarm same-olfactometer bias: {row['total_same_olf_false_alarm']:.1f}%")
+            print(f"False alarm diff-olfactometer bias: {row['total_diff_olf_false_alarm']:.1f}%")
 
         else:
             print(f"Session {row['session_id']} ({row['session_date']}): No valid trials found")
@@ -478,8 +478,8 @@ def main(subject_folder, sessions=None, num_intervals=None, stage=None, output_f
         print("No valid false alarm time bias data to plot")
 
     # Generate plot for olfactometer bias if we have data
-    if not results_df.empty and not results_df['all_same_olf_false_alarm'].isna().all() and not results_df['all_diff_olf_false_alarm'].isna().all():
-        plot_false_alarm_olfactometer_bias(results_df.dropna(subset=['all_same_olf_false_alarm', 'all_diff_olf_false_alarm']), stage, plot_file, subject_id)
+    if not results_df.empty and not results_df['total_same_olf_false_alarm'].isna().all() and not results_df['total_diff_olf_false_alarm'].isna().all():
+        plot_false_alarm_olfactometer_bias(results_df.dropna(subset=['total_same_olf_false_alarm', 'total_diff_olf_false_alarm']), stage, plot_file, subject_id)
     else:
         print("No valid false alarm olfactometer bias data to plot")
 

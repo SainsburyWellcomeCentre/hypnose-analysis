@@ -84,6 +84,7 @@ def plot_response_time(results_df, stage=None, plot_file=None, subject_id=None):
     
     Args:
         results_df (DataFrame): Contains session_id, session_date, accuracy and response time data
+        stage (float): Behavioural stage, if provided
         plot_file (str): Path to save the plot, if provided
         subject_id (str): Subject ID to use in the plot title
     """   

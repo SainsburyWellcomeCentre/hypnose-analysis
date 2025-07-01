@@ -8,66 +8,15 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from datetime import datetime
 import matplotlib.dates as mdates
-from src.analysis import get_decision_accuracy, detect_stage
+from src.analysis import get_decision_sensitivity, detect_stage
 import src.utils as utils
 
-def calculate_session_accuracy(session_path):
+def plot_sensitivity(results_df, stage=None, plot_file=None, subject_id=None):
     """
-    Calculate decision accuracy for the session.
+    Create a scatterplot of decision sensitivity across sessions.
     
     Args:
-        session_path (Path): Path to the session directory
-        
-    Returns:
-        dict: Contains 'overall', 'r1', and 'r2' accuracy values
-    """
-    # Don't look for JSON files - send the session path directly to get_decision_accuracy
-    try:
-        # Get decision accuracy for this session
-        accuracy = get_decision_accuracy(session_path)
-        
-        if accuracy is None:
-            print(f"No accuracy data available for {session_path}")
-            return {
-                'overall': np.nan,
-                'r1': np.nan,
-                'r2': np.nan,
-                'r1_trials': 0,
-                'r2_trials': 0,
-                'total_trials': 0
-            }
-        
-        # Convert from percentages to proportions if needed
-        r1_accuracy = accuracy['r1_accuracy'] / 100 if accuracy['r1_accuracy'] > 1 else accuracy['r1_accuracy']
-        r2_accuracy = accuracy['r2_accuracy'] / 100 if accuracy['r2_accuracy'] > 1 else accuracy['r2_accuracy']
-        overall_accuracy = accuracy['overall_accuracy'] / 100 if accuracy['overall_accuracy'] > 1 else accuracy['overall_accuracy']
-        
-        return {
-            'overall': overall_accuracy,
-            'r1': r1_accuracy,
-            'r2': r2_accuracy,
-            'r1_trials': accuracy['r1_total'],
-            'r2_trials': accuracy['r2_total'],
-            'total_trials': accuracy['r1_total'] + accuracy['r2_total']
-        }
-        
-    except Exception as e:
-        print(f"Error processing session {session_path}: {str(e)}")
-        return {
-            'overall': np.nan,
-            'r1': np.nan,
-            'r2': np.nan,
-            'r1_trials': 0,
-            'r2_trials': 0,
-            'total_trials': 0
-        }
-
-def plot_accuracy(results_df, stage=None, plot_file=None, subject_id=None):
-    """
-    Create a scatterplot of decision accuracy across sessions.
-    
-    Args:
-        results_df (DataFrame): Contains session_id, session_date, and accuracy data
+        results_df (DataFrame): Contains session_id, session_date, and sensitivity data
         stage (float): Behavioural stage, if provided
         plot_file (str): Path to save the plot, if provided
         subject_id (str): Subject ID to use in the plot title
@@ -79,33 +28,33 @@ def plot_accuracy(results_df, stage=None, plot_file=None, subject_id=None):
     # Create the plot
     plt.figure(figsize=(12, 6))
     
-    # Plot each accuracy type
-    plt.scatter(results_df['date'], results_df['overall_accuracy'], 
-               label='Overall Accuracy', marker='o', s=60, color='black')
-    plt.plot(results_df['date'], results_df['overall_accuracy'], 
+    # Plot each sensitivity type
+    plt.scatter(results_df['date'], results_df['overall_sensitivity'], 
+               label='Overall sensitivity', marker='o', s=60, color='black')
+    plt.plot(results_df['date'], results_df['overall_sensitivity'], 
             color='black', linestyle='-', alpha=0.7)
     
-    plt.scatter(results_df['date'], results_df['r1_accuracy'], 
-               label='R1 Accuracy', marker='s', s=60, color='blue')
-    plt.plot(results_df['date'], results_df['r1_accuracy'], 
+    plt.scatter(results_df['date'], results_df['r1_sensitivity'], 
+               label='R1 sensitivity', marker='s', s=60, color='blue')
+    plt.plot(results_df['date'], results_df['r1_sensitivity'], 
             color='blue', linestyle='--', alpha=0.7)
     
-    plt.scatter(results_df['date'], results_df['r2_accuracy'], 
-               label='R2 Accuracy', marker='^', s=60, color='red')
-    plt.plot(results_df['date'], results_df['r2_accuracy'], 
+    plt.scatter(results_df['date'], results_df['r2_sensitivity'], 
+               label='R2 sensitivity', marker='^', s=60, color='red')
+    plt.plot(results_df['date'], results_df['r2_sensitivity'], 
             color='red', linestyle='-.', alpha=0.7)
     
     # Format the plot
     plt.xlabel('Session Date')
-    plt.ylabel('Decision Accuracy')
+    plt.ylabel('Decision Sensitivity')
     
     # Set title with subject ID if provided
     if subject_id:
-        plt.title(f'Decision Accuracy Across Sessions - sub-{subject_id}')
+        plt.title(f'Decision Sensitivity Across Sessions - sub-{subject_id}')
     else:
-        plt.title('Decision Accuracy Across Sessions')
+        plt.title('Decision Sensitivity Across Sessions')
     
-    plt.ylim(0, 1.05)  # Assuming accuracy is a proportion between 0 and 1
+    plt.ylim(0, 1.05)  # Assuming sensitivity is a percentage between 0 and 105
     
     # Remove grid and add single line at 0.8
     plt.grid(False)
@@ -123,7 +72,7 @@ def plot_accuracy(results_df, stage=None, plot_file=None, subject_id=None):
     
     # Add session IDs as annotations
     for i, row in results_df.iterrows():
-        y = row['overall_accuracy']
+        y = row['overall_sensitivity']
         if pd.notna(y) and y > 0:
             plt.annotate(f"Ses-{row['session_id']}", 
                         (row['date'], y),
@@ -133,7 +82,7 @@ def plot_accuracy(results_df, stage=None, plot_file=None, subject_id=None):
      
     # Save if requested
     if plot_file:
-        filename = f"sub-{subject_id}_Accuracy" + (f"_stage{stage}" if stage is not None else "") + ".png"
+        filename = f"sub-{subject_id}_sensitivity" + (f"_stage{stage}" if stage is not None else "") + ".png"
         plot_file = os.path.join(plot_file, filename)
         plt.savefig(plot_file, dpi=300, bbox_inches='tight')
         print(f"Plot saved to {plot_file}")
@@ -143,7 +92,7 @@ def plot_accuracy(results_df, stage=None, plot_file=None, subject_id=None):
 
 def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=None):
     """
-    Process a subject folder and calculate decision accuracy for all sessions.
+    Process a subject folder and calculate decision sensitivity for all sessions.
     Combines results from multiple directories within the same session.
     Saves results to CSV file if output_file is provided.
     """
@@ -180,9 +129,9 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
         print(f"Found {len(session_paths)} directories within this session")
         
         # Initialize combined metrics
-        total_r1_correct = 0
+        total_r1_respond = 0
         total_r1_trials = 0
-        total_r2_correct = 0
+        total_r2_respond = 0
         total_r2_trials = 0
         
         # Directory-specific results for detailed information
@@ -190,77 +139,77 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
         
         # Process each directory within the session
         for session_path in session_paths:
-            detected_stage = int(detect_stage(session_path))
+            detected_stage = float(detect_stage(session_path))
 
-            if stage is not None and detected_stage != stage:
+            if stage is not None and detected_stage not in stage:
                 print('Continue to next session...')
                 continue
         
             print(f"  Processing directory: {session_path.name}")
             try:
-                # Get accuracy data for this directory
-                accuracy = get_decision_accuracy(session_path)
+                # Get sensitivity data for this directory
+                sensitivity = get_decision_sensitivity(session_path)
 
-                if accuracy and accuracy != {
-                    'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
-                    'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
-                    'overall_accuracy': 0
+                if sensitivity and sensitivity != {
+                    'r1_total': 0, 'r1_respond': 0, 'r1_sensitivity': 0,
+                    'r2_total': 0, 'r2_respond': 0, 'r2_sensitivity': 0,
+                    'overall_sensitivity': 0
                 }:
                     # Add to totals
-                    total_r1_correct += accuracy['r1_correct']
-                    total_r1_trials += accuracy['r1_total']
-                    total_r2_correct += accuracy['r2_correct']
-                    total_r2_trials += accuracy['r2_total']
+                    total_r1_respond += sensitivity['r1_respond']
+                    total_r1_trials += sensitivity['r1_total']
+                    total_r2_respond += sensitivity['r2_respond']
+                    total_r2_trials += sensitivity['r2_total']
                     
                     dir_info = {
                         'directory': session_path.name,
-                        'r1_correct': accuracy['r1_correct'],
-                        'r1_trials': accuracy['r1_total'],
-                        'r1_accuracy': accuracy['r1_accuracy'],
-                        'r2_correct': accuracy['r2_correct'],
-                        'r2_trials': accuracy['r2_total'],
-                        'r2_accuracy': accuracy['r2_accuracy'],
-                        'overall_accuracy': accuracy['overall_accuracy']
+                        'r1_respond': sensitivity['r1_respond'],
+                        'r1_trials': sensitivity['r1_total'],
+                        'r1_sensitivity': sensitivity['r1_sensitivity'],
+                        'r2_respond': sensitivity['r2_respond'],
+                        'r2_trials': sensitivity['r2_total'],
+                        'r2_sensitivity': sensitivity['r2_sensitivity'],
+                        'overall_sensitivity': sensitivity['overall_sensitivity']
                     }
                     
-                    print(f"    R1: {accuracy['r1_correct']}/{accuracy['r1_total']} ({accuracy['r1_accuracy']:.1f}%), "
-                          f"R2: {accuracy['r2_correct']}/{accuracy['r2_total']} ({accuracy['r2_accuracy']:.1f}%)")
+                    print(f"    R1: {sensitivity['r1_respond']}/{sensitivity['r1_total']} ({sensitivity['r1_sensitivity']:.1f}%), "
+                          f"R2: {sensitivity['r2_respond']}/{sensitivity['r2_total']} ({sensitivity['r2_sensitivity']:.1f}%)")
                     
                     dir_results.append(dir_info)
                 else:
-                    print(f"    No valid accuracy data found")
+                    print(f"    No valid sensitivity data found")
                     
             except Exception as e:
                 print(f"    Error processing directory {session_path.name}: {str(e)}")
         
-        # Calculate combined accuracy values
+        # Calculate combined sensitivity values
         if total_r1_trials + total_r2_trials > 0:
-            # Calculate overall accuracy across all directories in this session
-            r1_accuracy = (total_r1_correct / total_r1_trials) if total_r1_trials > 0 else 0
-            r2_accuracy = (total_r2_correct / total_r2_trials) if total_r2_trials > 0 else 0
-            overall_accuracy = ((total_r1_correct + total_r2_correct) / 
+            # Calculate overall sensitivity across all directories in this session
+            r1_sensitivity = (total_r1_respond / total_r1_trials) if total_r1_trials > 0 else 0
+            r2_sensitivity = (total_r2_respond / total_r2_trials) if total_r2_trials > 0 else 0
+            overall_sensitivity = ((total_r1_respond + total_r2_respond) / 
                                (total_r1_trials + total_r2_trials)) if (total_r1_trials + total_r2_trials) > 0 else 0
             
             # Store combined session results
             session_result = {
                 'session_id': session_id,
                 'session_date': session_date,
-                'overall_accuracy': overall_accuracy,
-                'r1_accuracy': r1_accuracy,
-                'r2_accuracy': r2_accuracy,
+                'overall_sensitivity': overall_sensitivity,
+                'r1_sensitivity': r1_sensitivity,
+                'r2_sensitivity': r2_sensitivity,
                 'r1_trials': total_r1_trials,
                 'r2_trials': total_r2_trials,
                 'total_trials': total_r1_trials + total_r2_trials,
-                'r1_correct': total_r1_correct,
-                'r2_correct': total_r2_correct,
+                'r1_respond': total_r1_respond,
+                'r2_respond': total_r2_respond,
                 'directory_count': len(session_paths),
                 'directories': dir_results
             }
             
             print(f"  Combined results for Session {session_id}:")
-            print(f"    R1: {total_r1_correct}/{total_r1_trials} ({r1_accuracy:.1%})")
-            print(f"    R2: {total_r2_correct}/{total_r2_trials} ({r2_accuracy:.1%})")
-            print(f"    Overall: {total_r1_correct + total_r2_correct}/{total_r1_trials + total_r2_trials} ({overall_accuracy:.1%})")
+            print(f"    R1: {total_r1_respond}/{total_r1_trials} ({r1_sensitivity:.1%})")
+            print(f"    R2: {total_r2_respond}/{total_r2_trials} ({r2_sensitivity:.1%})")
+            print(f"    Overall: {total_r1_respond + total_r2_respond}/{total_r1_trials + total_r2_trials} ({overall_sensitivity:.1%})")
             
             results.append(session_result)
         else:
@@ -268,14 +217,14 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
             results.append({
                 'session_id': session_id,
                 'session_date': session_date,
-                'overall_accuracy': np.nan,
-                'r1_accuracy': np.nan,
-                'r2_accuracy': np.nan,
+                'overall_sensitivity': np.nan,
+                'r1_sensitivity': np.nan,
+                'r2_sensitivity': np.nan,
                 'r1_trials': 0,
                 'r2_trials': 0,
                 'total_trials': 0,
-                'r1_correct': 0,
-                'r2_correct': 0,
+                'r1_respond': 0,
+                'r2_respond': 0,
                 'directory_count': len(session_paths),
                 'directories': dir_results
             })
@@ -287,11 +236,11 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
     print("\nSummary of Combined Session Accuracies:")
     print("=======================================")
     for _, row in results_df.iterrows():
-        if pd.notna(row['overall_accuracy']):
+        if pd.notna(row['overall_sensitivity']):
             print(f"Session {row['session_id']} ({row['session_date']}): " 
-                  f"Overall {row['overall_accuracy']:.2%}, "
-                  f"R1 {row['r1_accuracy']:.2%} ({row['r1_trials']} trials), "
-                  f"R2 {row['r2_accuracy']:.2%} ({row['r2_trials']} trials)")
+                  f"Overall {row['overall_sensitivity']:.1%}, "
+                  f"R1 {row['r1_sensitivity']:.1%} ({row['r1_trials']} trials), "
+                  f"R2 {row['r2_sensitivity']:.1%} ({row['r2_trials']} trials)")
         else:
             print(f"Session {row['session_id']} ({row['session_date']}): No valid trials found")
     
@@ -307,10 +256,10 @@ def main(subject_folder, sessions=None, stage=None, output_file=None, plot_file=
         print(f"Detailed results saved to {detailed_output}")
     
     # Generate plot if we have data
-    if not results_df.empty and not results_df['overall_accuracy'].isna().all():
-        plot_accuracy(results_df.dropna(subset=['overall_accuracy']), stage, plot_file, subject_id)
+    if not results_df.empty and not results_df['overall_sensitivity'].isna().all():
+        plot_sensitivity(results_df.dropna(subset=['overall_sensitivity']), stage, plot_file, subject_id)
     else:
-        print("No valid accuracy data to plot")
+        print("No valid sensitivity data to plot")
     
     return results_df
 
@@ -318,10 +267,10 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072")
 
-    parser = argparse.ArgumentParser(description="Calculate and plot decision accuracy across sessions")
+    parser = argparse.ArgumentParser(description="Calculate and plot decision sensitivity across sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")
-    parser.add_argument("--sessions", default=np.arange(55, 68), help="List of session IDs (optional)") 
-    parser.add_argument("--stage", "--s", default=8, help="Stage to be analysed (optional)")
+    parser.add_argument("--sessions", default=np.arange(66, 70), help="List of session IDs (optional)") 
+    parser.add_argument("--stage", "--s", default=[8.2, 8.3], help="Stage to be analysed (optional)")
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")
     args = parser.parse_args()
