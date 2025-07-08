@@ -270,6 +270,9 @@ class RewardAnalyser:
             else:
                 session_data['session_duration_sec'] = 0
             
+            # Detect stage 
+            stage = float(detect_stage(root))
+
             # Process experiment events for EndInitiation and InitiationSequence
             end_initiation_frames = []
             start_initiation_frames = []
@@ -393,29 +396,53 @@ class RewardAnalyser:
                     print(f"Error processing r1 valve events: {e}")
             
             # Add r2 olfactometer valve events if available
-            if not olfactometer_valves_0_abs.empty and 'Valve1' in olfactometer_valves_0_abs.columns:
-                try:
-                    r2_olf_df = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve1'] == True].copy()
-                    if not r2_olf_df.empty:
-                        r2_olf_df = r2_olf_df[['Time']].copy()
-                        r2_olf_df['r2_olf_valve'] = True
-                        event_frames.append(r2_olf_df)
-                        print(f"Added {len(r2_olf_df)} r2 valve events")
+            if stage >= 8.4 and stage < 9:  # TODO use subject ID
+                if not olfactometer_valves_1_abs.empty and 'Valve0' in olfactometer_valves_1_abs.columns:
+                    try:
+                        r2_olf_df = olfactometer_valves_1_abs[olfactometer_valves_1_abs['Valve0'] == True].copy()
+                        if not r2_olf_df.empty:
+                            r2_olf_df = r2_olf_df[['Time']].copy()
+                            r2_olf_df['r2_olf_valve'] = True
+                            event_frames.append(r2_olf_df)
+                            print(f"Added {len(r2_olf_df)} r2 valve events")
 
-                        # Find OFF events
-                        df = olfactometer_valves_0_abs.sort_values(by='Time').reset_index(drop=True)
-                        valve_prev = df['Valve1'].shift(1) # Shift Valve1 to compare previous row
-                        valve_now = df['Valve1']
+                            # Find OFF events
+                            df = olfactometer_valves_1_abs.sort_values(by='Time').reset_index(drop=True)
+                            valve_prev = df['Valve0'].shift(1) # Shift Valve0 to compare previous row
+                            valve_now = df['Valve0']
 
-                        # Detect where it was ON in previous row and now is OFF
-                        off_after_on_mask = (valve_prev == True) & (valve_now == False)
-                        r2_off = df.loc[off_after_on_mask, ['Time']].copy()
-                        r2_off['r2_olf_valve_off'] = True
-                        event_frames.append(r2_off)
-                        print(f"Added {len(r2_off)} r2 valve OFF events")
-                except Exception as e:
-                    print(f"Error processing r2 valve events: {e}")
-            
+                            # Detect where it was ON in previous row and now is OFF
+                            off_after_on_mask = (valve_prev == True) & (valve_now == False)
+                            r2_off = df.loc[off_after_on_mask, ['Time']].copy()
+                            r2_off['r2_olf_valve_off'] = True
+                            event_frames.append(r2_off)
+                            print(f"Added {len(r2_off)} r2 valve OFF events")
+                    except Exception as e:
+                        print(f"Error processing r2 valve events: {e}")
+            else:
+                if not olfactometer_valves_0_abs.empty and 'Valve1' in olfactometer_valves_0_abs.columns:
+                    try:
+                        r2_olf_df = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve1'] == True].copy()
+                        if not r2_olf_df.empty:
+                            r2_olf_df = r2_olf_df[['Time']].copy()
+                            r2_olf_df['r2_olf_valve'] = True
+                            event_frames.append(r2_olf_df)
+                            print(f"Added {len(r2_olf_df)} r2 valve events")
+
+                            # Find OFF events
+                            df = olfactometer_valves_0_abs.sort_values(by='Time').reset_index(drop=True)
+                            valve_prev = df['Valve1'].shift(1) # Shift Valve1 to compare previous row
+                            valve_now = df['Valve1']
+
+                            # Detect where it was ON in previous row and now is OFF
+                            off_after_on_mask = (valve_prev == True) & (valve_now == False)
+                            r2_off = df.loc[off_after_on_mask, ['Time']].copy()
+                            r2_off['r2_olf_valve_off'] = True
+                            event_frames.append(r2_off)
+                            print(f"Added {len(r2_off)} r2 valve OFF events")
+                    except Exception as e:
+                        print(f"Error processing r2 valve events: {e}")
+                
             # Add odour C olfactometer valve events if available
             if not olfactometer_valves_0_abs.empty and 'Valve2' in olfactometer_valves_0_abs.columns:
                 try:
@@ -465,28 +492,52 @@ class RewardAnalyser:
                     print(f"Error processing odour D valve events: {e}")
             
             # Add odour E olfactometer valve events if available
-            if not olfactometer_valves_1_abs.empty and 'Valve0' in olfactometer_valves_1_abs.columns:
-                try:
-                    odourE = olfactometer_valves_1_abs[olfactometer_valves_1_abs['Valve0'] == True].copy()
-                    if not odourE.empty:
-                        odourE = odourE[['Time']].copy()
-                        odourE['odourE_olf_valve'] = True
-                        event_frames.append(odourE)
-                        print(f"Added {len(odourE)} odour E valve events")
+            if stage >= 8.4 and stage < 9:
+                if not olfactometer_valves_0_abs.empty and 'Valve1' in olfactometer_valves_0_abs.columns:
+                    try:
+                        odourE = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve1'] == True].copy()
+                        if not odourE.empty:
+                            odourE = odourE[['Time']].copy()
+                            odourE['odourE_olf_valve'] = True
+                            event_frames.append(odourE)
+                            print(f"Added {len(odourE)} odour E valve events")
 
-                        # Find OFF events
-                        df = olfactometer_valves_1_abs.sort_values(by='Time').reset_index(drop=True)
-                        valve_prev = df['Valve0'].shift(1) # Shift Valve0 to compare previous row
-                        valve_now = df['Valve0']
+                            # Find OFF events
+                            df = olfactometer_valves_0_abs.sort_values(by='Time').reset_index(drop=True)
+                            valve_prev = df['Valve1'].shift(1) # Shift Valve1 to compare previous row
+                            valve_now = df['Valve1']
 
-                        # Detect where it was ON in previous row and now is OFF
-                        off_after_on_mask = (valve_prev == True) & (valve_now == False)
-                        odourE_off = df.loc[off_after_on_mask, ['Time']].copy()
-                        odourE_off['odourE_olf_valve_off'] = True
-                        event_frames.append(odourE_off)
-                        print(f"Added {len(odourE_off)} odour E valve OFF events")
-                except Exception as e:
-                    print(f"Error processing odour E valve events: {e}")
+                            # Detect where it was ON in previous row and now is OFF
+                            off_after_on_mask = (valve_prev == True) & (valve_now == False)
+                            odourE_off = df.loc[off_after_on_mask, ['Time']].copy()
+                            odourE_off['odourE_olf_valve_off'] = True
+                            event_frames.append(odourE_off)
+                            print(f"Added {len(odourE_off)} odour E valve OFF events")
+                    except Exception as e:
+                        print(f"Error processing odour E valve events: {e}")
+            else:
+                if not olfactometer_valves_1_abs.empty and 'Valve0' in olfactometer_valves_1_abs.columns:
+                    try:
+                        odourE = olfactometer_valves_1_abs[olfactometer_valves_1_abs['Valve0'] == True].copy()
+                        if not odourE.empty:
+                            odourE = odourE[['Time']].copy()
+                            odourE['odourE_olf_valve'] = True
+                            event_frames.append(odourE)
+                            print(f"Added {len(odourE)} odour E valve events")
+
+                            # Find OFF events
+                            df = olfactometer_valves_1_abs.sort_values(by='Time').reset_index(drop=True)
+                            valve_prev = df['Valve0'].shift(1) # Shift Valve0 to compare previous row
+                            valve_now = df['Valve0']
+
+                            # Detect where it was ON in previous row and now is OFF
+                            off_after_on_mask = (valve_prev == True) & (valve_now == False)
+                            odourE_off = df.loc[off_after_on_mask, ['Time']].copy()
+                            odourE_off['odourE_olf_valve_off'] = True
+                            event_frames.append(odourE_off)
+                            print(f"Added {len(odourE_off)} odour E valve OFF events")
+                    except Exception as e:
+                        print(f"Error processing odour E valve events: {e}")
 
             # Add odour F olfactometer valve events if available
             if not olfactometer_valves_1_abs.empty and 'Valve1' in olfactometer_valves_1_abs.columns:
@@ -552,9 +603,6 @@ class RewardAnalyser:
                     # all_events_df = pd.concat(event_frames, ignore_index=True)
                     print(f"Combined {len(all_events_df)} total events")
                     
-                    # Detect stage 
-                    stage = float(detect_stage(root))
-
                     # Explicitly add missing columns with default values to prevent errors
                     if stage > 7:
                         required_columns = ['timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', \
@@ -611,14 +659,14 @@ class RewardAnalyser:
                             session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df)
                         
                         # Calculate sequence completion (doubles or other sequences)
-                        if stage == 9:  
+                        if stage >= 9:  
                             session_data['sequence_completion'] = calculate_overall_sequence_completion(all_events_df)
 
-                        # Calculate decision sensitivity and specificity (freerun)
+                        # Calculate false alarm bias, decision sensitivity and specificity  (freerun)
                         if stage > 8 and stage < 9:
                             session_data['false_alarm_bias'] = calculate_overall_false_alarm_bias(all_events_df)
 
-                            if stage >= 8.2 and stage < 9:
+                            if stage >= 8.2:  # TODO: update for later sequence stages
                                 session_data['sensitivity'] = calculate_overall_decision_sensitivity(all_events_df)
 
                             #     session_data['specificity'] = calculate_overall_decision_specificity(all_events_df)
@@ -1094,7 +1142,7 @@ class RewardAnalyser:
                     for seq in seq_group:
                         if isinstance(seq, dict) and 'name' in seq:
                             print(f"Found sequence name: {seq['name']}")
-                            match = re.search(r'_Stage(\d+)', seq['name'])
+                            match = re.search(r'_Stage(\d+)', seq['name'], re.IGNORECASE)
                             if match:
                                 if 'FreeRun' in seq['name']:
                                     stage_number = int(match.group(1))
@@ -1104,6 +1152,8 @@ class RewardAnalyser:
                                     stage_found = 9
                                 elif 'Triples' in seq['name']:
                                     stage_found = 10
+                                elif 'Quadruple' in seq['name']:
+                                    stage_found = 11
                                 else:
                                     stage_found = match.group(1)
                                 return stage_found
@@ -1113,7 +1163,7 @@ class RewardAnalyser:
                 elif isinstance(seq_group, dict) and 'name' in seq_group:
                     # Handle case where outer list contains dicts directly
                     print(f"Found sequence name: {seq_group['name']}")
-                    match = re.search(r'_Stage(\d+)', seq_group['name'])
+                    match = re.search(r'_Stage(\d+)', seq_group['name'], re.IGNORECASE)
                     if match:
                         if 'FreeRun' in seq_group['name']:
                             stage_number = int(match.group(1))
@@ -1123,6 +1173,8 @@ class RewardAnalyser:
                             stage_found = 9
                         elif 'Triples' in seq_group['name']:
                             stage_found = 10
+                        elif 'Quadruple' in seq_group['name']:
+                            stage_found = 11
                         else:
                             stage_found = match.group(1)
                         return stage_found
@@ -1289,7 +1341,7 @@ def detect_stage(root):
                 for seq in seq_group:
                     if isinstance(seq, dict) and 'name' in seq:
                         print(f"Found sequence name: {seq['name']}")
-                        match = re.search(r'_Stage(\d+)', seq['name'])
+                        match = re.search(r'_Stage(\d+)', seq['name'], re.IGNORECASE)
                         if match:
                             if 'FreeRun' in seq['name']:
                                 stage_number = int(match.group(1))
@@ -1299,6 +1351,8 @@ def detect_stage(root):
                                 stage_found = 9
                             elif 'Triples' in seq['name']:
                                 stage_found = 10
+                            elif 'Quadruple' in seq['name']:
+                                stage_found = 11
                             else:
                                 stage_found = match.group(1)
                             return stage_found
@@ -1308,7 +1362,7 @@ def detect_stage(root):
             elif isinstance(seq_group, dict) and 'name' in seq_group:
                 # Handle case where outer list contains dicts directly
                 print(f"Found sequence name: {seq_group['name']}")
-                match = re.search(r'_Stage(\d+)', seq_group['name'])
+                match = re.search(r'_Stage(\d+)', seq_group['name'], re.IGNORECASE)
                 if match:
                     if 'FreeRun' in seq_group['name']:
                         stage_number = int(match.group(1))
@@ -1318,6 +1372,8 @@ def detect_stage(root):
                         stage_found = 9
                     elif 'Triples' in seq_group['name']:
                         stage_found = 10
+                    elif 'Quadruple' in seq_group['name']:
+                        stage_found = 11
                     else:
                         stage_found = match.group(1)
                     return stage_found

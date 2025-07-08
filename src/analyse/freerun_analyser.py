@@ -365,7 +365,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             })
 
         # Add false alarm bias data 
-        if false_alarm_bias:
+        if false_alarm_bias and all(value != 0 for value in false_alarm_bias.values()):
             nonR_odours = false_alarm_bias['odour_interval_pokes'].keys()
             first_odour = next(iter(false_alarm_bias['odour_interval_pokes']))
             intervals = false_alarm_bias['odour_interval_pokes'][first_odour].keys()
@@ -492,7 +492,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                   f"G={false_alarm['G_false_alarm']:.1f}%")
             print(f"  Overall false alarm rate: {false_alarm['overall_false_alarm']:.1f}%")
         
-        if false_alarm_bias:
+        if false_alarm_bias and all(value != 0 for value in false_alarm_bias.values()):
             for odour, rate in false_alarm_bias['odour_same_olf_false_alarm'].items():
                 print(f"\nFalse alarm same-olfactometer bias rates for odour {odour}: {rate:.1f}%")
             for odour, rate in false_alarm_bias['odour_diff_olf_false_alarm'].items():
@@ -500,10 +500,10 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             print(f"  Overall false alarm same-olfactometer bias rate: {false_alarm_bias['same_olf_false_alarm']:.1f}%")
             print(f"  Overall false alarm diff-olfactometer bias rate: {false_alarm_bias['diff_olf_false_alarm']:.1f}%")
 
-        if sequence_completion:
+        if sequence_completion and all(value != 0 for value in sequence_completion.values()):
             print(f"  Sequence completion ratio: {sequence_completion['completion_ratio']:.1f}%")
     
-        if sensitivity:
+        if sensitivity and all(value != 0 for value in sensitivity.values()):
             print(f"  Sensitivity: A={sensitivity['r1_sensitivity']:.1f}% ({sensitivity['r1_respond']}/{sensitivity['r1_total']}), "
                   f"B={sensitivity['r2_sensitivity']:.1f}% ({sensitivity['r2_respond']}/{sensitivity['r2_total']})")
             print(f"  Overall: {sensitivity['overall_sensitivity']:.1f}%")
@@ -553,28 +553,46 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_overall_false_alarm = (all_nonR_pokes / all_nonR_trials * 100) if all_nonR_trials > 0 else 0
 
     # Calculate overall false alarm time and olfactometer bias 
-    for odour in nonR_odours:
+    if stage > 8 and stage < 9:
+        for odour in nonR_odours:
+            for interval in intervals:
+                all_odour_interval_false_alarm[odour][interval] = (all_odour_interval_pokes[odour][interval] / all_odour_interval_trials[odour][interval] * 100) if all_odour_interval_trials[odour][interval] else 0
+
+            all_odour_same_olf_false_alarm[odour] = (all_odour_same_olf_pokes[odour] / all_odour_same_olf_trials[odour] * 100) if all_odour_same_olf_trials[odour] else 0
+            all_odour_diff_olf_false_alarm[odour] = (all_odour_diff_olf_pokes[odour] / all_odour_diff_olf_trials[odour] * 100) if all_odour_diff_olf_trials[odour] else 0
+
+        all_same_olf_false_alarm = (all_same_olf_pokes / all_same_olf_trials * 100) if all_same_olf_trials else 0
+        all_diff_olf_false_alarm = (all_diff_olf_pokes / all_diff_olf_trials * 100) if all_diff_olf_trials else 0
+
         for interval in intervals:
-            all_odour_interval_false_alarm[odour][interval] = (all_odour_interval_pokes[odour][interval] / all_odour_interval_trials[odour][interval] * 100) if all_odour_interval_trials[odour][interval] else 0
+            all_interval_pokes[interval] = np.sum([all_odour_interval_pokes[odour][interval] for odour in nonR_odours])
+            all_interval_trials[interval] = np.sum([all_odour_interval_trials[odour][interval] for odour in nonR_odours])
+            all_interval_false_alarm[interval] = (all_interval_pokes[interval] / all_interval_trials[interval] * 100) if all_interval_trials[interval] else 0
+    else:
+        all_odour_same_olf_false_alarm = 0
+        all_odour_diff_olf_false_alarm = 0 
+        all_same_olf_false_alarm = 0 
+        all_diff_olf_false_alarm = 0 
+        all_odour_interval_false_alarm = 0 
+        all_interval_pokes = 0 
+        all_interval_trials = 0 
+        all_interval_false_alarm = 0 
 
-        all_odour_same_olf_false_alarm[odour] = (all_odour_same_olf_pokes[odour] / all_odour_same_olf_trials[odour] * 100) if all_odour_same_olf_trials[odour] else 0
-        all_odour_diff_olf_false_alarm[odour] = (all_odour_diff_olf_pokes[odour] / all_odour_diff_olf_trials[odour] * 100) if all_odour_diff_olf_trials[odour] else 0
-
-    all_same_olf_false_alarm = (all_same_olf_pokes / all_same_olf_trials * 100) if all_same_olf_trials else 0
-    all_diff_olf_false_alarm = (all_diff_olf_pokes / all_diff_olf_trials * 100) if all_diff_olf_trials else 0
-
-    for interval in intervals:
-        all_interval_pokes[interval] = np.sum([all_odour_interval_pokes[odour][interval] for odour in nonR_odours])
-        all_interval_trials[interval] = np.sum([all_odour_interval_trials[odour][interval] for odour in nonR_odours])
-        all_interval_false_alarm[interval] = (all_interval_pokes[interval] / all_interval_trials[interval] * 100) if all_interval_trials[interval] else 0
-   
     # Calculate overall sequence completion ratio
-    overall_completion_ratio = all_rew_trials / (all_rew_trials + all_non_rew_trials) * 100 if (all_rew_trials + all_non_rew_trials) > 0 else 0
-    
+    if stage >= 9:
+        overall_completion_ratio = all_rew_trials / (all_rew_trials + all_non_rew_trials) * 100 if (all_rew_trials + all_non_rew_trials) > 0 else 0
+    else:
+        overall_completion_ratio = 0
+
     # Calculate overall sensitivity
-    all_r1_sensitivity = (all_r1_respond / all_r1_total * 100) if all_r1_total > 0 else 0
-    all_r2_sensitivity = (all_r2_respond / all_r2_total * 100) if all_r2_total > 0 else 0
-    all_overall_sensitivity = ((all_r1_respond + all_r2_respond) / (all_r1_total + all_r2_total) * 100) if (all_r1_total + all_r2_total) > 0 else 0
+    if stage >= 8.2:
+        all_r1_sensitivity = (all_r1_respond / all_r1_total * 100) if all_r1_total > 0 else 0
+        all_r2_sensitivity = (all_r2_respond / all_r2_total * 100) if all_r2_total > 0 else 0
+        all_overall_sensitivity = ((all_r1_respond + all_r2_respond) / (all_r1_total + all_r2_total) * 100) if (all_r1_total + all_r2_total) > 0 else 0
+    else:
+        all_r1_sensitivity = 0
+        all_r2_sensitivity = 0
+        all_overall_sensitivity = 0
     
     # Format time in a readable way
     h = int(total_duration_sec // 3600)
@@ -595,7 +613,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         print(f"Overall false alarm rate: {all_overall_false_alarm:.1f}%")
     if stage >= 9:
         print(f"Overall sequence completion: {overall_completion_ratio:.1f}%")
-    if stage >= 8:
+    if stage > 8 and stage < 9:
         print(f"False alarm same-olfactometer bias: {all_same_olf_false_alarm:.1f}%")
         print(f"False alarm diff-olfactometer bias: {all_diff_olf_false_alarm:.1f}%")
     if stage >= 8.2:
@@ -670,7 +688,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-59_date-20250616")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-66_date-20250625")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-72_date-20250703")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")
