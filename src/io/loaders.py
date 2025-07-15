@@ -201,24 +201,28 @@ class ExperimentEventsLoader(BaseLoader):
                         # EndInitiation events
                         eii_df = ev_df[ev_df["Value"] == "EndInitiation"].copy()
                         if not eii_df.empty:
+                            eii_df.rename(columns={'Seconds': 'Time'}, inplace=True)
                             print(f"Found {len(eii_df)} EndInitiation events")
                             end_initiation_frames.append(eii_df)
                         
                         # InitiationSequence events
                         is_df = ev_df[ev_df["Value"] == "InitiationSequence"].copy()
                         if not is_df.empty:
+                            is_df.rename(columns={'Seconds': 'Time'}, inplace=True)
                             print(f"Found {len(is_df)} InitiationSequence events")
                             initiation_sequence_frames.append(is_df)
                         
                         # AwaitReward events
                         ar_df = ev_df[ev_df["Value"] == "AwaitReward"].copy()
                         if not ar_df.empty:
+                            ar_df.rename(columns={'Seconds': 'Time'}, inplace=True)
                             print(f"Found {len(ar_df)} AwaitReward events")
                             await_reward_frames.append(ar_df)
                         
                         # Reset events
                         reset_df = ev_df[ev_df["Value"] == "Reset"].copy()
                         if not reset_df.empty:
+                            reset_df.rename(columns={'Seconds': 'Time'}, inplace=True)
                             print(f"Found {len(reset_df)} Reset events")
                             reset_frames.append(reset_df)
                             
