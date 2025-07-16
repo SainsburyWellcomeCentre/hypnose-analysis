@@ -1,10 +1,11 @@
 import os
+import sys
 import json
 import argparse
 import pandas as pd
 from pathlib import Path
-from ..analysis import detect_stage
-from .. import utils
+from src.processing.detect_stage import detect_stage
+import src.utils as utils  # Changed from relative to absolute import
 
 def main(subject_folder, output_file=None):
     """
@@ -60,6 +61,9 @@ def main(subject_folder, output_file=None):
     return results
 
 if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/")
+
     parser = argparse.ArgumentParser(description="Detect training stage of behavioral sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")

@@ -8,6 +8,7 @@ import numpy as np
 from pathlib import Path
 import zoneinfo
 import src.utils as utils  # Changed from relative to absolute import
+from src.processing.detect_stage import detect_stage
 import harp
 import yaml
 from functools import reduce
@@ -272,7 +273,7 @@ class RewardAnalyser:
                 session_data['session_duration_sec'] = 0
             
             # Detect stage 
-            stage = float(detect_stage(root))
+            stage = detect_stage(root)
 
             # Process experiment events for EndInitiation and InitiationSequence
             end_initiation_frames = []
@@ -1319,86 +1320,6 @@ def get_decision_specificity(data_path):
         Dictionary with specificity metrics or None if calculation fails
     """
     return RewardAnalyser.get_decision_specificity(data_path)
-
-def detect_stage(root):
-    """
-    Extracts the stage from metadata if available.
-    Handles nested structure of sequences in metadata.
-    """
-    
-    path_root = Path(root)
-    metadata_reader = utils.SessionData()
-    session_settings = utils.load_json(metadata_reader, path_root/"SessionSettings")
-    stage_found = None
-    metadata = session_settings.iloc[0]['metadata']
-
-    # Handle schema and session settings format
-    if not hasattr(metadata, 'sequences') or (hasattr(metadata, 'sequences') and not metadata.sequences): # and hasattr(metadata.metadata, 'initialSequence') and metadata.metadata.initialSequence):  # separate files
-        try: 
-            sequence_schema = utils.load_json(metadata_reader, path_root/"Schema") # TODO
-        except:
-            try:
-                schema_filename = metadata.metadata.initialSequence.split("/")[-1]
-                with open(path_root/"Schema"/schema_filename, 'r') as file:
-                    sequence_schema = yaml.load(file, Loader=yaml.SafeLoader)
-                    sequences = sequence_schema['sequences']
-            except Exception as e:
-                print(f"Error loading session sequences: {e}")
-    else:
-        sequences = metadata.sequences
-        
-    # Handle the nested list structure
-    if isinstance(sequences, list):
-        # Iterate through outer list
-        for seq_group in sequences:
-            if isinstance(seq_group, list):
-                # Iterate through inner list
-                for seq in seq_group:
-                    if isinstance(seq, dict) and 'name' in seq:
-                        print(f"Found sequence name: {seq['name']}")
-                        match = re.search(r'_Stage(\d+)', seq['name'], re.IGNORECASE)
-                        if match:
-                            if 'FreeRun' in seq['name']:
-                                stage_number = int(match.group(1))
-                                stage_found = 8 + 0.1 * stage_number
-                                # stage_found = int(match.group(1)) + 7
-                            elif 'Doubles' in seq['name']:
-                                stage_found = 9
-                            elif 'Triples' in seq['name']:
-                                stage_found = 10
-                            elif 'Quadruple' in seq['name']:
-                                stage_found = 11
-                            else:
-                                stage_found = match.group(1)
-                            return stage_found
-                        else:
-                            if 'Doubles' in seq['name']:
-                                stage_found = 9
-            elif isinstance(seq_group, dict) and 'name' in seq_group:
-                # Handle case where outer list contains dicts directly
-                print(f"Found sequence name: {seq_group['name']}")
-                match = re.search(r'_Stage(\d+)', seq_group['name'], re.IGNORECASE)
-                if match:
-                    if 'FreeRun' in seq_group['name']:
-                        stage_number = int(match.group(1))
-                        stage_found = 8 + 0.1 * stage_number
-                        # stage_found = int(match.group(1)) + 7
-                    elif 'Doubles' in seq_group['name']:
-                        stage_found = 9
-                    elif 'Triples' in seq_group['name']:
-                        stage_found = 10
-                    elif 'Quadruple' in seq_group['name']:
-                        stage_found = 11
-                    else:
-                        stage_found = match.group(1)
-                    return stage_found
-                else:
-                    if 'Doubles' in seq_group['name']:
-                        stage_found = 9
-                        return stage_found
-        
-    print(f"Final stage detected: {stage_found}")
-    return stage_found if stage_found else "Unknown"
 
 def calculate_overall_decision_accuracy(events_df):
     """

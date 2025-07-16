@@ -9,8 +9,9 @@ import yaml
 from collections import defaultdict
 
 from src import utils
-from src.analysis import RewardAnalyser, get_decision_accuracy, detect_stage, get_response_time, \
+from src.analysis import RewardAnalyser, get_decision_accuracy, get_response_time, \
     get_decision_sensitivity, get_false_alarm, get_sequence_completion, get_false_alarm_bias
+from src.processing.detect_stage import detect_stage
 
 # Filter out specific warnings
 warnings.filterwarnings(
