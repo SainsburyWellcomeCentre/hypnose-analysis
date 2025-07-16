@@ -9,6 +9,7 @@ from pathlib import Path
 import zoneinfo
 import src.utils as utils  # Changed from relative to absolute import
 import harp
+import yaml
 from functools import reduce
 
 class RewardAnalyser:
@@ -686,12 +687,12 @@ class RewardAnalyser:
                             'overall_accuracy': 0
                         }
                         # Add empty response time data
-                        session_data['response_time'] = {'rt': 0,
-                            'r1_correct_rt': 0, 'r1_incorrect_rt': 0,
-                            'r1_avg_correct_rt': 0, 'r1_avg_incorrect_rt': 0, 'r1_avg_rt': 0,
-                            'r2_correct_rt': 0, 'r2_incorrect_rt': 0,
-                            'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
-                            'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
+                        session_data['response_time'] = {'rt': [],
+                            'r1_correct_rt': [], 'r1_incorrect_rt': [],
+                            'r1_avg_correct_rt': [], 'r1_avg_incorrect_rt': [], 'r1_avg_rt': [],
+                            'r2_correct_rt': [], 'r2_incorrect_rt': [],
+                            'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
+                            'hit_rt': [], 'false_alarm_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                         }
                         # Add empty false alarm data
                         session_data['false_alarm'] = {
@@ -748,12 +749,12 @@ class RewardAnalyser:
                         'overall_accuracy': 0
                     }
                     # Add empty response time data
-                    session_data['response_time'] = {'rt': 0,
-                        'r1_correct_rt': 0, 'r1_incorrect_rt': 0,
-                        'r1_avg_correct_rt': 0, 'r1_avg_incorrect_rt': 0, 'r1_avg_rt': 0,
-                        'r2_correct_rt': 0, 'r2_incorrect_rt': 0,
-                        'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
-                        'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
+                    session_data['response_time'] = {'rt': [],
+                        'r1_correct_rt': [], 'r1_incorrect_rt': [],
+                        'r1_avg_correct_rt': [], 'r1_avg_incorrect_rt': [], 'r1_avg_rt': [],
+                        'r2_correct_rt': [], 'r2_incorrect_rt': [],
+                        'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
+                        'hit_rt': [], 'false_alarm_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                     }
                     # Add empty false alarm data
                     session_data['false_alarm'] = {
@@ -809,12 +810,12 @@ class RewardAnalyser:
                     'overall_accuracy': 0
                 }
                 # Add empty response time data
-                session_data['response_time'] = {'rt': 0,
-                    'r1_correct_rt': 0, 'r1_incorrect_rt': 0,
-                    'r1_avg_correct_rt': 0, 'r1_avg_incorrect_rt': 0, 'r1_avg_rt': 0,
-                    'r2_correct_rt': 0, 'r2_incorrect_rt': 0,
-                    'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
-                    'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
+                session_data['response_time'] = {'rt': [],
+                    'r1_correct_rt': [], 'r1_incorrect_rt': [],
+                    'r1_avg_correct_rt': [], 'r1_avg_incorrect_rt': [], 'r1_avg_rt': [],
+                    'r2_correct_rt': [], 'r2_incorrect_rt': [],
+                    'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
+                    'hit_rt': [], 'false_alarm_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                 }
                 # Add empty false alarm data
                 session_data['false_alarm'] = {
@@ -874,13 +875,12 @@ class RewardAnalyser:
                     'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
                     'overall_accuracy': 0
                 },
-                'response_time': {
-                    'rt': 0,
-                    'r1_correct_rt': 0, 'r1_incorrect_rt': 0,
-                    'r1_avg_correct_rt': 0, 'r1_avg_incorrect_rt': 0, 'r1_avg_rt': 0,
-                    'r2_correct_rt': 0, 'r2_incorrect_rt': 0,
-                    'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
-                    'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
+                'response_time': {'rt': [],
+                    'r1_correct_rt': [], 'r1_incorrect_rt': [],
+                    'r1_avg_correct_rt': [], 'r1_avg_incorrect_rt': [], 'r1_avg_rt': [],
+                    'r2_correct_rt': [], 'r2_incorrect_rt': [],
+                    'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
+                    'hit_rt': [], 'false_alarm_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                 },
                 'false_alarm': {               
                     'C_pokes': 0, 'C_trials': 0,
@@ -1091,12 +1091,12 @@ class RewardAnalyser:
         session_data = temp_instance._get_session_data(root)
         
         # Return just the response time summary
-        return session_data.get('response_time', {'rt': 0,
-                        'r1_correct_rt': 0, 'r1_incorrect_rt': 0,
-                        'r1_avg_correct_rt': 0, 'r1_avg_incorrect_rt': 0, 'r1_avg_rt': 0,
-                        'r2_correct_rt': 0, 'r2_incorrect_rt': 0,
-                        'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
-                        'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
+        return session_data.get('response_time', {'rt': [],
+                        'r1_correct_rt': [], 'r1_incorrect_rt': [],
+                        'r1_avg_correct_rt': [], 'r1_avg_incorrect_rt': [], 'r1_avg_rt': [],
+                        'r2_correct_rt': [], 'r2_incorrect_rt': [],
+                        'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
+                        'hit_rt': [], 'false_alarm_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                     })
 
     @staticmethod
@@ -1330,7 +1330,22 @@ def detect_stage(root):
     metadata_reader = utils.SessionData()
     session_settings = utils.load_json(metadata_reader, path_root/"SessionSettings")
     stage_found = None
-    sequences = session_settings.iloc[0]['metadata'].sequences
+    metadata = session_settings.iloc[0]['metadata']
+
+    # Handle schema and session settings format
+    if not hasattr(metadata, 'sequences') or (hasattr(metadata, 'sequences') and not metadata.sequences): # and hasattr(metadata.metadata, 'initialSequence') and metadata.metadata.initialSequence):  # separate files
+        try: 
+            sequence_schema = utils.load_json(metadata_reader, path_root/"Schema") # TODO
+        except:
+            try:
+                schema_filename = metadata.metadata.initialSequence.split("/")[-1]
+                with open(path_root/"Schema"/schema_filename, 'r') as file:
+                    sequence_schema = yaml.load(file, Loader=yaml.SafeLoader)
+                    sequences = sequence_schema['sequences']
+            except Exception as e:
+                print(f"Error loading session sequences: {e}")
+    else:
+        sequences = metadata.sequences
         
     # Handle the nested list structure
     if isinstance(sequences, list):

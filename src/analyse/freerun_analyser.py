@@ -1,11 +1,11 @@
 import argparse
-import sys
+import sys, os, re
 import pandas as pd
 import numpy as np
 from pathlib import Path
 import warnings
 import harp
-import re
+import yaml
 from collections import defaultdict
 
 from src import utils
@@ -273,8 +273,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             })
 
         # Add response time data 
-        if response_time:  
+        if response_time:
             all_rt.append(response_time['rt'])
+            all_r1_correct_rt.append(response_time['r1_correct_rt'])
             all_r1_correct_rt.append(response_time['r1_correct_rt'])
             all_r1_incorrect_rt.append(response_time['r1_incorrect_rt'])
             all_r2_correct_rt.append(response_time['r2_correct_rt'])
@@ -482,7 +483,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                   f"R2={accuracy_data['r2_accuracy']:.1f}% ({accuracy_data['r2_correct']}/{accuracy_data['r2_total']})")
             print(f"  Overall: {accuracy_data['overall_accuracy']:.1f}%")
         
-        if response_time:
+        if response_time and response_time['rt']:
             print(f"  Response Time: R1={response_time['r1_avg_rt']:.1f}, \
                   R2={response_time['r2_avg_rt']:.1f}")
         
@@ -688,7 +689,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-59_date-20250616")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-72_date-20250703")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-81_date-20250715")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")
