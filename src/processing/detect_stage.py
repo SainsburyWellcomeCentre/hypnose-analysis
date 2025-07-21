@@ -28,6 +28,8 @@ def detect_stage(root):
     if not hasattr(metadata, 'sequences') or (hasattr(metadata, 'sequences') and not metadata.sequences): # and hasattr(metadata.metadata, 'initialSequence') and metadata.metadata.initialSequence):  # separate files
         try: 
             sequence_schema = utils.load_json(metadata_reader, path_root/"Schema") # TODO
+            sequence_metadata = sequence_schema['metadata'].iloc[0]
+            sequences = sequence_metadata['sequences']
         except:
             try:
                 schema_filename = metadata.metadata.initialSequence.split("/")[-1]

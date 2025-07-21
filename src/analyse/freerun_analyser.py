@@ -690,7 +690,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-59_date-20250616")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-81_date-20250715")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-84_date-20250718")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")
