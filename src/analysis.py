@@ -9,6 +9,7 @@ from pathlib import Path
 import zoneinfo
 import src.utils as utils  # Changed from relative to absolute import
 from src.processing.detect_stage import detect_stage
+from src.processing.process_olfactometer_valves import process_olfactometer_valves
 import harp
 import yaml
 from functools import reduce
@@ -373,223 +374,64 @@ class RewardAnalyser:
                 except Exception as e:
                     print(f"Error processing r2 poke events: {e}")
             
-            # Add r1 olfactometer valve events if available
-            if not olfactometer_valves_0_abs.empty and 'Valve0' in olfactometer_valves_0_abs.columns:
-                try:
-                    r1_olf_df = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve0'] == True].copy()
-                    if not r1_olf_df.empty:
-                        r1_olf_df = r1_olf_df[['Time']].copy()
-                        r1_olf_df['r1_olf_valve'] = True
-                        event_frames.append(r1_olf_df)
-                        print(f"Added {len(r1_olf_df)} r1 valve events")
 
-                        # Find OFF events
-                        df = olfactometer_valves_0_abs.sort_values(by='Time').reset_index(drop=True)
-                        valve_prev = df['Valve0'].shift(1) # Shift Valve0 to compare previous row
-                        valve_now = df['Valve0']
-
-                        # Detect where it was ON in previous row and now is OFF
-                        off_after_on_mask = (valve_prev == True) & (valve_now == False)
-                        r1_off = df.loc[off_after_on_mask, ['Time']].copy()
-                        r1_off['r1_olf_valve_off'] = True
-                        event_frames.append(r1_off)
-                        print(f"Added {len(r1_off)} r1 valve OFF events")
-                except Exception as e:
-                    print(f"Error processing r1 valve events: {e}")
+            # Get session settings
+            metadata_reader = utils.SessionData()
+            session_settings = utils.load_json(metadata_reader, root / "SessionSettings")
             
-            # Add r2 olfactometer valve events if available
-            if stage >= 8.4 and stage < 9:  # TODO use subject ID
-                if not olfactometer_valves_1_abs.empty and 'Valve0' in olfactometer_valves_1_abs.columns:
-                    try:
-                        r2_olf_df = olfactometer_valves_1_abs[olfactometer_valves_1_abs['Valve0'] == True].copy()
-                        if not r2_olf_df.empty:
-                            r2_olf_df = r2_olf_df[['Time']].copy()
-                            r2_olf_df['r2_olf_valve'] = True
-                            event_frames.append(r2_olf_df)
-                            print(f"Added {len(r2_olf_df)} r2 valve events")
+            # Add olfactometer valve events if available 
+            olfactometer_valves = {
+                0: olfactometer_valves_0_abs,
+                1: olfactometer_valves_1_abs,
+            }
+    
+            olf_valves0 = [cmd.valvesOpenO0 for cmd in session_settings.metadata.iloc[0].olfactometerCommands]
+            olf_valves1 = [cmd.valvesOpenO1 for cmd in session_settings.metadata.iloc[0].olfactometerCommands]
+            
+            olf_command_idx = {
+                f'0{val}': next(i for i, lst in enumerate(olf_valves0) if val in lst)
+                for val in range(4)
+            } | {
+                f'1{val}': next(i for i, lst in enumerate(olf_valves1) if val in lst)
+                for val in range(4)
+            }                
 
-                            # Find OFF events
-                            df = olfactometer_valves_1_abs.sort_values(by='Time').reset_index(drop=True)
-                            valve_prev = df['Valve0'].shift(1) # Shift Valve0 to compare previous row
-                            valve_now = df['Valve0']
+            for cmd, idx in olf_command_idx.items():
+                olf_id = int(cmd[0])
+                valve_id = int(cmd[1])
 
-                            # Detect where it was ON in previous row and now is OFF
-                            off_after_on_mask = (valve_prev == True) & (valve_now == False)
-                            r2_off = df.loc[off_after_on_mask, ['Time']].copy()
-                            r2_off['r2_olf_valve_off'] = True
-                            event_frames.append(r2_off)
-                            print(f"Added {len(r2_off)} r2 valve OFF events")
-                    except Exception as e:
-                        print(f"Error processing r2 valve events: {e}")
-            else:
-                if not olfactometer_valves_0_abs.empty and 'Valve1' in olfactometer_valves_0_abs.columns:
-                    try:
-                        r2_olf_df = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve1'] == True].copy()
-                        if not r2_olf_df.empty:
-                            r2_olf_df = r2_olf_df[['Time']].copy()
-                            r2_olf_df['r2_olf_valve'] = True
-                            event_frames.append(r2_olf_df)
-                            print(f"Added {len(r2_olf_df)} r2 valve events")
+                olfactometer_df = olfactometer_valves[olf_id]
 
-                            # Find OFF events
-                            df = olfactometer_valves_0_abs.sort_values(by='Time').reset_index(drop=True)
-                            valve_prev = df['Valve1'].shift(1) # Shift Valve1 to compare previous row
-                            valve_now = df['Valve1']
-
-                            # Detect where it was ON in previous row and now is OFF
-                            off_after_on_mask = (valve_prev == True) & (valve_now == False)
-                            r2_off = df.loc[off_after_on_mask, ['Time']].copy()
-                            r2_off['r2_olf_valve_off'] = True
-                            event_frames.append(r2_off)
-                            print(f"Added {len(r2_off)} r2 valve OFF events")
-                    except Exception as e:
-                        print(f"Error processing r2 valve events: {e}")
+                if session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorA':
+                    on_label = 'r1_olf_valve'
+                    off_label = 'r1_olf_valve_off'
                 
-            # Add odour C olfactometer valve events if available
-            if not olfactometer_valves_0_abs.empty and 'Valve2' in olfactometer_valves_0_abs.columns:
-                try:
-                    odourC = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve2'] == True].copy()
-                    if not odourC.empty:
-                        odourC = odourC[['Time']].copy()
-                        odourC['odourC_olf_valve'] = True
-                        event_frames.append(odourC)
-                        print(f"Added {len(odourC)} odour C valve events")
+                elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorB':
+                    on_label = 'r2_olf_valve'
+                    off_label = 'r2_olf_valve_off'
 
-                        # Find OFF events
-                        df = olfactometer_valves_0_abs.sort_values(by='Time').reset_index(drop=True)
-                        valve_prev = df['Valve2'].shift(1) # Shift Valve2 to compare previous row
-                        valve_now = df['Valve2']
+                elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorC':
+                    on_label = 'odourC_olf_valve'
+                    off_label = 'odourC_olf_valve_off'
+                
+                elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorD':
+                    on_label = 'odourD_olf_valve'
+                    off_label = 'odourD_olf_valve_off'
+                
+                elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorE':
+                    on_label = 'odourE_olf_valve'
+                    off_label = 'odourE_olf_valve_off'
+                
+                elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorF':
+                    on_label = 'odourF_olf_valve'
+                    off_label = 'odourF_olf_valve_off'
+                
+                elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorG':
+                    on_label = 'odourG_olf_valve'
+                    off_label = 'odourG_olf_valve_off'
+                
+                event_frames = process_olfactometer_valves(olfactometer_df, f'Valve{valve_id}', on_label, off_label, event_frames)    
 
-                        # Detect where it was ON in previous row and now is OFF
-                        off_after_on_mask = (valve_prev == True) & (valve_now == False)
-                        odourC_off = df.loc[off_after_on_mask, ['Time']].copy()
-                        odourC_off['odourC_olf_valve_off'] = True
-                        event_frames.append(odourC_off)
-                        print(f"Added {len(odourC_off)} odour C valve OFF events")
-                except Exception as e:
-                    print(f"Error processing odour C valve events: {e}")
-            
-            # Add odour D olfactometer valve events if available
-            if not olfactometer_valves_0_abs.empty and 'Valve3' in olfactometer_valves_0_abs.columns:
-                try:
-                    odourD = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve3'] == True].copy()
-                    if not odourD.empty:
-                        odourD = odourD[['Time']].copy()
-                        odourD['odourD_olf_valve'] = True
-                        event_frames.append(odourD)
-                        print(f"Added {len(odourD)} odour D valve events")
-
-                        # Find OFF events
-                        df = olfactometer_valves_0_abs.sort_values(by='Time').reset_index(drop=True)
-                        valve_prev = df['Valve3'].shift(1) # Shift Valve3 to compare previous row
-                        valve_now = df['Valve3']
-
-                        # Detect where it was ON in previous row and now is OFF
-                        off_after_on_mask = (valve_prev == True) & (valve_now == False)
-                        odourD_off = df.loc[off_after_on_mask, ['Time']].copy()
-                        odourD_off['odourD_olf_valve_off'] = True
-                        event_frames.append(odourD_off)
-                        print(f"Added {len(odourD_off)} odour D valve OFF events")
-                except Exception as e:
-                    print(f"Error processing odour D valve events: {e}")
-            
-            # Add odour E olfactometer valve events if available
-            if stage >= 8.4 and stage < 9:
-                if not olfactometer_valves_0_abs.empty and 'Valve1' in olfactometer_valves_0_abs.columns:
-                    try:
-                        odourE = olfactometer_valves_0_abs[olfactometer_valves_0_abs['Valve1'] == True].copy()
-                        if not odourE.empty:
-                            odourE = odourE[['Time']].copy()
-                            odourE['odourE_olf_valve'] = True
-                            event_frames.append(odourE)
-                            print(f"Added {len(odourE)} odour E valve events")
-
-                            # Find OFF events
-                            df = olfactometer_valves_0_abs.sort_values(by='Time').reset_index(drop=True)
-                            valve_prev = df['Valve1'].shift(1) # Shift Valve1 to compare previous row
-                            valve_now = df['Valve1']
-
-                            # Detect where it was ON in previous row and now is OFF
-                            off_after_on_mask = (valve_prev == True) & (valve_now == False)
-                            odourE_off = df.loc[off_after_on_mask, ['Time']].copy()
-                            odourE_off['odourE_olf_valve_off'] = True
-                            event_frames.append(odourE_off)
-                            print(f"Added {len(odourE_off)} odour E valve OFF events")
-                    except Exception as e:
-                        print(f"Error processing odour E valve events: {e}")
-            else:
-                if not olfactometer_valves_1_abs.empty and 'Valve0' in olfactometer_valves_1_abs.columns:
-                    try:
-                        odourE = olfactometer_valves_1_abs[olfactometer_valves_1_abs['Valve0'] == True].copy()
-                        if not odourE.empty:
-                            odourE = odourE[['Time']].copy()
-                            odourE['odourE_olf_valve'] = True
-                            event_frames.append(odourE)
-                            print(f"Added {len(odourE)} odour E valve events")
-
-                            # Find OFF events
-                            df = olfactometer_valves_1_abs.sort_values(by='Time').reset_index(drop=True)
-                            valve_prev = df['Valve0'].shift(1) # Shift Valve0 to compare previous row
-                            valve_now = df['Valve0']
-
-                            # Detect where it was ON in previous row and now is OFF
-                            off_after_on_mask = (valve_prev == True) & (valve_now == False)
-                            odourE_off = df.loc[off_after_on_mask, ['Time']].copy()
-                            odourE_off['odourE_olf_valve_off'] = True
-                            event_frames.append(odourE_off)
-                            print(f"Added {len(odourE_off)} odour E valve OFF events")
-                    except Exception as e:
-                        print(f"Error processing odour E valve events: {e}")
-
-            # Add odour F olfactometer valve events if available
-            if not olfactometer_valves_1_abs.empty and 'Valve1' in olfactometer_valves_1_abs.columns:
-                try:
-                    odourF = olfactometer_valves_1_abs[olfactometer_valves_1_abs['Valve1'] == True].copy()
-                    if not odourF.empty:
-                        odourF = odourF[['Time']].copy()
-                        odourF['odourF_olf_valve'] = True
-                        event_frames.append(odourF)
-                        print(f"Added {len(odourF)} odour F valve events")
-
-                        # Find OFF events
-                        df = olfactometer_valves_1_abs.sort_values(by='Time').reset_index(drop=True)
-                        valve1_prev = df['Valve1'].shift(1) # Shift Valve1 to compare previous row
-                        valve1_now = df['Valve1']
-
-                        # Detect where it was ON in previous row and now is OFF
-                        off_after_on_mask = (valve1_prev == True) & (valve1_now == False)
-                        odourF_off = df.loc[off_after_on_mask, ['Time']].copy()
-                        odourF_off['odourF_olf_valve_off'] = True
-                        event_frames.append(odourF_off)
-                        print(f"Added {len(odourF_off)} odour F valve OFF events")
-
-                except Exception as e:
-                    print(f"Error processing odour F valve events: {e}")
-            
-            # Add odour G olfactometer valve events if available
-            if not olfactometer_valves_1_abs.empty and 'Valve2' in olfactometer_valves_1_abs.columns:
-                try:
-                    odourG = olfactometer_valves_1_abs[olfactometer_valves_1_abs['Valve2'] == True].copy()
-                    if not odourG.empty:
-                        odourG = odourG[['Time']].copy()
-                        odourG['odourG_olf_valve'] = True
-                        event_frames.append(odourG)
-                        print(f"Added {len(odourG)} odour G valve events")
-
-                        # Find OFF events
-                        df = olfactometer_valves_1_abs.sort_values(by='Time').reset_index(drop=True)
-                        valve_prev = df['Valve2'].shift(1) # Shift Valve2 to compare previous row
-                        valve_now = df['Valve2']
-
-                        # Detect where it was ON in previous row and now is OFF
-                        off_after_on_mask = (valve_prev == True) & (valve_now == False)
-                        odourG_off = df.loc[off_after_on_mask, ['Time']].copy()
-                        odourG_off['odourG_olf_valve_off'] = True
-                        event_frames.append(odourG_off)
-                        print(f"Added {len(odourG_off)} odour G valve OFF events")
-                except Exception as e:
-                    print(f"Error processing odour G valve events: {e}")
-            
             # Add EndInitiation events if available
             if not combined_end_initiation_df.empty and 'EndInitiation' in combined_end_initiation_df.columns:
                 event_frames.append(combined_end_initiation_df)
