@@ -309,6 +309,12 @@ class RewardAnalyser:
                                     print(f"Found {len(eii_df)} EndInitiation events")
                                     eii_df["EndInitiation"] = True
                                     end_initiation_frames.append(eii_df[["Time", "EndInitiation"]])
+
+                                is_df = ev_df[ev_df["Value"] == "InitiationSequence"].copy()
+                                if not is_df.empty:
+                                    print(f"Found {len(is_df)} InitiationSequence events")
+                                    is_df["InitiationSequence"] = True
+                                    start_initiation_frames.append(is_df[["Time", "InitiationSequence"]])
                                 # TODO: Continue here
                     except Exception as e:
                         print(f"Error processing event file {csv_file.name}: {e}")
@@ -322,6 +328,14 @@ class RewardAnalyser:
             else:
                 combined_end_initiation_df = pd.DataFrame(columns=["Time", "EndInitiation"])
                 print("No EndInitiation events found - cannot identify trial endings")
+            
+            # Safely combine InitiationSequence frames
+            if len(start_initiation_frames) > 0:
+                combined_start_initiation_df = pd.concat(start_initiation_frames, ignore_index=True)
+                print(f"Combined {len(combined_start_initiation_df)} InitiationSequence events")
+            else:
+                combined_start_initiation_df = pd.DataFrame(columns=["Time", "InitiationSequence"])
+                print("No InitiationSequence events found - cannot identify trial endings")
             
             # Now process events to calculate decision accuracy
             event_frames = []
@@ -402,7 +416,10 @@ class RewardAnalyser:
 
                 olfactometer_df = olfactometer_valves[olf_id]
 
-                if session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorA':
+                if session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'Purge':
+                    continue
+
+                elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorA':
                     on_label = 'r1_olf_valve'
                     off_label = 'r1_olf_valve_off'
                 
@@ -429,12 +446,20 @@ class RewardAnalyser:
                 elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorG':
                     on_label = 'odourG_olf_valve'
                     off_label = 'odourG_olf_valve_off'
+
+                # elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'Purge':
+                #     on_label = 'purge_valve'
+                #     off_label = 'purge_valve_off'
                 
                 event_frames = process_olfactometer_valves(olfactometer_df, f'Valve{valve_id}', on_label, off_label, event_frames)    
 
             # Add EndInitiation events if available
             if not combined_end_initiation_df.empty and 'EndInitiation' in combined_end_initiation_df.columns:
                 event_frames.append(combined_end_initiation_df)
+            
+            # Add InitiationSequence events if available
+            if not combined_start_initiation_df.empty and 'InitiationSequence' in combined_start_initiation_df.columns:
+                event_frames.append(combined_start_initiation_df)
             
             # Only proceed if we have data to analyze
             if event_frames:
@@ -449,26 +474,31 @@ class RewardAnalyser:
                     
                     # Explicitly add missing columns with default values to prevent errors
                     if stage > 7:
-                        required_columns = ['timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', \
+                        required_columns = ['Time', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', \
                                             'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', \
                                                 'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', \
                                                     'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', \
-                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off']
+                                                        'odourG_olf_valve_off', 'EndInitiation', 'InitiationSequence', 'odour_poke', 'odour_poke_off']
                     else:
-                        required_columns = ['timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 'r1_olf_valve_off', \
-                                            'r2_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off']
-                    for col in required_columns:
-                        if col not in all_events_df.columns and col != 'timestamp':
-                            all_events_df[col] = False
+                        required_columns = ['Time', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 'r1_olf_valve_off', \
+                                            'r2_olf_valve_off', 'EndInitiation', 'InitiationSequence', 'odour_poke', 'odour_poke_off']
                     
-                    # Handle the warning about downcasting properly
-                    all_events_df = all_events_df.fillna(False).infer_objects(copy=False)
+                    for col in required_columns:
+                        if col not in all_events_df.columns and col != 'Time':
+                            all_events_df[col] = False
+                        if col != "Time":
+                            all_events_df[col] = all_events_df[col].fillna(False) # This might drop the first InitiationSequence event
+                    all_events_df = all_events_df.dropna(subset=["Time"])
+
+                    # all_events_df = all_events_df.fillna(False).infer_objects(copy=False)
                     all_events_df.sort_values('Time', inplace=True)
                     all_events_df.rename(columns={'Time': 'timestamp'}, inplace=True)
                     all_events_df.reset_index(drop=True, inplace=True)
 
                     # Check if we have any valid trial data
+                    has_start_initiation = 'InitiationSequence' in all_events_df.columns and any(all_events_df['InitiationSequence'])
                     has_end_initiation = 'EndInitiation' in all_events_df.columns and any(all_events_df['EndInitiation'])
+                    
                     has_valve_events = (('r1_olf_valve' in all_events_df.columns and any(all_events_df['r1_olf_valve'])) or
                                         ('r2_olf_valve' in all_events_df.columns and any(all_events_df['r2_olf_valve'])) or 
                                         ('odourC_olf_valve' in all_events_df.columns and any(all_events_df['odourC_olf_valve'])) or 
@@ -489,9 +519,10 @@ class RewardAnalyser:
                                       ('odour_poke_off' in all_events_df.columns and any(all_events_df['odour_poke_off'])))
                     
                     print(f"Data check: EndInitiation events: {has_end_initiation}, " 
+                          f"InitiationSequence events: {has_start_initiation}, " 
                           f"Valve events: {has_valve_events}, Poke events: {has_poke_events}")
                     
-                    if has_end_initiation and has_valve_events and has_poke_events:
+                    if has_start_initiation and has_end_initiation and has_valve_events and has_poke_events:
                         # Calculate decision accuracy
                         session_data['accuracy_summary'] = calculate_overall_decision_accuracy(all_events_df)
 
@@ -1542,7 +1573,7 @@ def calculate_overall_false_alarm(events_df):
         'overall_false_alarm': overall_false_alarm
     }
 
-def calculate_overall_sequence_completion(events_df):
+def calculate_overall_sequence_completion(events_df, completionRequiresEngagement=True):
     """
     Calculate sequence completion for non-rewarded trials.
     
@@ -1565,56 +1596,68 @@ def calculate_overall_sequence_completion(events_df):
     rew_trials = 0
     non_rew_trials = 0
     
-    # Find all trial end points
-    end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+    if not completionRequiresEngagement: # TODO
+        # Find all trial (odour) end points
+        end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
 
-    # Process each trial
-    for e, end_idx in enumerate(end_initiation_indices[:-1]):
-        # Determine trial type (r1, r2, or non-rewarded odour) by finding the most recent valve activation
-        closest_valve_idx = None
-        trial_type = None
-        for i in range(end_idx - 1, -1, -1):
-            if events_df.loc[i, 'r1_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'r1'
-                break
-            elif events_df.loc[i, 'r2_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'r2'
-                break 
-            elif events_df.loc[i, 'odourC_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'C'
-                break
-            elif events_df.loc[i, 'odourD_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'D'
-                break
-            elif events_df.loc[i, 'odourE_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'E'
-                break
-            elif events_df.loc[i, 'odourF_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'F'
-                break
-            elif events_df.loc[i, 'odourG_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'G'
-                break
+        # Process each trial (odour)
+        for e, end_idx in enumerate(end_initiation_indices[:-1]):
+            # Determine trial type (r1, r2, or non-rewarded odour) by finding the most recent valve activation
+            closest_valve_idx = None
+            trial_type = None
+            for i in range(end_idx - 1, -1, -1):
+                if events_df.loc[i, 'r1_olf_valve']:
+                    closest_valve_idx = i
+                    trial_type = 'r1'
+                    break
+                elif events_df.loc[i, 'r2_olf_valve']:
+                    closest_valve_idx = i
+                    trial_type = 'r2'
+                    break 
+                elif events_df.loc[i, 'odourC_olf_valve']:
+                    closest_valve_idx = i
+                    trial_type = 'C'
+                    break
+                elif events_df.loc[i, 'odourD_olf_valve']:
+                    closest_valve_idx = i
+                    trial_type = 'D'
+                    break
+                elif events_df.loc[i, 'odourE_olf_valve']:
+                    closest_valve_idx = i
+                    trial_type = 'E'
+                    break
+                elif events_df.loc[i, 'odourF_olf_valve']:
+                    closest_valve_idx = i
+                    trial_type = 'F'
+                    break
+                elif events_df.loc[i, 'odourG_olf_valve']:
+                    closest_valve_idx = i
+                    trial_type = 'G'
+                    break
 
-        # Skip if no valve activation found before this trial end
-        if closest_valve_idx is None:
-            continue
-            
-        # Count trial by type
-        if trial_type == 'r1' or trial_type == 'r2':
-            rew_trials += 1
-        else:
-            non_rew_trials += 1
+            # Skip if no valve activation found before this trial end
+            if closest_valve_idx is None:
+                continue
+                
+            # Count trial by type
+            if trial_type == 'r1' or trial_type == 'r2':
+                rew_trials += 1
+            else:
+                non_rew_trials += 1
 
-    # Calculate sequence completion ratio with safety checks for division by zero
-    completion_ratio = rew_trials / (rew_trials + non_rew_trials) * 100 if (rew_trials + non_rew_trials) > 0 else 0
+        # Calculate sequence completion ratio with safety checks for division by zero
+        completion_ratio = rew_trials / (rew_trials + non_rew_trials) * 100 if (rew_trials + non_rew_trials) > 0 else 0
+
+    # else: 
+    #     # Find all trial (sequence) end points
+    #     start_initiation_indices = events_df.index[events_df['InitiationSequence'] == True].tolist()
+    #     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+        
+    #     # Process each sequence
+    #     for e, end_idx in enumerate(end_initiation_indices[:-1]):
+
+
+
 
     return {
         'rew_trials': rew_trials,

@@ -4,9 +4,11 @@ import numpy as np
 from pathlib import Path
 import warnings
 import harp
+import sys
 
 from src import utils
-from src.analysis import RewardAnalyser, get_decision_accuracy, detect_stage
+from src.analysis import RewardAnalyser, get_decision_accuracy
+from src.processing.detect_stage import detect_stage
 
 # Filter out specific warnings
 warnings.filterwarnings(
@@ -256,6 +258,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     return results
 
 if __name__ == "__main__":
+    if len(sys.argv) == 1:
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-035_id-184/ses-12_date-20250722")
+
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")
     parser.add_argument("--reward_a", type=float, default=4.0, help="Volume (µL) per Reward A")
