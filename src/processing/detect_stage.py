@@ -51,8 +51,8 @@ def detect_stage(root):
                     if isinstance(seq, dict) and 'name' in seq:
                         print(f"Found sequence name: {seq['name']}")
                         match = re.search(r'_Stage(\d+)', seq['name'], re.IGNORECASE)
-                        stage_number = int(match.group(1))
                         if match:
+                            stage_number = int(match.group(1))
                             if 'FreeRun' in seq['name']:
                                 stage_found = 8 + 0.1 * stage_number
                             elif 'Doubles' in seq['name']:
@@ -64,7 +64,7 @@ def detect_stage(root):
                             elif 'Quintuple' in seq['name']:
                                 stage_found = 12 + 0.1 * stage_number
                             else:
-                                stage_found = match.group(1)
+                                stage_found = stage_number
                             return stage_found
                         else:
                             if 'Doubles' in seq['name']:
@@ -74,8 +74,8 @@ def detect_stage(root):
                 print(f"Found sequence name: {seq_group['name']}")
                 match = re.search(r'_Stage(\d+)', seq_group['name'], re.IGNORECASE)
                 if match:
+                    stage_number = int(match.group(1))
                     if 'FreeRun' in seq_group['name']:
-                        stage_number = int(match.group(1))
                         stage_found = 8 + 0.1 * stage_number
                     elif 'Doubles' in seq_group['name']:
                         stage_found = 9 + 0.1 * stage_number
@@ -86,7 +86,7 @@ def detect_stage(root):
                     elif 'Quintuple' in seq_group['name']:
                         stage_found = 12 + 0.1 * stage_number
                     else:
-                        stage_found = match.group(1)
+                        stage_found = stage_number
                     return stage_found
                 else:
                     if 'Doubles' in seq_group['name']:
