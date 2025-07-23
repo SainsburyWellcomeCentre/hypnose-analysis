@@ -1575,7 +1575,8 @@ def calculate_overall_false_alarm(events_df):
 
 def calculate_overall_sequence_completion(events_df, completionRequiresEngagement=True):
     """
-    Calculate sequence completion for non-rewarded trials.
+    Calculate sequence completion i.e. how many times the mouse attempts a preliminary reward
+    before succesfully completing a sequence.
     
     Parameters:
     -----------
@@ -1591,7 +1592,14 @@ def calculate_overall_sequence_completion(events_df, completionRequiresEngagemen
     dict
         Dictionary containing sequence completion metrics 
     """
+    print('Cannot process sequence completion yet. Currently working on this...')
+    return {
+        'rew_trials': 0,
+        'non_rew_trials': 0,
+        'completion_ratio': 0
+    } 
 
+    # TODO
     # Initialize counters
     rew_trials = 0
     non_rew_trials = 0
@@ -1648,16 +1656,45 @@ def calculate_overall_sequence_completion(events_df, completionRequiresEngagemen
         # Calculate sequence completion ratio with safety checks for division by zero
         completion_ratio = rew_trials / (rew_trials + non_rew_trials) * 100 if (rew_trials + non_rew_trials) > 0 else 0
 
-    # else: 
-    #     # Find all trial (sequence) end points
-    #     start_initiation_indices = events_df.index[events_df['InitiationSequence'] == True].tolist()
-    #     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
-        
-    #     # Process each sequence
-    #     for e, end_idx in enumerate(end_initiation_indices[:-1]):
+    else: 
+        # Find all trial (sequence) end points
+        start_initiation_indices = events_df.index[events_df['InitiationSequence'] == True].tolist()
+        end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+        complete_sequences = len(end_initiation_indices)
+        uncompleted_sequences = 0
 
+        num_continuous_odours = [[] for _ in range(complete_sequences)]        
 
+        # Process each sequence
+        for e in range(len(end_initiation_indices)):
+            end_idx = end_initiation_indices[e]
+            if e == 0:
+                prev_end_idx = 0
+            else:
+                prev_end_idx = end_initiation_indices[e - 1]
+            
+            counter = 0  # count number of consecutive odours
 
+            i = prev_end_idx
+            while i < end_idx:
+                if events_df.loc[i, ['r1_olf_valve', 'r2_olf_valve', 'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']].any():
+                    counter += 1
+
+                    for j in range(i + 1, end_idx):
+                        if events_df.loc[j, ['r1_poke', 'r2_poke']].any():
+                            num_continuous_odours[e].append(counter)
+                            uncompleted_sequences += 1
+                            counter = 0
+                            break
+                        elif events_df.loc[j, ['r1_olf_valve', 'r2_olf_valve', 'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']].any():
+                            counter += 1
+                        i = j + 1  # move outer loop past this event
+                else:
+                    i += 1
+            num_continuous_odours[e].append(counter)
+                            
+        # Calculate sequence completion ratio with safety checks for division by zero
+        completion_ratio = complete_sequences / (complete_sequences + uncompleted_sequences) * 100 if (complete_sequences + uncompleted_sequences) > 0 else 0
 
     return {
         'rew_trials': rew_trials,
