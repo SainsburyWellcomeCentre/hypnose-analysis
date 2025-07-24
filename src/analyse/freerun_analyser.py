@@ -105,8 +105,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_diff_olf_false_alarm = {}
 
     # sequence completion variables 
-    all_rew_trials = 0
-    all_non_rew_trials = 0
+    all_complete_sequences = 0
+    all_incomplete_sequences = 0
     
     # sensitivity varibles 
     all_r1_respond = 0
@@ -431,18 +431,18 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             
         # Add sequence completion data
         if sequence_completion:
-            all_rew_trials += sequence_completion['rew_trials']
-            all_non_rew_trials += sequence_completion['non_rew_trials']
+            all_complete_sequences += sequence_completion['complete_sequences']
+            all_incomplete_sequences += sequence_completion['incomplete_sequences']
             
             session_info.update({
-                'rew_trials': sequence_completion['rew_trials'],
-                'non_rew_trials': sequence_completion['non_rew_trials'],
+                'complete_sequences': sequence_completion['complete_sequences'],
+                'incomplete_sequences': sequence_completion['incomplete_sequences'],
                 'completion_ratio': sequence_completion['completion_ratio']
             })
         else:
             session_info.update({
-                'rew_trials': 0,
-                'non_rew_trials': 0,
+                'complete_sequences': 0,
+                'incomplete_sequences': 0,
                 'completion_ratio': 0
             })    
         
@@ -582,7 +582,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
     # Calculate overall sequence completion ratio
     if stage >= 9:
-        overall_completion_ratio = all_rew_trials / (all_rew_trials + all_non_rew_trials) * 100 if (all_rew_trials + all_non_rew_trials) > 0 else 0
+        overall_completion_ratio = all_complete_sequences / (all_complete_sequences + all_incomplete_sequences) * 100 if (all_complete_sequences + all_incomplete_sequences) > 0 else 0
     else:
         overall_completion_ratio = 0
 
@@ -689,8 +689,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-59_date-20250616")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-85_date-20250720")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-69_date-20250630/")
+        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-85_date-20250720")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")
