@@ -25,9 +25,9 @@ def detect_stage(root):
     metadata = session_settings.iloc[0]['metadata']
 
     # Handle schema and session settings format
-    if not hasattr(metadata, 'sequences') or (hasattr(metadata, 'sequences') and not metadata.sequences): # and hasattr(metadata.metadata, 'initialSequence') and metadata.metadata.initialSequence):  # separate files
+    if not hasattr(metadata, 'sequences') or (hasattr(metadata, 'sequences') and not metadata.sequences):  # separate files
         try: 
-            sequence_schema = utils.load_json(metadata_reader, path_root/"Schema") # TODO
+            sequence_schema = utils.load_json(metadata_reader, path_root/"Schema") 
             sequence_metadata = sequence_schema['metadata'].iloc[0]
             sequences = sequence_metadata['sequences']
         except:
@@ -37,7 +37,7 @@ def detect_stage(root):
                     sequence_schema = yaml.load(file, Loader=yaml.SafeLoader)
                     sequences = sequence_schema['sequences']
             except Exception as e:
-                print(f"Error loading session sequences: {e}")
+                print(f"Error loading session schema: {e}")
     else:
         sequences = metadata.sequences
         

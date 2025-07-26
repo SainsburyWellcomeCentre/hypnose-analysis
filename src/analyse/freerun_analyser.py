@@ -12,6 +12,7 @@ from src import utils
 from src.analysis import RewardAnalyser, get_decision_accuracy, get_response_time, \
     get_decision_sensitivity, get_false_alarm, get_sequence_completion, get_false_alarm_bias
 from src.processing.detect_stage import detect_stage
+from src.processing.detect_settings import detect_settings
 
 # Filter out specific warnings
 warnings.filterwarnings(
@@ -59,9 +60,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
     # Accuracy variables 
     all_r1_correct = 0
-    all_r1_total = 0
+    all_r1_respond = 0
     all_r2_correct = 0
-    all_r2_total = 0
+    all_r2_respond = 0
     
     # Response time variables
     all_rt = []
@@ -129,9 +130,10 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             continue
 
         # Load session settings
-        metadata_reader = utils.SessionData()
+        # metadata_reader = utils.SessionData()
         try:
-            session_settings = utils.load_json(metadata_reader, session_dir / "SessionSettings")
+            session_settings, schema_settings = detect_settings(session_dir)
+            # session_settings = utils.load_json(metadata_reader, session_dir / "SessionSettings")
             
             # Detect stage if not already set
             if stage is None:
@@ -251,26 +253,26 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         # Add accuracy data 
         if accuracy_data:
             all_r1_correct += accuracy_data['r1_correct']
-            all_r1_total += accuracy_data['r1_total']
+            all_r1_respond += accuracy_data['r1_respond']
             all_r2_correct += accuracy_data['r2_correct']
-            all_r2_total += accuracy_data['r2_total']
+            all_r2_respond += accuracy_data['r2_respond']
             
             session_info.update({
                 'r1_correct': accuracy_data['r1_correct'],
-                'r1_total': accuracy_data['r1_total'],
+                'r1_respond': accuracy_data['r1_respond'],
                 'r1_accuracy': accuracy_data['r1_accuracy'],
                 'r2_correct': accuracy_data['r2_correct'],
-                'r2_total': accuracy_data['r2_total'],
+                'r2_respond': accuracy_data['r2_respond'],
                 'r2_accuracy': accuracy_data['r2_accuracy'],
                 'overall_accuracy': accuracy_data['overall_accuracy']
             })
         else:
             session_info.update({
                 'r1_correct': 0,
-                'r1_total': 0,
+                'r1_respond': 0,
                 'r1_accuracy': 0,
                 'r2_correct': 0,
-                'r2_total': 0,
+                'r2_respond': 0,
                 'r2_accuracy': 0,
                 'overall_accuracy': 0
             })
@@ -458,10 +460,10 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         
         # Add sensitivity data
         if sensitivity:
-            all_r1_respond += sensitivity['r1_respond']
-            # all_r1_total += sensitivity['r1_total']
-            all_r2_respond += sensitivity['r2_respond']
-            # all_r2_total += sensitivity['r2_total']
+            # all_r1_respond += sensitivity['r1_respond']
+            all_r1_total += sensitivity['r1_total']
+            # all_r2_respond += sensitivity['r2_respond']
+            all_r2_total += sensitivity['r2_total']
 
             session_info.update({
                 'r1_respond': sensitivity['r1_respond'],
@@ -490,8 +492,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         print(f"  Duration: {session_duration_sec:.1f} seconds")
         print(f"  Rewards: R1={num_r1_rewards} ({r1_volume:.1f}µL), R2={num_r2_rewards} ({r2_volume:.1f}µL)")
         if accuracy_data:
-            print(f"  Accuracy: R1={accuracy_data['r1_accuracy']:.1f}% ({accuracy_data['r1_correct']}/{accuracy_data['r1_total']}), "
-                  f"R2={accuracy_data['r2_accuracy']:.1f}% ({accuracy_data['r2_correct']}/{accuracy_data['r2_total']})")
+            print(f"  Accuracy: R1={accuracy_data['r1_accuracy']:.1f}% ({accuracy_data['r1_correct']}/{accuracy_data['r1_respond']}), "
+                  f"R2={accuracy_data['r2_accuracy']:.1f}% ({accuracy_data['r2_correct']}/{accuracy_data['r2_respond']})")
             print(f"  Overall: {accuracy_data['overall_accuracy']:.1f}%")
         
         if response_time and response_time['rt']:
@@ -522,9 +524,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             print(f"  Overall: {sensitivity['overall_sensitivity']:.1f}%")
         
     # Calculate overall accuracy
-    all_r1_accuracy = (all_r1_correct / all_r1_total * 100) if all_r1_total > 0 else 0
-    all_r2_accuracy = (all_r2_correct / all_r2_total * 100) if all_r2_total > 0 else 0
-    all_overall_accuracy = ((all_r1_correct + all_r2_correct) / (all_r1_total + all_r2_total) * 100) if (all_r1_total + all_r2_total) > 0 else 0
+    all_r1_accuracy = (all_r1_correct / all_r1_respond * 100) if all_r1_respond > 0 else 0
+    all_r2_accuracy = (all_r2_correct / all_r2_respond * 100) if all_r2_respond > 0 else 0
+    all_overall_accuracy = ((all_r1_correct + all_r2_correct) / (all_r1_respond + all_r2_respond) * 100) if (all_r1_respond + all_r2_respond) > 0 else 0
     
     # Calculate overall response time 
     all_r1_correct_rt = np.array(sum(all_r1_correct_rt, []))
@@ -535,7 +537,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_rt = np.array(sum(all_rt, []))
 
     window_size = 10
-    avg_response_time = np.convolve(all_rt, np.ones(window_size)/window_size, mode='valid')
+    if len(all_rt) > 0:
+        avg_response_time = np.convolve(all_rt, np.ones(window_size)/window_size, mode='valid')
 
     all_r1_rt = np.mean(np.concatenate([all_r1_correct_rt, all_r1_incorrect_rt]))
     all_r2_rt = np.mean(np.concatenate([all_r2_correct_rt, all_r2_incorrect_rt]))
@@ -632,7 +635,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     if stage > 8 and stage < 9:
         print(f"False alarm same-olfactometer bias: {all_same_olf_false_alarm:.1f}%")
         print(f"False alarm diff-olfactometer bias: {all_diff_olf_false_alarm:.1f}%")
-    if stage >= 8.2:
+    if stage >= 8.2 and stage < 9:
         print(f"Sensitivity: A={all_r1_sensitivity:.1f}% ({all_r1_respond}/{all_r1_total}), B={all_r2_sensitivity:.1f}% ({all_r2_respond}/{all_r2_total})")
         print(f"Overall sensitivity: {all_overall_sensitivity:.1f}%")
     print(f"Decision accuracy: R1={all_r1_accuracy:.1f}% ({all_r1_correct}/{all_r1_total}), R2={all_r2_accuracy:.1f}% ({all_r2_correct}/{all_r2_total})")
@@ -650,10 +653,10 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'r2_volume': all_rewards_r2 * reward_b,
         'total_volume': all_rewards_r1 * reward_a + all_rewards_r2 * reward_b,
         'r1_correct': all_r1_correct,
-        'r1_total': all_r1_total,
+        'r1_respond': all_r1_respond,
         'r1_accuracy': all_r1_accuracy,
         'r2_correct': all_r2_correct,
-        'r2_total': all_r2_total, 
+        'r2_respond': all_r2_total, 
         'r2_accuracy': all_r2_accuracy,
         'overall_accuracy': all_overall_accuracy,
         'sessions': session_results,
@@ -704,8 +707,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-88_date-20250723/")
-        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-85_date-20250720")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-88_date-20250723/")
+        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-83_date-20250718")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")

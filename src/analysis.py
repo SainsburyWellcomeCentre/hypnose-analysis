@@ -9,6 +9,7 @@ from pathlib import Path
 import zoneinfo
 import src.utils as utils  # Changed from relative to absolute import
 from src.processing.detect_stage import detect_stage
+from src.processing.detect_settings import detect_settings
 from src.processing.process_olfactometer_valves import process_olfactometer_valves
 import harp
 import yaml
@@ -115,10 +116,10 @@ class RewardAnalyser:
         
         # Print decision accuracy if available
         accuracy_summary = session_data.get('accuracy_summary')
-        if accuracy_summary and accuracy_summary.get('r1_total', 0) + accuracy_summary.get('r2_total', 0) > 0:
+        if accuracy_summary and accuracy_summary.get('r1_respond', 0) + accuracy_summary.get('r2_respond', 0) > 0:
             print("Decision Accuracy (using EndInitiation from experiment events):")
-            print(f"  R1 Trials: {accuracy_summary['r1_total']}, Correct: {accuracy_summary['r1_correct']}, Accuracy: {accuracy_summary['r1_accuracy']:.2f}%")
-            print(f"  R2 Trials: {accuracy_summary['r2_total']}, Correct: {accuracy_summary['r2_correct']}, Accuracy: {accuracy_summary['r2_accuracy']:.2f}%")
+            print(f"  R1 Trials: {accuracy_summary['r1_respond']}, Correct: {accuracy_summary['r1_correct']}, Accuracy: {accuracy_summary['r1_accuracy']:.2f}%")
+            print(f"  R2 Trials: {accuracy_summary['r2_respond']}, Correct: {accuracy_summary['r2_correct']}, Accuracy: {accuracy_summary['r2_accuracy']:.2f}%")
             print(f"  Overall Accuracy: {accuracy_summary['overall_accuracy']:.2f}%")
 
     def _get_session_data(self, root):
@@ -412,8 +413,7 @@ class RewardAnalyser:
                     print(f"Error processing r2 delivery events: {e}") 
 
             # Get session settings
-            metadata_reader = utils.SessionData()
-            session_settings = utils.load_json(metadata_reader, root / "SessionSettings")
+            session_settings, session_schema = detect_settings(root)
             
             # Add olfactometer valve events if available 
             olfactometer_valves = {
@@ -468,10 +468,6 @@ class RewardAnalyser:
                 elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'OdorG':
                     on_label = 'odourG_olf_valve'
                     off_label = 'odourG_olf_valve_off'
-
-                # elif session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'Purge':
-                #     on_label = 'purge_valve'
-                #     off_label = 'purge_valve_off'
                 
                 event_frames = process_olfactometer_valves(olfactometer_df, f'Valve{valve_id}', on_label, off_label, event_frames)    
 
@@ -554,7 +550,7 @@ class RewardAnalyser:
 
                         # Calculate false alarm rate (freerun and doubles)
                         if stage > 7:  
-                            session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df)
+                            session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df, odour_poke_df, poke_off, session_schema)
                         
                         # Calculate sequence completion (doubles or other sequences)
                         if stage >= 9:  
@@ -579,8 +575,8 @@ class RewardAnalyser:
                         
                         # Add empty accuracy data
                         session_data['accuracy_summary'] = {
-                            'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
-                            'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                            'r1_respond': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                            'r2_respond': 0, 'r2_correct': 0, 'r2_accuracy': 0,
                             'overall_accuracy': 0
                         }
                         # Add empty response time data
@@ -646,8 +642,8 @@ class RewardAnalyser:
                     print(f"Error processing event data: {e}")
                     # Add empty accuracy data
                     session_data['accuracy_summary'] = {
-                        'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
-                        'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                        'r1_respond': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                        'r2_respond': 0, 'r2_correct': 0, 'r2_accuracy': 0,
                         'overall_accuracy': 0
                     }
                     # Add empty response time data
@@ -712,8 +708,8 @@ class RewardAnalyser:
                 print("No events available for decision accuracy, response time, false alarm rate and specificity calculation")
                 # Add empty accuracy data
                 session_data['accuracy_summary'] = {
-                    'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
-                    'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                    'r1_respond': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                    'r2_respond': 0, 'r2_correct': 0, 'r2_accuracy': 0,
                     'overall_accuracy': 0
                 }
                 # Add empty response time data
@@ -783,8 +779,8 @@ class RewardAnalyser:
                 'num_r2_rewards': 0,
                 'session_duration_sec': 0,
                 'accuracy_summary': {
-                    'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
-                    'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+                    'r1_respond': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+                    'r2_respond': 0, 'r2_correct': 0, 'r2_accuracy': 0,
                     'overall_accuracy': 0
                 },
                 'response_time': {'rt': [],
@@ -870,8 +866,8 @@ class RewardAnalyser:
         
         # Return just the accuracy summary
         return session_data.get('accuracy_summary', {
-            'r1_total': 0, 'r1_correct': 0, 'r1_accuracy': 0,
-            'r2_total': 0, 'r2_correct': 0, 'r2_accuracy': 0,
+            'r1_respond': 0, 'r1_correct': 0, 'r1_accuracy': 0,
+            'r2_respond': 0, 'r2_correct': 0, 'r2_accuracy': 0,
             'overall_accuracy': 0
         })
 
@@ -1244,8 +1240,12 @@ def calculate_overall_decision_accuracy(events_df):
     Parameters:
     -----------
     events_df : pandas.DataFrame
-        DataFrame containing trial events with columns: 'timestamp', 'EndInitiation',
-        'r1_olf_valve', 'r2_olf_valve', 'r1_poke', 'r2_poke'
+        DataFrame containing trial events with columns: 'timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 
+                                            'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
+                                                'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
+                                                    'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
+                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off',
+                                                        'PulseSupplyPort1', 'PulseSupplyPort2'
         
     Returns:
     --------
@@ -1257,9 +1257,9 @@ def calculate_overall_decision_accuracy(events_df):
     
     # Initialize counters
     r1_correct = 0
-    r1_total = 0
+    r1_respond = 0
     r2_correct = 0
-    r2_total = 0
+    r2_respond = 0
     
     # Find all trial end points
     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
@@ -1300,11 +1300,11 @@ def calculate_overall_decision_accuracy(events_df):
         # Find the first poke after trial end
         for j in range(end_idx + 1, next_end_idx):
             if events_df.loc[j, ['r1_poke', 'r2_poke']].any():
-                # Count trial by type
+                # Count response trials
                 if trial_type == 'r1':
-                    r1_total += 1
+                    r1_respond += 1
                 elif trial_type == 'r2':
-                    r2_total += 1
+                    r2_respond += 1
 
                 # Correct if poke matches trial type and reward is delivered
                 if trial_type == 'r1' and events_df.loc[j, 'r1_poke']:
@@ -1320,16 +1320,16 @@ def calculate_overall_decision_accuracy(events_df):
                 break
 
     # Calculate accuracy percentages with safety checks for division by zero
-    r1_accuracy = (r1_correct / r1_total * 100) if r1_total > 0 else 0
-    r2_accuracy = (r2_correct / r2_total * 100) if r2_total > 0 else 0
-    overall_accuracy = ((r1_correct + r2_correct) / (r1_total + r2_total) * 100) if (r1_total + r2_total) > 0 else 0
+    r1_accuracy = (r1_correct / r1_respond * 100) if r1_respond > 0 else 0
+    r2_accuracy = (r2_correct / r2_respond * 100) if r2_respond > 0 else 0
+    overall_accuracy = ((r1_correct + r2_correct) / (r1_respond + r2_respond) * 100) if (r1_respond + r2_respond) > 0 else 0
     
     # Return detailed accuracy metrics
     return {
-        'r1_total': r1_total,
+        'r1_respond': r1_respond,
         'r1_correct': r1_correct,
         'r1_accuracy': r1_accuracy,
-        'r2_total': r2_total,
+        'r2_respond': r2_respond,
         'r2_correct': r2_correct,
         'r2_accuracy': r2_accuracy,
         'overall_accuracy': overall_accuracy
@@ -1479,9 +1479,11 @@ def calculate_overall_response_time(events_df):
         'trial_id': trial_id
     }
 
-def calculate_overall_false_alarm(events_df): 
+
+def calculate_overall_false_alarm(events_df, odour_poke_df, poke_off, session_schema): 
     """
-    Calculate false alarm rate for non-rewarded trials.
+    Calculate false alarm rate for non-rewarded trials. Odours are considered if
+    the poke is at least as long as the minimum sampling time. 
     
     Parameters:
     -----------
@@ -1490,19 +1492,36 @@ def calculate_overall_false_alarm(events_df):
                                             'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
                                                 'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
                                                     'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
-                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
+                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off',
+                                                        'PulseSupplyPort1', 'PulseSupplyPort2'
         
     Returns:
     --------
     dict
         Dictionary containing false alarm metrics 
     """
+    # Define useful variables
+    olf_valve_cols = ['odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']
+    rew_valve_cols = ['r1_olf_valve', 'r2_olf_valve']
+    minimumSamplingTime = session_schema['minimumSamplingTime']
+    sampleOffsetTime = session_schema['sampleOffsetTime']
+    
+    # Collect all poke onset and offset events
+    odour_poke_events_df = [odour_poke_df, poke_off]
+    odour_poke_events_df = reduce(lambda left, right: pd.merge(left, right, on='Time', how='outer'), odour_poke_events_df)
+                    
+    for col in odour_poke_events_df:
+        if col not in odour_poke_events_df.columns and col != 'Time':
+            odour_poke_events_df[col] = False
+        if col != "Time":
+            odour_poke_events_df[col] = odour_poke_events_df[col].fillna(False) # This might drop the first InitiationSequence event
+    odour_poke_events_df = odour_poke_events_df.dropna(subset=["Time"])
+
+    odour_poke_events_df.sort_values('Time', inplace=True)
+    odour_poke_events_df.rename(columns={'Time': 'timestamp'}, inplace=True)
+    odour_poke_events_df.reset_index(drop=True, inplace=True)
 
     # Initialize counters
-    r1_correct = 0
-    r1_total = 0
-    r2_correct = 0
-    r2_total = 0
     C_total = C1_poke = C2_poke = 0
     D_total = D1_poke = D2_poke = 0
     E_total = E1_poke = E2_poke = 0
@@ -1512,92 +1531,155 @@ def calculate_overall_false_alarm(events_df):
     # Find all trial end points
     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
 
-    # Process each trial
-    for e, end_idx in enumerate(end_initiation_indices[:-1]):
-        # Determine trial type (r1, r2, or non-rewarded odour) by finding the most recent valve activation
-        closest_valve_idx = None
-        trial_type = None
-        for i in range(end_idx - 1, -1, -1):
-            if events_df.loc[i, 'r1_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'r1'
-                break
-            elif events_df.loc[i, 'r2_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'r2'
-                break 
-            elif events_df.loc[i, 'odourC_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'C'
-                break
-            elif events_df.loc[i, 'odourD_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'D'
-                break
-            elif events_df.loc[i, 'odourE_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'E'
-                break
-            elif events_df.loc[i, 'odourF_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'F'
-                break
-            elif events_df.loc[i, 'odourG_olf_valve']:
-                closest_valve_idx = i
-                trial_type = 'G'
-                break
+    # Process each sequence
+    for e in range(len(end_initiation_indices)):
+        end_idx = end_initiation_indices[e]
+        if e == len(end_initiation_indices) - 1:
+            next_end_idx = len(events_df)
+        else:
+            next_end_idx = end_initiation_indices[e + 1]
 
-        # Skip if no valve activation found before this trial end
-        if closest_valve_idx is None:
-            continue
-            
-        # Count trial by type
-        if trial_type == 'r1':
-            r1_total += 1
-        elif trial_type == 'r2':
-            r2_total += 1
-        elif trial_type == 'C':
-            C_total += 1
-        elif trial_type == 'D':
-            D_total += 1
-        elif trial_type == 'E':
-            E_total += 1
-        elif trial_type == 'F':
-            F_total += 1
-        elif trial_type == 'G':
-            G_total += 1
-
-        # Find the first poke after trial end
-        for j in range(end_idx + 1, end_initiation_indices[e+1]):
-        # for j in range(end_idx + 1, len(events_df)):
-            if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
-                # Correct if poke matches trial type
-                if trial_type == 'r1' and events_df.loc[j, 'r1_poke']:
-                    r1_correct += 1
-                elif trial_type == 'r2' and events_df.loc[j, 'r2_poke']:
-                    r2_correct += 1
-                elif trial_type == 'C' and events_df.loc[j, 'r1_poke']:
-                    C1_poke += 1
-                elif trial_type == 'C' and events_df.loc[j, 'r2_poke']:
-                    C2_poke += 1
-                elif trial_type == 'D' and events_df.loc[j, 'r1_poke']:
-                    D1_poke += 1
-                elif trial_type == 'D' and events_df.loc[j, 'r2_poke']:
-                    D2_poke += 1
-                elif trial_type == 'E' and events_df.loc[j, 'r1_poke']:
-                    E1_poke += 1
-                elif trial_type == 'E' and events_df.loc[j, 'r2_poke']:
-                    E2_poke += 1
-                elif trial_type == 'F' and events_df.loc[j, 'r1_poke']:
-                    F1_poke += 1
-                elif trial_type == 'F' and events_df.loc[j, 'r2_poke']:
-                    F2_poke += 1
-                elif trial_type == 'G' and events_df.loc[j, 'r1_poke']:
-                    G1_poke += 1
-                elif trial_type == 'G' and events_df.loc[j, 'r2_poke']:
-                    G2_poke += 1
-                break
+        if e == 0:
+            prev_end_idx = 0
+        else:
+            prev_end_idx = end_initiation_indices[e - 1]
         
+        # Process each odour
+        valid_odour = True 
+        i = prev_end_idx
+        while i < end_idx:
+            # Filter odours based on poke duration
+            if events_df.loc[i, 'odour_poke']:
+                odour_onset = events_df.loc[i, 'timestamp']
+                events_df_onset_idx = i
+                odour_df_onset_idx = odour_poke_events_df.loc[odour_poke_events_df['timestamp'] == odour_onset].index[0]
+                odour_offset = odour_poke_events_df.loc[odour_df_onset_idx + 1, 'timestamp']
+
+                # Ignore short poke offsets
+                next_onset = odour_poke_events_df.loc[odour_df_onset_idx + 2, 'timestamp']
+                if (next_onset - odour_offset).total_seconds() < sampleOffsetTime:
+                    odour_offset = odour_poke_events_df.loc[odour_df_onset_idx + 3, 'timestamp']
+                
+                # Filter 
+                if (odour_offset - odour_onset).total_seconds() < minimumSamplingTime:
+                    valid_odour = False
+                    i += 1
+                    continue
+                else: 
+                    valid_odour = True
+                    break
+            else:
+                i += 1
+                continue
+
+        # Process valid odours only
+        if valid_odour: 
+            k = events_df_onset_idx + 1
+            while k < end_idx:
+                if events_df.loc[k, olf_valve_cols].any():
+                    odour = next((od for od in olf_valve_cols if events_df.loc[k, od]), None)
+
+                    # Determine trial type  
+                    if odour == 'odourC_olf_valve': C_total += 1
+                    elif odour == 'odourD_olf_valve': D_total += 1
+                    elif odour == 'odourE_olf_valve': E_total += 1
+                    elif odour == 'odourF_olf_valve': F_total += 1
+                    elif odour == 'odourG_olf_valve': G_total += 1 
+
+                    # Determine false alarms or correct rejections
+                    for l in range(k + 1, next_end_idx):
+                        if events_df.loc[l, ['r1_poke', 'r2_poke']].any():  # false alarm
+                            poke = 'r1_poke' if events_df.loc[l, 'r1_poke'] else 'r2_poke'
+                            if odour == 'odourC_olf_valve':
+                                C1_poke += (poke == 'r1_poke')
+                                C2_poke += (poke == 'r2_poke')
+                            elif odour == 'odourD_olf_valve':
+                                D1_poke += (poke == 'r1_poke')
+                                D2_poke += (poke == 'r2_poke')
+                            elif odour == 'odourE_olf_valve':
+                                E1_poke += (poke == 'r1_poke')
+                                E2_poke += (poke == 'r2_poke')
+                            elif odour == 'odourF_olf_valve':
+                                F1_poke += (poke == 'r1_poke')
+                                F2_poke += (poke == 'r2_poke')
+                            elif odour == 'odourG_olf_valve':
+                                G1_poke += (poke == 'r1_poke')
+                                G2_poke += (poke == 'r2_poke')
+
+                            k = l + 1
+                            break
+                            
+                        elif events_df.loc[l, olf_valve_cols + rew_valve_cols].any():  # correct rejection
+                            k = l 
+                            break
+                    else:
+                        k += 1
+                else:
+                    k += 1
+        else:
+            i += 1
+
+            # if events_df.loc[i, olf_valve_cols].any():
+            #     odour = next((od for od in olf_valve_cols if events_df.loc[i, od]), None)
+
+                # # Filter trials based on duration of odour presentation 
+                # odour_onset = events_df.loc[i, 'timestamp']
+                # odour_off_col = odour.replace('_olf_valve', '_olf_valve_off')
+
+                # for j in range(i + 1, end_idx):
+                #     if events_df.loc[j, odour_off_col]:
+                #         odour_offset = events_df.loc[j, 'timestamp']
+                #         if (odour_offset - odour_onset).total_seconds() < minimumSamplingTime:
+                #             valid_odour = False
+                #             i += 1
+                #             break
+                #         else:
+                #             valid_odour = True
+                #             break
+                #     else:
+                #         valid_odour = True
+
+            #     if valid_odour:
+            #         # Determine trial type  
+            #         if odour == 'odourC_olf_valve': C_total += 1
+            #         elif odour == 'odourD_olf_valve': D_total += 1
+            #         elif odour == 'odourE_olf_valve': E_total += 1
+            #         elif odour == 'odourF_olf_valve': F_total += 1
+            #         elif odour == 'odourG_olf_valve': G_total += 1 
+
+            #         # Determine false alarms or correct rejections
+            #         for j in range(i + 1, next_end_idx):
+            #             if events_df.loc[j, ['r1_poke', 'r2_poke']].any():  # false alarm
+            #                 poke = 'r1_poke' if events_df.loc[j, 'r1_poke'] else 'r2_poke'
+            #                 if odour == 'odourC_olf_valve':
+            #                     C1_poke += (poke == 'r1_poke')
+            #                     C2_poke += (poke == 'r2_poke')
+            #                 elif odour == 'odourD_olf_valve':
+            #                     D1_poke += (poke == 'r1_poke')
+            #                     D2_poke += (poke == 'r2_poke')
+            #                 elif odour == 'odourE_olf_valve':
+            #                     E1_poke += (poke == 'r1_poke')
+            #                     E2_poke += (poke == 'r2_poke')
+            #                 elif odour == 'odourF_olf_valve':
+            #                     F1_poke += (poke == 'r1_poke')
+            #                     F2_poke += (poke == 'r2_poke')
+            #                 elif odour == 'odourG_olf_valve':
+            #                     G1_poke += (poke == 'r1_poke')
+            #                     G2_poke += (poke == 'r2_poke')
+
+            #                 i = j + 1
+            #                 break
+                            
+            #             elif events_df.loc[j, olf_valve_cols + rew_valve_cols].any():  # correct rejection
+            #                 i = j 
+            #                 break
+            #         else:
+            #             i += 1
+            #     else:
+            #         i += 1
+            # else:
+            #     i += 1
+
     # Calculate false alarm rate with safety checks for division by zero
     C_false_alarm = ((C1_poke + C2_poke) / C_total * 100) if C_total else 0
     D_false_alarm = ((D1_poke + D2_poke) / D_total * 100) if D_total else 0
@@ -1628,10 +1710,14 @@ def calculate_overall_false_alarm(events_df):
         'overall_false_alarm': overall_false_alarm
     }
 
+
 def calculate_overall_sequence_completion(events_df):
     """
-    Calculate sequence completion i.e. how many times the mouse attempts a preliminary reward
-    before succesfully completing a sequence.
+    Calculate sequence completion i.e. how many times a sequences is completed vs how many
+    times a sequence is initiated from odour 1. 
+    Calculate sequence commitment i.e. how many times the mouse attempts a preliminary reward
+    before succesfully completing a sequence (calculated only if a full sequence must be completed 
+    before the next one can start).
     
     Parameters:
     -----------
@@ -1640,23 +1726,20 @@ def calculate_overall_sequence_completion(events_df):
                                             'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
                                                 'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
                                                     'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
-                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
+                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off', 
+                                                        'PulseSupplyPort1', 'PulseSupplyPort2'
         
     Returns:
     --------
     dict
-        Dictionary containing sequence completion metrics 
+        Dictionary containing sequence completion and commitment metrics 
     """
     # TODO: Add the case when completionRequiresEngagement == False?
 
     # Find all trial end points (trial = sequence)
     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
 
-    olf_valve_cols = [
-        'r1_olf_valve', 'r2_olf_valve',
-        'odourC_olf_valve', 'odourD_olf_valve',
-        'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve'
-        ]
+    olf_valve_cols = ['r1_olf_valve', 'r2_olf_valve', 'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']
     rew_valve_cols = ['r1_olf_valve', 'r2_olf_valve']
    
     # Calculate number of valid reward attempts NOTE this might be different to num_rewards from pulse supply ports
@@ -1716,7 +1799,7 @@ def calculate_overall_sequence_completion(events_df):
             else:
                 prev_end_idx = end_initiation_indices[e - 1]
             
-            # Calculate complete vs incomplete sequences
+            # Find complete vs incomplete sequences
             counter = 0  # count number of consecutive odours
             for i in range(prev_end_idx, end_idx):                    
                 if events_df.loc[i, first_odour[e]]:
@@ -1739,7 +1822,7 @@ def calculate_overall_sequence_completion(events_df):
             num_continuous_odours[e] = [x + 1 for x in num_continuous_odours[e]]
             assert len(num_continuous_odours[e]) == complete_sequences[e] + incomplete_sequences[e]
         
-            # Calculate commited vs uncommited sequences
+            # Find commited vs uncommited sequences
             i = prev_end_idx
             while i < end_idx:
                 if events_df.loc[i, olf_valve_cols].any():
@@ -1760,47 +1843,14 @@ def calculate_overall_sequence_completion(events_df):
         
         # Calculate sequence commitment ratio with safety checks for division by zero 
         commitment_ratio = commited_sequences / (commited_sequences + uncommited_sequences) * 100 if (commited_sequences + uncommited_sequences) > 0 else 0
-        
-        # TODO
-        # # Initialize counters
-        # complete_sequences = len(end_initiation_indices)
-        # incomplete_sequences = 0
-        # num_continuous_odours = [[] for _ in range(complete_sequences)]        
-
-        # # Process each trial
-        # for e in range(len(end_initiation_indices)):
-        #     end_idx = end_initiation_indices[e]
-        #     if e == 0:
-        #         prev_end_idx = 0
-        #     else:
-        #         prev_end_idx = end_initiation_indices[e - 1]
-            
-        #     counter = 0  # count number of consecutive odours
-
-        #     i = prev_end_idx
-        #     while i < end_idx:
-        #         if events_df.loc[i, ['r1_olf_valve', 'r2_olf_valve', 'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']].any():
-        #             counter += 1
-
-        #             for j in range(i + 1, end_idx):
-        #                 if events_df.loc[j, ['r1_poke', 'r2_poke']].any():
-        #                     num_continuous_odours[e].append(counter)
-        #                     incomplete_sequences += 1
-        #                     counter = 0
-        #                     break
-        #                 elif events_df.loc[j, ['r1_olf_valve', 'r2_olf_valve', 'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']].any():
-        #                     counter += 1
-        #                 i = j + 1  # move outer loop past this event
-        #         else:
-        #             i += 1
-        #     num_continuous_odours[e].append(counter)
 
     else:
         # 1. Trial end is marked by partial sequence completion if sampling time is greater than the 
         # minimum for at least one odour 
         # 2. Reward does not need to be collected before the next sequence can start
-        # SEQUENCE COMPLETION = num of trials with rewarded odour presentation / all trials
-        
+        # sequence completion = num of trials with rewarded odour presentation / all trials
+        # sequence commitment = N/A
+
         # Initialize counters
         complete_sequences = 0
         incomplete_sequences = 0
@@ -1881,7 +1931,8 @@ def calculate_overall_decision_sensitivity(events_df):
                                             'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
                                                 'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
                                                     'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
-                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
+                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off',
+                                                        'PulseSupplyPort1', 'PulseSupplyPort2'
         
     Returns:
     --------
@@ -1902,7 +1953,13 @@ def calculate_overall_decision_sensitivity(events_df):
     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
 
     # Process each trial
-    for end_idx in end_initiation_indices:
+    for e in range(len(end_initiation_indices)):
+        end_idx = end_initiation_indices[e]
+        if e == len(end_initiation_indices) - 1:
+            next_end_idx = len(events_df)
+        else:
+            next_end_idx = end_initiation_indices[e + 1]
+        
         # Determine trial type (r1 or r2 or nonR) by finding the most recent valve activation
         closest_valve_idx = None
         trial_type = None
@@ -1935,18 +1992,15 @@ def calculate_overall_decision_sensitivity(events_df):
             r2_total += 1
           
         # Determine if there was a reward poke or a new odour poke after trial end 
-        for j in range(end_idx + 1, len(events_df)):
-            if trial_type == 'r1' and (events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']):
-                r1_respond += 1
-                break
-            if trial_type == 'r2' and (events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']):
-                r2_respond += 1
-                break
-            elif events_df.loc[j, 'r1_olf_valve'] or events_df.loc[j, 'r2_olf_valve'] or \
-                    events_df.loc[j, 'odourC_olf_valve'] or events_df.loc[j, 'odourD_olf_valve'] or \
-                    events_df.loc[j, 'odourE_olf_valve'] or events_df.loc[j, 'odourF_olf_valve'] or \
-                    events_df.loc[j, 'odourG_olf_valve']:  
-                break
+        for j in range(end_idx + 1, next_end_idx):
+            if events_df.loc[j, ['r1_poke', 'r2_poke']].any():
+                # Count response trials
+                if trial_type == 'r1':
+                    r1_respond += 1
+                    break 
+                elif trial_type == 'r2':
+                    r2_respond += 1
+                    break 
 
     # Calculate sensitivity percentages with safety checks for division by zero
     r1_sensitivity = (r1_respond / r1_total * 100) if r1_total > 0 else 0
