@@ -569,7 +569,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_overall_false_alarm = (all_nonR_pokes / all_nonR_trials * 100) if all_nonR_trials > 0 else 0
 
     # Calculate overall false alarm time and olfactometer bias 
-    if stage > 8 and stage < 9:
+    if stage > 7:
         for odour in nonR_odours:
             for interval in intervals:
                 all_odour_interval_false_alarm[odour][interval] = (all_odour_interval_pokes[odour][interval] / all_odour_interval_trials[odour][interval] * 100) if all_odour_interval_trials[odour][interval] else 0
@@ -629,12 +629,11 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     if stage > 7:
         print(f"False alarm rate: C={all_C_false_alarm:.1f}%, D={all_D_false_alarm:.1f}%, E={all_E_false_alarm:.1f}%, F={all_F_false_alarm:.1f}%, G={all_G_false_alarm:.1f}%")
         print(f"Overall false alarm rate: {all_overall_false_alarm:.1f}%")
+        print(f"False alarm same-olfactometer bias: {all_same_olf_false_alarm:.1f}%")
+        print(f"False alarm diff-olfactometer bias: {all_diff_olf_false_alarm:.1f}%")
     if stage >= 9:
         print(f"Overall sequence completion: {overall_completion_ratio:.1f}%")
         print(f"Overall sequence commitment: {overall_commitment_ratio:.1f}%")
-    if stage > 8 and stage < 9:
-        print(f"False alarm same-olfactometer bias: {all_same_olf_false_alarm:.1f}%")
-        print(f"False alarm diff-olfactometer bias: {all_diff_olf_false_alarm:.1f}%")
     if stage >= 8.2 and stage < 9:
         print(f"Sensitivity: A={all_r1_sensitivity:.1f}% ({all_r1_respond}/{all_r1_total}), B={all_r2_sensitivity:.1f}% ({all_r2_respond}/{all_r2_total})")
         print(f"Overall sensitivity: {all_overall_sensitivity:.1f}%")

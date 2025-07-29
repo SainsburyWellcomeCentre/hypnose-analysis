@@ -358,10 +358,10 @@ class RewardAnalyser:
 
                         # Detect where it was ON in previous row and now is OFF
                         off_after_on_mask = (poke_prev == True) & (poke_now == False)
-                        poke_off = df.loc[off_after_on_mask, ['Time']].copy()
-                        poke_off['odour_poke_off'] = True
-                        event_frames.append(poke_off)
-                        print(f"Added {len(poke_off)} odour poke OFF events")
+                        odour_poke_off_df = df.loc[off_after_on_mask, ['Time']].copy()
+                        odour_poke_off_df['odour_poke_off'] = True
+                        event_frames.append(odour_poke_off_df)
+                        print(f"Added {len(odour_poke_off_df)} odour poke OFF events")
                 except Exception as e:
                     print(f"Error processing odour poke events: {e}")
 
@@ -432,10 +432,10 @@ class RewardAnalyser:
                 for val in range(4)
             }                
 
+            odour_to_olfactometer_map = {}
             for cmd, idx in olf_command_idx.items():
                 olf_id = int(cmd[0])
                 valve_id = int(cmd[1])
-
                 olfactometer_df = olfactometer_valves[olf_id]
 
                 if session_settings.metadata.iloc[0].olfactometerCommands[idx].name == 'Purge':
@@ -469,6 +469,11 @@ class RewardAnalyser:
                     on_label = 'odourG_olf_valve'
                     off_label = 'odourG_olf_valve_off'
                 
+                else:
+                    continue
+
+                odour_to_olfactometer_map[on_label] = olf_id + 1  
+
                 event_frames = process_olfactometer_valves(olfactometer_df, f'Valve{valve_id}', on_label, off_label, event_frames)    
 
             # Add EndInitiation events if available
@@ -550,15 +555,15 @@ class RewardAnalyser:
 
                         # Calculate false alarm rate (freerun and doubles)
                         if stage > 7:  
-                            session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df, odour_poke_df, poke_off, session_schema)
-                        
+                            session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
+                            session_data['false_alarm_bias'] = calculate_overall_false_alarm_bias(all_events_df, odour_poke_df, odour_poke_off_df, session_schema, odour_to_olfactometer_map)
                         # Calculate sequence completion (doubles or other sequences)
                         if stage >= 9:  
-                            session_data['sequence_completion'] = calculate_overall_sequence_completion(all_events_df, odour_poke_df, poke_off, session_schema)
+                            session_data['sequence_completion'] = calculate_overall_sequence_completion(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
                             
                         # Calculate false alarm bias, decision sensitivity and specificity  (freerun)
                         if stage > 8 and stage < 9:
-                            session_data['false_alarm_bias'] = calculate_overall_false_alarm_bias(all_events_df)
+                            # session_data['false_alarm_bias'] = calculate_overall_false_alarm_bias(all_events_df, odour_poke_df, odour_poke_off_df, session_schema, odour_to_olfactometer_map)
 
                             if stage >= 8.2:  # TODO: update for later sequence stages
                                 session_data['sensitivity'] = calculate_overall_decision_sensitivity(all_events_df)
@@ -1479,7 +1484,7 @@ def calculate_overall_response_time(events_df):
         'trial_id': trial_id
     }
 
-def calculate_overall_false_alarm(events_df, odour_poke_df, poke_off, session_schema): 
+def calculate_overall_false_alarm(events_df, odour_poke_df, odour_poke_off_df, session_schema): 
     """
     Calculate false alarm rate for non-rewarded trials. Odours are considered if
     the poke is at least as long as the minimum sampling time. 
@@ -1506,19 +1511,7 @@ def calculate_overall_false_alarm(events_df, odour_poke_df, poke_off, session_sc
     sampleOffsetTime = session_schema['sampleOffsetTime']
     
     # Collect all poke onset and offset events
-    odour_poke_events_df = [odour_poke_df, poke_off]
-    odour_poke_events_df = reduce(lambda left, right: pd.merge(left, right, on='Time', how='outer'), odour_poke_events_df)
-                    
-    for col in odour_poke_events_df:
-        if col not in odour_poke_events_df.columns and col != 'Time':
-            odour_poke_events_df[col] = False
-        if col != "Time":
-            odour_poke_events_df[col] = odour_poke_events_df[col].fillna(False) # This might drop the first InitiationSequence event
-    odour_poke_events_df = odour_poke_events_df.dropna(subset=["Time"])
-
-    odour_poke_events_df.sort_values('Time', inplace=True)
-    odour_poke_events_df.rename(columns={'Time': 'timestamp'}, inplace=True)
-    odour_poke_events_df.reset_index(drop=True, inplace=True)
+    odour_poke_events_df = get_odour_poke_df(odour_poke_df, odour_poke_off_df)
 
     # Initialize counters
     C_total = C1_poke = C2_poke = 0
@@ -1546,38 +1539,10 @@ def calculate_overall_false_alarm(events_df, odour_poke_df, poke_off, session_sc
         for i in range(prev_end_idx, end_idx):
             valid_odour = False
             if events_df.loc[i, olf_valve_cols].any():
-                # Odour valve onset
-                olf_valve_on_ts = events_df.loc[i, 'timestamp']
-                
-                # Find last poke onset before odour valve onset
-                poke_onset_candidates = odour_poke_events_df[
-                    (odour_poke_events_df['timestamp'] < olf_valve_on_ts) &
-                    (odour_poke_events_df['timestamp'].isin(events_df.loc[events_df['odour_poke'], 'timestamp']))
-                ]
-                poke_onset = poke_onset_candidates.index[-1]
-                poke_onset_ts = odour_poke_events_df.loc[poke_onset, 'timestamp']
-                
-                # Find first poke offset after odour valve onset - ignore short offsets
-                poke_offset = poke_onset + 1
-                poke_offset_ts = odour_poke_events_df.loc[poke_offset, 'timestamp']
-
-                next_poke_onset = poke_onset + 2
-                while (next_poke_onset + 1 < len(odour_poke_events_df) and
-                    (odour_poke_events_df.loc[next_poke_onset, 'timestamp'] - poke_offset_ts).total_seconds() < sampleOffsetTime):
-                    poke_offset_ts = odour_poke_events_df.loc[next_poke_onset + 1, 'timestamp']
-                    next_poke_onset += 2
-                
-                # Check if offset before odour valve onset
-                if poke_offset_ts < olf_valve_on_ts:
-                    valid_odour = False
+                # Determine if an odour is valid based on sampling
+                valid_odour = is_odour_valid(i, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime)
+                if not valid_odour: 
                     continue
-
-                # Filter based on sampling time
-                if (poke_offset_ts - poke_onset_ts).total_seconds() < minimumSamplingTime:
-                    valid_odour = False
-                    continue
-                else: 
-                    valid_odour = True
 
             # Process valid odours only
             if valid_odour: 
@@ -1650,7 +1615,7 @@ def calculate_overall_false_alarm(events_df, odour_poke_df, poke_off, session_sc
         'overall_false_alarm': overall_false_alarm
     }
 
-def calculate_overall_sequence_completion(events_df, odour_poke_df, poke_off, session_schema):
+def calculate_overall_sequence_completion(events_df, odour_poke_df, odour_poke_off_df, session_schema):
     """
     Calculate sequence completion i.e. how many times a sequences is completed vs how many
     times a sequence is initiated from odour 1. 
@@ -1682,19 +1647,7 @@ def calculate_overall_sequence_completion(events_df, odour_poke_df, poke_off, se
     sampleOffsetTime = session_schema['sampleOffsetTime']
     
     # Collect all poke onset and offset events
-    odour_poke_events_df = [odour_poke_df, poke_off]
-    odour_poke_events_df = reduce(lambda left, right: pd.merge(left, right, on='Time', how='outer'), odour_poke_events_df)
-                    
-    for col in odour_poke_events_df:
-        if col not in odour_poke_events_df.columns and col != 'Time':
-            odour_poke_events_df[col] = False
-        if col != "Time":
-            odour_poke_events_df[col] = odour_poke_events_df[col].fillna(False) # This might drop the first InitiationSequence event
-    odour_poke_events_df = odour_poke_events_df.dropna(subset=["Time"])
-
-    odour_poke_events_df.sort_values('Time', inplace=True)
-    odour_poke_events_df.rename(columns={'Time': 'timestamp'}, inplace=True)
-    odour_poke_events_df.reset_index(drop=True, inplace=True)
+    odour_poke_events_df = get_odour_poke_df(odour_poke_df, odour_poke_off_df)
 
     # Find all trial end points (trial = sequence)
     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
@@ -1767,38 +1720,11 @@ def calculate_overall_sequence_completion(events_df, odour_poke_df, poke_off, se
                     if events_df.loc[i, olf_valve_cols].any():
                         odour_counter += 1
 
-                        # Odour valve onset
-                        olf_valve_on_ts = events_df.loc[i, 'timestamp']
+                        # Determine if an odour is valid based on sampling
+                        valid_odour = is_odour_valid(i, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime)
                         
-                        # Find last poke onset before odour valve onset
-                        poke_onset_candidates = odour_poke_events_df[
-                            (odour_poke_events_df['timestamp'] < olf_valve_on_ts) &
-                            (odour_poke_events_df['timestamp'].isin(events_df.loc[events_df['odour_poke'], 'timestamp']))
-                        ]
-                        poke_onset = poke_onset_candidates.index[-1]
-                        poke_onset_ts = odour_poke_events_df.loc[poke_onset, 'timestamp']
-                        
-                        # Find first poke offset after odour valve onset - ignore short offsets
-                        poke_offset = poke_onset + 1
-                        poke_offset_ts = odour_poke_events_df.loc[poke_offset, 'timestamp']
-
-                        next_poke_onset = poke_onset + 2
-                        while (next_poke_onset + 1 < len(odour_poke_events_df) and
-                            (odour_poke_events_df.loc[next_poke_onset, 'timestamp'] - poke_offset_ts).total_seconds() < sampleOffsetTime):
-                            poke_offset_ts = odour_poke_events_df.loc[next_poke_onset + 1, 'timestamp']
-                            next_poke_onset += 2
-
-                        # Check if offset before odour valve onset
-                        if poke_offset_ts < olf_valve_on_ts:
-                            valid_odour = False
+                        if not valid_odour: 
                             continue
-
-                        # Filter based on sampling time
-                        if (poke_offset_ts - poke_onset_ts).total_seconds() < minimumSamplingTime:
-                            valid_odour = False
-                            continue
-                        else: 
-                            valid_odour = True
 
                     # Process valid odours only
                     if valid_odour: 
@@ -2048,10 +1974,10 @@ def calculate_overall_decision_sensitivity(events_df):
 #     """
 #     return 
 
-def calculate_overall_false_alarm_bias(events_df):
+def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_df, session_schema, odour_to_olfactometer_map):
     """
     Calculate false alarm bias for non-rewarded trials.
-    Time bias (# odours since rewarded odour) & olfactometer bias (preceding odour)
+    Time bias (# odours since reward) & olfactometer bias (preceding odour)
     
     Parameters:
     -----------
@@ -2060,88 +1986,95 @@ def calculate_overall_false_alarm_bias(events_df):
                                             'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
                                                 'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
                                                     'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
-                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off'
+                                                        'odourG_olf_valve_off', 'EndInitiation', 'odour_poke', 'odour_poke_off',
+                                                        'PulseSupplyPort1', 'PulseSupplyPort2'
         
     Returns:
     --------
     dict
         Dictionary containing false alarm bias metrics 
     """
-
-    # Initialize counters
-    num_inter_reward_poke_odours = 0
+    # Define useful variables
+    olf_valve_cols = ['odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']
+    rew_valve_cols = ['r1_olf_valve', 'r2_olf_valve']
+    all_valve_cols = list(set(olf_valve_cols) | set(rew_valve_cols)) 
+    minimumSamplingTime = session_schema['minimumSamplingTime']
+    sampleOffsetTime = session_schema['sampleOffsetTime']
     
+    # Collect all poke onset and offset events
+    odour_poke_events_df = get_odour_poke_df(odour_poke_df, odour_poke_off_df)
+
     # Find all trial end points
     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
 
-    # Process each trial
-    intervals = []
-    binary_poke = np.zeros(len(end_initiation_indices[:-1]))
-    olfactometer = np.zeros(len(end_initiation_indices[:-1]))
+    # Initialize counters
+    binary_poke = []
     trial_type = []
+    intervals = []
+    olfactometer = []
+    num_inter_reward_poke_odours = 0 
 
-    for e, end_idx in enumerate(end_initiation_indices[:-1]):
-            
-        # Determine trial type (r1, r2, or non-rewarded odour) by finding the most recent valve activation
-        closest_valve_idx = None
-        for i in range(end_idx - 1, -1, -1):
-            if events_df.loc[i, 'r1_olf_valve']:
-                closest_valve_idx = i
-                trial_type.append('r1')
-                olfactometer[e] = 1
-                break
-            elif events_df.loc[i, 'r2_olf_valve']:
-                closest_valve_idx = i
-                trial_type.append('r2')
-                olfactometer[e] = 1
-                break 
-            elif events_df.loc[i, 'odourC_olf_valve']:
-                closest_valve_idx = i
-                trial_type.append('C')
-                olfactometer[e] = 1
-                break
-            elif events_df.loc[i, 'odourD_olf_valve']:
-                closest_valve_idx = i
-                trial_type.append('D')
-                olfactometer[e] = 1
-                break
-            elif events_df.loc[i, 'odourE_olf_valve']:
-                closest_valve_idx = i
-                trial_type.append('E')
-                olfactometer[e] = 2
-                break
-            elif events_df.loc[i, 'odourF_olf_valve']:
-                closest_valve_idx = i
-                trial_type.append('F')
-                olfactometer[e] = 2
-                break
-            elif events_df.loc[i, 'odourG_olf_valve']:
-                closest_valve_idx = i
-                trial_type.append('G')
-                olfactometer[e] = 2
-                break
-
-        # Keep memory of consecutive non-rewarded odour counts
-        if (trial_type[e] != 'r1') and (trial_type[e] != 'r2'):
-            num_inter_reward_poke_odours += 1
+    # Process each sequence
+    for e in range(len(end_initiation_indices)):
+        end_idx = end_initiation_indices[e]
+        if e == len(end_initiation_indices) - 1:
+            next_end_idx = len(events_df)
         else:
-            num_inter_reward_poke_odours = 0 
-        intervals.append(num_inter_reward_poke_odours)
+            next_end_idx = end_initiation_indices[e + 1]
 
-        # Skip if no valve activation found before this trial end
-        if closest_valve_idx is None:
-            continue
+        if e == 0:
+            prev_end_idx = 0
+        else:
+            prev_end_idx = end_initiation_indices[e - 1]
 
-        # Find the first poke after trial end
-        for j in range(end_idx + 1, end_initiation_indices[e+1]):
-            if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
-                binary_poke[e] = 1
-                break
+        # Process each odour
+        for i in range(prev_end_idx, end_idx):
+            valid_odour = False
+            
+            if events_df.loc[i, all_valve_cols].any():
+                # Determine if an odour is valid based on sampling
+                valid_odour = is_odour_valid(i, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime)
+                
+                if not valid_odour: 
+                    continue
+                
+            # Process valid odours only
+            if valid_odour: 
+                odour = next((od for od in all_valve_cols if events_df.loc[i, od]), None)
+                
+                # Find which olfactometer this odour came from
+                olfactometer.append(odour_to_olfactometer_map.get(odour, -1)) 
+
+                for j in range(i + 1, next_end_idx):
+                    if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
+                        binary_poke.append(1)
+                        if odour in rew_valve_cols:
+                            num_inter_reward_poke_odours = 0
+                            break
+                        else:
+                            num_inter_reward_poke_odours += 1
+                            break
+                    elif events_df.loc[j, all_valve_cols].any():
+                        binary_poke.append(0)
+                        num_inter_reward_poke_odours += 1
+                        break 
+
+                # Determine trial type  
+                if odour == 'r1_olf_valve': trial_type.append('r1') 
+                elif odour == 'r2_olf_valve': trial_type.append('r2') 
+                elif odour == 'odourC_olf_valve': trial_type.append('C') 
+                elif odour == 'odourD_olf_valve': trial_type.append('D') 
+                elif odour == 'odourE_olf_valve': trial_type.append('E') 
+                elif odour == 'odourF_olf_valve': trial_type.append('F') 
+                elif odour == 'odourG_olf_valve': trial_type.append('G')  
+        
+                intervals.append(num_inter_reward_poke_odours)
 
     # Calculate false alarm rate for each trial type and interval
     binary_poke = np.array(binary_poke)
-    intervals = np.array(intervals)
     trial_type = np.array(trial_type)
+    olfactometer = np.array(olfactometer)
+    intervals = np.array(intervals)
 
     nonR_odours = ['C', 'D', 'E', 'F', 'G']
     odour_interval_pokes = {odour: {} for odour in nonR_odours}
@@ -2211,3 +2144,56 @@ def calculate_overall_false_alarm_bias(events_df):
         'diff_olf_trials': diff_olf_trials, 
         'diff_olf_false_alarm': diff_olf_false_alarm
     }
+
+
+def is_odour_valid(idx, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime):
+    # Odour valve onset
+    olf_valve_on_ts = events_df.loc[idx, 'timestamp']
+    
+    # Find last poke onset before odour valve onset
+    poke_onset_candidates = odour_poke_events_df[
+        (odour_poke_events_df['timestamp'] < olf_valve_on_ts) &
+        (odour_poke_events_df['timestamp'].isin(events_df.loc[events_df['odour_poke'], 'timestamp']))
+    ]
+    poke_onset = poke_onset_candidates.index[-1]
+    poke_onset_ts = odour_poke_events_df.loc[poke_onset, 'timestamp']
+    
+    # Find first poke offset after odour valve onset - ignore short offsets
+    poke_offset = poke_onset + 1
+    poke_offset_ts = odour_poke_events_df.loc[poke_offset, 'timestamp']
+
+    next_poke_onset = poke_onset + 2
+    while (next_poke_onset + 1 < len(odour_poke_events_df) and
+        (odour_poke_events_df.loc[next_poke_onset, 'timestamp'] - poke_offset_ts).total_seconds() < sampleOffsetTime):
+        poke_offset_ts = odour_poke_events_df.loc[next_poke_onset + 1, 'timestamp']
+        next_poke_onset += 2
+    
+    # Check if offset before odour valve onset
+    if poke_offset_ts < olf_valve_on_ts:
+        return False
+
+    # Filter based on sampling time
+    if (poke_offset_ts - poke_onset_ts).total_seconds() < minimumSamplingTime:
+        return False
+
+    return True
+
+
+def get_odour_poke_df(odour_poke_df, odour_poke_off_df):
+
+    # Collect all poke onset and offset events
+    odour_poke_events_df = [odour_poke_df, odour_poke_off_df]
+    odour_poke_events_df = reduce(lambda left, right: pd.merge(left, right, on='Time', how='outer'), odour_poke_events_df)
+                    
+    for col in odour_poke_events_df:
+        if col not in odour_poke_events_df.columns and col != 'Time':
+            odour_poke_events_df[col] = False
+        if col != "Time":
+            odour_poke_events_df[col] = odour_poke_events_df[col].fillna(False) # This might drop the first InitiationSequence event
+    odour_poke_events_df = odour_poke_events_df.dropna(subset=["Time"])
+
+    odour_poke_events_df.sort_values('Time', inplace=True)
+    odour_poke_events_df.rename(columns={'Time': 'timestamp'}, inplace=True)
+    odour_poke_events_df.reset_index(drop=True, inplace=True)
+
+    return odour_poke_events_df
