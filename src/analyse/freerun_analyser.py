@@ -638,7 +638,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     if stage >= 8.2 and stage < 9:
         print(f"Sensitivity: A={all_r1_sensitivity:.1f}% ({all_r1_respond}/{all_r1_total}), B={all_r2_sensitivity:.1f}% ({all_r2_respond}/{all_r2_total})")
         print(f"Overall sensitivity: {all_overall_sensitivity:.1f}%")
-    print(f"Decision accuracy: R1={all_r1_accuracy:.1f}% ({all_r1_correct}/{all_r1_total}), R2={all_r2_accuracy:.1f}% ({all_r2_correct}/{all_r2_total})")
+    print(f"Decision accuracy: R1={all_r1_accuracy:.1f}% ({all_r1_correct}/{all_r1_respond}), R2={all_r2_accuracy:.1f}% ({all_r2_correct}/{all_r2_respond})")
     print(f"Overall accuracy: {all_overall_accuracy:.1f}%")
     
     # Create results dictionary
@@ -707,8 +707,8 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-88_date-20250723/")
-        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-83_date-20250718")
+        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-88_date-20250723/")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-83_date-20250718")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")
