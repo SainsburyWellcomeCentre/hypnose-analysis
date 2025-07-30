@@ -37,7 +37,7 @@ def detect_stage(root):
                     sequence_schema = yaml.load(file, Loader=yaml.SafeLoader)
                     sequences = sequence_schema['sequences']
             except Exception as e:
-                print(f"Error loading session schema: {e}")
+                raise RuntimeError(f"Error loading session schema in {path_root}: {e}")
     else:
         sequences = metadata.sequences
         
@@ -99,7 +99,7 @@ def detect_stage(root):
 if __name__ == "__main__":
     # Deal with inputs
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-81_date-20250715")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-90_date-20250728")
 
     parser = argparse.ArgumentParser(description="Get stage of a behavioral session")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")
@@ -126,4 +126,8 @@ if __name__ == "__main__":
             print(f"No SessionSettings found in {session_dir.name}, skipping")
             continue
 
-        stage = detect_stage(session_dir) 
+        try:
+            stage = detect_stage(session_dir) 
+        except Exception as e:
+            print(f"Something went wrong with {session_dir}: {e}. Continuing to next session.")
+            continue
