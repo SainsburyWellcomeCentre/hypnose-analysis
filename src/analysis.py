@@ -553,22 +553,18 @@ class RewardAnalyser:
                         # Calculate response time
                         session_data['response_time'] = calculate_overall_response_time(all_events_df)
 
-                        # Calculate false alarm rate (freerun and doubles)
+                        # Calculate false alarm rate and bias (freerun and sequences)
                         if stage > 7:  
                             session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
                             session_data['false_alarm_bias'] = calculate_overall_false_alarm_bias(all_events_df, odour_poke_df, odour_poke_off_df, session_schema, odour_to_olfactometer_map)
-                        # Calculate sequence completion (doubles or other sequences)
+                        
+                        # Calculate sequence completion (sequences)
                         if stage >= 9:  
                             session_data['sequence_completion'] = calculate_overall_sequence_completion(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
                             
-                        # Calculate false alarm bias, decision sensitivity and specificity  (freerun)
-                        if stage > 8 and stage < 9:
-                            # session_data['false_alarm_bias'] = calculate_overall_false_alarm_bias(all_events_df, odour_poke_df, odour_poke_off_df, session_schema, odour_to_olfactometer_map)
-
-                            if stage >= 8.2:  # TODO: update for later sequence stages
-                                session_data['sensitivity'] = calculate_overall_decision_sensitivity(all_events_df)
-
-                            #     session_data['specificity'] = calculate_overall_decision_specificity(all_events_df)
+                        # Calculate decision sensitivity (freerun)
+                        if stage >= 8.2 and stage < 9:  # TODO: update for later sequence stages
+                            session_data['sensitivity'] = calculate_overall_decision_sensitivity(all_events_df)
 
                     else:
                         if not has_end_initiation:
@@ -622,7 +618,14 @@ class RewardAnalyser:
                             'same_olf_false_alarm': 0, 
                             'diff_olf_pokes': 0, 
                             'diff_olf_trials': 0, 
-                            'diff_olf_false_alarm': 0
+                            'diff_olf_false_alarm': 0,
+                            'odour_false_alarm_trials': 0,
+                            'odour_same_olf_rew_pairing': 0,
+                            'odour_diff_olf_rew_pairing': 0,
+                            'same_olf_rew_pairing': 0,
+                            'diff_olf_rew_pairing': 0,
+                            'same_olf_rew_false_alarm': 0,
+                            'diff_olf_rew_false_alarm': 0
                         }
                         # Add empty sequence completion data 
                         session_data['sequence_completion'] = {
@@ -689,7 +692,14 @@ class RewardAnalyser:
                         'same_olf_false_alarm': 0, 
                         'diff_olf_pokes': 0, 
                         'diff_olf_trials': 0, 
-                        'diff_olf_false_alarm': 0
+                        'diff_olf_false_alarm': 0,
+                        'odour_false_alarm_trials': 0,
+                        'odour_same_olf_rew_pairing': 0,
+                        'odour_diff_olf_rew_pairing': 0,
+                        'same_olf_rew_pairing': 0,
+                        'diff_olf_rew_pairing': 0,
+                        'same_olf_rew_false_alarm': 0,
+                        'diff_olf_rew_false_alarm': 0
                     }
                     # Add empty sequence completion data 
                     session_data['sequence_completion'] = {
@@ -755,7 +765,14 @@ class RewardAnalyser:
                     'same_olf_false_alarm': 0, 
                     'diff_olf_pokes': 0, 
                     'diff_olf_trials': 0, 
-                    'diff_olf_false_alarm': 0
+                    'diff_olf_false_alarm': 0,
+                    'odour_false_alarm_trials': 0,
+                    'odour_same_olf_rew_pairing': 0,
+                    'odour_diff_olf_rew_pairing': 0,
+                    'same_olf_rew_pairing': 0,
+                    'diff_olf_rew_pairing': 0,
+                    'same_olf_rew_false_alarm': 0,
+                    'diff_olf_rew_false_alarm': 0
                 }
                 # Add empty sequence completion data 
                 session_data['sequence_completion'] = {
@@ -823,7 +840,14 @@ class RewardAnalyser:
                     'same_olf_false_alarm': 0, 
                     'diff_olf_pokes': 0, 
                     'diff_olf_trials': 0, 
-                    'diff_olf_false_alarm': 0
+                    'diff_olf_false_alarm': 0,
+                    'odour_false_alarm_trials': 0,
+                    'odour_same_olf_rew_pairing': 0,
+                    'odour_diff_olf_rew_pairing': 0,
+                    'same_olf_rew_pairing': 0,
+                    'diff_olf_rew_pairing': 0,
+                    'same_olf_rew_false_alarm': 0,
+                    'diff_olf_rew_false_alarm': 0
                 },
                 'sequence_completion': {
                     'complete_sequences': 0,
@@ -950,7 +974,14 @@ class RewardAnalyser:
                                                     'same_olf_false_alarm': 0, 
                                                     'diff_olf_pokes': 0, 
                                                     'diff_olf_trials': 0, 
-                                                    'diff_olf_false_alarm': 0
+                                                    'diff_olf_false_alarm': 0,
+                                                    'odour_false_alarm_trials': 0,
+                                                    'odour_same_olf_rew_pairing': 0,
+                                                    'odour_diff_olf_rew_pairing': 0,
+                                                    'same_olf_rew_pairing': 0,
+                                                    'diff_olf_rew_pairing': 0,
+                                                    'same_olf_rew_false_alarm': 0,
+                                                    'diff_olf_rew_false_alarm': 0 
                                                 })
     
     @staticmethod
@@ -1977,7 +2008,9 @@ def calculate_overall_decision_sensitivity(events_df):
 def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_df, session_schema, odour_to_olfactometer_map):
     """
     Calculate false alarm bias for non-rewarded trials.
-    Time bias (# odours since reward) & olfactometer bias (preceding odour)
+    Time bias: % FA after # odours since reward
+    Olfactometer bias: % FA where previous odour was from same or different olfactometer
+    Reward side bias: % FA on reward port linked to rewarded odour from that olfactometer
     
     Parameters:
     -----------
@@ -2009,6 +2042,7 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
 
     # Initialize counters
     binary_poke = []
+    poke = []
     trial_type = []
     intervals = []
     olfactometer = []
@@ -2048,6 +2082,8 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
                 for j in range(i + 1, next_end_idx):
                     if events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke']:
                         binary_poke.append(1)
+                        poke.append(1 if events_df.loc[j, 'r1_poke'] else 2)
+
                         if odour in rew_valve_cols:
                             num_inter_reward_poke_odours = 0
                             break
@@ -2056,6 +2092,7 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
                             break
                     elif events_df.loc[j, all_valve_cols].any():
                         binary_poke.append(0)
+                        poke.append(0)
                         num_inter_reward_poke_odours += 1
                         break 
 
@@ -2075,6 +2112,7 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
     trial_type = np.array(trial_type)
     olfactometer = np.array(olfactometer)
     intervals = np.array(intervals)
+    poke = np.array(poke)
 
     nonR_odours = ['C', 'D', 'E', 'F', 'G']
     odour_interval_pokes = {odour: {} for odour in nonR_odours}
@@ -2096,33 +2134,52 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
         interval_trials[i] = np.sum([odour_interval_trials[odour][i] for odour in nonR_odours])
         interval_false_alarm[i] = (interval_pokes[i] / interval_trials[i] * 100) if interval_trials[i] else 0
    
-    # Calculate false alarm rate for each odour depending on preceding olfactometer 
+    # Calculate false alarm rate for each odour depending on preceding olfactometer (olfactometer bias)
     odour_same_olf_pokes = {}
     odour_same_olf_trials = {}
     odour_same_olf_false_alarm = {}
     odour_diff_olf_pokes = {}
     odour_diff_olf_trials = {}
     odour_diff_olf_false_alarm = {}
+    odour_false_alarm_trials = {}
     
     for odour in nonR_odours:
         olfactometer_change = np.abs(np.diff(olfactometer))
+        odour_false_alarm_trials[odour] = len(np.where((binary_poke[1:] == 1) & (trial_type[1:] == odour))[0])
         
         odour_same_olf_pokes[odour] = len(np.where((binary_poke[1:] == 1) & (trial_type[1:] == odour) & (olfactometer_change == 0))[0])
         odour_same_olf_trials[odour] = len(np.where((trial_type[1:] == odour) & (olfactometer_change == 0))[0])
-        odour_same_olf_false_alarm[odour] = (odour_same_olf_pokes[odour] / odour_same_olf_trials[odour] * 100) if odour_same_olf_trials[odour] else 0
+        odour_same_olf_false_alarm[odour] = (odour_same_olf_pokes[odour] / odour_false_alarm_trials[odour] * 100) if odour_false_alarm_trials[odour] else 0
 
         odour_diff_olf_pokes[odour] = len(np.where((binary_poke[1:] == 1) & (trial_type[1:] == odour) & (olfactometer_change == 1))[0])
         odour_diff_olf_trials[odour] = len(np.where((trial_type[1:] == odour) & (olfactometer_change == 1))[0])
-        odour_diff_olf_false_alarm[odour] = (odour_diff_olf_pokes[odour] / odour_diff_olf_trials[odour] * 100) if odour_diff_olf_trials[odour] else 0
+        odour_diff_olf_false_alarm[odour] = (odour_diff_olf_pokes[odour] / odour_false_alarm_trials[odour] * 100) if odour_false_alarm_trials[odour] else 0
 
-    # Calculate overall false alarm rate depending on preceding olfactometer
+    all_olf_pokes = np.sum([odour_false_alarm_trials[odour] for odour in nonR_odours])
+
     same_olf_pokes = np.sum([odour_same_olf_pokes[odour] for odour in nonR_odours])
     same_olf_trials = np.sum([odour_same_olf_trials[odour] for odour in nonR_odours])
-    same_olf_false_alarm = (same_olf_pokes / same_olf_trials * 100) if same_olf_trials else 0
+    same_olf_false_alarm = (same_olf_pokes / all_olf_pokes * 100) if all_olf_pokes else 0
 
     diff_olf_pokes = np.sum([odour_diff_olf_pokes[odour] for odour in nonR_odours])
     diff_olf_trials = np.sum([odour_diff_olf_trials[odour] for odour in nonR_odours])
-    diff_olf_false_alarm = (diff_olf_pokes / diff_olf_trials * 100) if diff_olf_trials else 0
+    diff_olf_false_alarm = (diff_olf_pokes / all_olf_pokes * 100) if all_olf_pokes else 0
+    
+    # Calculate false alarm rate depending on olfactometer associated with reward side (reward side bias)
+    rew_valve_cols = np.array(rew_valve_cols)
+    rew_olf_map = np.where(poke == 0, 0, np.vectorize(odour_to_olfactometer_map.get)(rew_valve_cols[poke - 1]))
+
+    odour_same_olf_rew_pairing = {}
+    odour_diff_olf_rew_pairing = {}
+    for odour in nonR_odours:
+        odour_same_olf_rew_pairing[odour] = len(np.where((binary_poke == 1) & (trial_type == odour) & (rew_olf_map == olfactometer))[0])
+        odour_diff_olf_rew_pairing[odour] = len(np.where((binary_poke == 1) & (trial_type == odour) & (rew_olf_map != olfactometer))[0])
+
+    same_olf_rew_pairing = np.sum([odour_same_olf_rew_pairing[odour] for odour in nonR_odours])
+    diff_olf_rew_pairing = np.sum([odour_diff_olf_rew_pairing[odour] for odour in nonR_odours])
+
+    same_olf_rew_false_alarm = (same_olf_rew_pairing / all_olf_pokes * 100) if all_olf_pokes else 0
+    diff_olf_rew_false_alarm = (diff_olf_rew_pairing / all_olf_pokes * 100) if all_olf_pokes else 0
     
     return {
         'odour_interval_pokes': odour_interval_pokes,
@@ -2142,7 +2199,14 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
         'same_olf_false_alarm': same_olf_false_alarm, 
         'diff_olf_pokes': diff_olf_pokes, 
         'diff_olf_trials': diff_olf_trials, 
-        'diff_olf_false_alarm': diff_olf_false_alarm
+        'diff_olf_false_alarm': diff_olf_false_alarm,
+        'odour_false_alarm_trials': odour_false_alarm_trials,
+        'odour_same_olf_rew_pairing': odour_same_olf_rew_pairing,
+        'odour_diff_olf_rew_pairing': odour_diff_olf_rew_pairing,
+        'same_olf_rew_pairing': same_olf_rew_pairing,
+        'diff_olf_rew_pairing': diff_olf_rew_pairing,
+        'same_olf_rew_false_alarm': same_olf_rew_false_alarm,
+        'diff_olf_rew_false_alarm': diff_olf_rew_false_alarm
     }
 
 
