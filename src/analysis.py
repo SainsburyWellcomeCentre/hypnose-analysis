@@ -629,12 +629,13 @@ class RewardAnalyser:
                         }
                         # Add empty sequence completion data 
                         session_data['sequence_completion'] = {
+                            'initiated_sequences': 0,
+                            'terminated_sequences': 0,
                             'complete_sequences': 0,
-                            'incomplete_sequences': 0,
-                            'commited_sequences': 0,
-                            'uncommited_sequences': 0,
+                            'early_rew_sampling': 0,
                             'completion_ratio': 0,
-                            'commitment_ratio': 0 
+                            'commitment_ratio': 0,
+                            'early_rew_sampling_ratio': 0
                         }
                         # Add empty sensitivity data
                         session_data['sensitivity'] = {'r1_total': 0,
@@ -703,12 +704,13 @@ class RewardAnalyser:
                     }
                     # Add empty sequence completion data 
                     session_data['sequence_completion'] = {
+                        'initiated_sequences': 0,
+                        'terminated_sequences': 0,
                         'complete_sequences': 0,
-                        'incomplete_sequences': 0,
-                        'commited_sequences': 0,
-                        'uncommited_sequences': 0,
+                        'early_rew_sampling': 0,
                         'completion_ratio': 0,
-                        'commitment_ratio': 0 
+                        'commitment_ratio': 0,
+                        'early_rew_sampling_ratio': 0 
                     }
                     # Add empty sensitivity data
                     session_data['sensitivity'] = {'r1_total': 0,
@@ -776,12 +778,13 @@ class RewardAnalyser:
                 }
                 # Add empty sequence completion data 
                 session_data['sequence_completion'] = {
+                    'initiated_sequences': 0,
+                    'terminated_sequences': 0,
                     'complete_sequences': 0,
-                    'incomplete_sequences': 0,
-                    'commited_sequences': 0,
-                    'uncommited_sequences': 0,
+                    'early_rew_sampling': 0,
                     'completion_ratio': 0,
-                    'commitment_ratio': 0 
+                    'commitment_ratio': 0,
+                    'early_rew_sampling_ratio': 0
                 }
                 # Add empty sensitivity data
                 session_data['sensitivity'] = {'r1_total': 0,
@@ -850,12 +853,13 @@ class RewardAnalyser:
                     'diff_olf_rew_false_alarm': 0
                 },
                 'sequence_completion': {
+                    'initiated_sequences': 0,
+                    'terminated_sequences': 0,
                     'complete_sequences': 0,
-                    'incomplete_sequences': 0,
-                    'commited_sequences': 0,
-                    'uncommited_sequences': 0,
+                    'early_rew_sampling': 0,
                     'completion_ratio': 0,
-                    'commitment_ratio': 0 
+                    'commitment_ratio': 0,
+                    'early_rew_sampling_ratio': 0
                 },
                 'sensitivity': {'r1_total': 0,
                     'r1_respond': 0,
@@ -1072,7 +1076,14 @@ class RewardAnalyser:
         temp_instance = RewardAnalyser.__new__(RewardAnalyser)
         session_data = temp_instance._get_session_data(root)
               
-        return session_data.get('sequence_completion', {'complete_sequences': 0, 'incomplete_sequences': 0, 'commited_sequences': 0, 'uncommited_sequences': 0, 'completion_ratio': 0, 'commitment_ratio': 0})
+        return session_data.get('sequence_completion', {
+                                    'initiated_sequences': 0,
+                                    'terminated_sequences': 0,
+                                    'complete_sequences': 0,
+                                    'early_rew_sampling': 0,
+                                    'completion_ratio': 0,
+                                    'commitment_ratio': 0,
+                                    'early_rew_sampling_ratio': 0})
     
     def _detect_stage(self):
         """
@@ -1676,212 +1687,181 @@ def calculate_overall_sequence_completion(events_df, odour_poke_df, odour_poke_o
     rew_valve_cols = ['r1_olf_valve', 'r2_olf_valve']
     minimumSamplingTime = session_schema['minimumSamplingTime']
     sampleOffsetTime = session_schema['sampleOffsetTime']
+    # completionRequiresEngagement = session_schema['completionRequiresEngagement']
     
     # Collect all poke onset and offset events
     odour_poke_events_df = get_odour_poke_df(odour_poke_df, odour_poke_off_df)
 
     # Find all trial end points (trial = sequence)
     end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
-
+    num_trials = len(end_initiation_indices)
     # Calculate number of valid reward attempts NOTE this might be different to num_rewards from pulse supply ports
-    valid_reward_attempts = 0    # following EndInitiation
-    for e in range(len(end_initiation_indices)):
-        end_idx = end_initiation_indices[e]
-        if e == len(end_initiation_indices) - 1:
-            next_end_idx = len(events_df)
-        else:
-            next_end_idx = end_initiation_indices[e + 1]
+    # valid_reward_attempts = 0    # following EndInitiation
+    # for e in range(num_trials):
+    #     end_idx = end_initiation_indices[e]
+    #     if e == num_trials - 1:
+    #         next_end_idx = len(events_df)
+    #     else:
+    #         next_end_idx = end_initiation_indices[e + 1]
         
-        i = end_idx
-        while i < next_end_idx:
-            if events_df.loc[i, ['r1_poke', 'r2_poke']].any():
-                valid_reward_attempts += 1
-                break
-            else:
-                i += 1
+    #     i = end_idx
+    #     while i < next_end_idx:
+    #         if events_df.loc[i, ['r1_poke', 'r2_poke']].any():
+    #             valid_reward_attempts += 1
+    #             break
+    #         else:
+    #             i += 1
 
     # Calculate sequence completion and commitment ratios
-    if valid_reward_attempts == len(end_initiation_indices):
-        # 1. Trial end is marked by full sequence completion 
-        # 2. Reward must be collected before the next sequence can start
-        # sequence completion = (# of full sequence completions) / (# of initiations after rollback)
-        # sequence commitment = (# of full sequence completions) / (# of reward sampling attempts)
+    # if valid_reward_attempts == num_trials:
+    # 1. Trial end is marked by full sequence completion 
+    # 2. Reward must be collected before the next sequence can start
+    # sequence completion = (# of full sequence completions) / (# of initiations after rollback)
+    # sequence commitment = (# of full sequence completions) / (# of reward sampling attempts)
 
-        # Initialize counters
-        complete_sequences = [0 for _ in range(len(end_initiation_indices))]
-        incomplete_sequences = [0 for _ in range(len(end_initiation_indices))]
-        commited_sequences = len(end_initiation_indices)
-        uncommited_sequences = 0
-        num_continuous_odours = [[] for _ in range(len(end_initiation_indices))]        
-        first_odour = [None for _ in range(len(end_initiation_indices))]   
+    # Initialize counters
+    complete = [0 for _ in range(num_trials)]
+    incomplete = [0 for _ in range(num_trials)]
+    initiated = [0 for _ in range(num_trials)]
+    early_rew_sampling = [0 for _ in range(num_trials)]
+    # commited_sequences = num_trials
+    # uncommited_sequences = 0
+    # num_continuous_odours = [[] for _ in range(num_trials)]        
+    first_odour = [None for _ in range(num_trials)]   
 
-        # Keep a record of the first odour in each sequence
-        for e in range(len(end_initiation_indices)):
+    # Keep a record of the first odour in each sequence
+    for e in range(num_trials):
+        end_idx = end_initiation_indices[e]
+        if e == 0:
+            prev_end_idx = 0
+        else:
+            prev_end_idx = end_initiation_indices[e - 1]
+        
+        for i in range(prev_end_idx, end_idx):
+            active_valve = [col for col in olf_valve_cols if events_df.at[i, col]]
+            if active_valve:
+                first_odour[e] = active_valve[0]
+                break
+    try:
+        for e in range(num_trials):            
             end_idx = end_initiation_indices[e]
+            if e == num_trials - 1:
+                next_end_idx = len(events_df)
+            else:
+                next_end_idx = end_initiation_indices[e + 1]
+
             if e == 0:
                 prev_end_idx = 0
             else:
                 prev_end_idx = end_initiation_indices[e - 1]
             
+            # Process each odour
+            next_odours = list(set(olf_valve_cols) - set(first_odour[e]) - set(rew_valve_cols))
+            valid_odour_counter = 0  # count number of consecutive odours
+            odour_counter = 0
+            
+            valid_trial = True
+            trial_end = False
             for i in range(prev_end_idx, end_idx):
-                active_valve = [col for col in olf_valve_cols if events_df.at[i, col]]
-                if active_valve:
-                    first_odour[e] = active_valve[0]
-                    break
-        try:
-            for e in range(len(end_initiation_indices)):            
-                end_idx = end_initiation_indices[e]
-                if e == len(end_initiation_indices) - 1:
-                    next_end_idx = len(events_df)
-                else:
-                    next_end_idx = end_initiation_indices[e + 1]
+                valid_odour = False
+                if events_df.loc[i, olf_valve_cols].any():
+                    odour_counter += 1
 
-                if e == 0:
-                    prev_end_idx = 0
-                else:
-                    prev_end_idx = end_initiation_indices[e - 1]
-                
-                # Process each odour
-                next_odours = list(set(olf_valve_cols) - set(first_odour[e]) - set(rew_valve_cols))
-                valid_odour_counter = 0  # count number of consecutive odours
-                odour_counter = 0
-                
-                for i in range(prev_end_idx, end_idx):
-                    valid_odour = False
-                    if events_df.loc[i, olf_valve_cols].any():
-                        odour_counter += 1
+                    # Determine if an odour is valid based on sampling
+                    valid_odour = is_odour_valid(i, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime)
 
-                        # Determine if an odour is valid based on sampling
-                        valid_odour = is_odour_valid(i, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime)
-                        
-                        if not valid_odour: 
-                            continue
+                # Process valid odours only
+                    for k in range(i, end_idx): 
+                        if events_df.loc[k, first_odour[e]] & valid_odour:
+                            valid_odour_counter = 0
+                            valid_trial = True
+                            # num_continuous_odours[e].append(valid_odour_counter)
+                            initiated[e] += 1
+                            break
 
-                    # Process valid odours only
-                    if valid_odour: 
-                        for k in range(i, end_idx): 
-                            if events_df.loc[k, first_odour[e]]:
-                                valid_odour_counter = 0
-                                num_continuous_odours[e].append(valid_odour_counter)
-                                incomplete_sequences[e] += 1
-                                break
+                        elif events_df.loc[k, rew_valve_cols].any() & valid_odour:
+                            valid_odour_counter += 1
+                            valid_trial = True
+                            # if num_continuous_odours[e]:
+                            #     num_continuous_odours[e].pop() # remove false inclusion of the last first odour
+                            # num_continuous_odours[e].append(valid_odour_counter)
+                            complete[e] += 1
+                            trial_end = True
+                            # incomplete[e] -= 1 # remove false inclusion of the last first odour
+                            break 
 
-                            elif events_df.loc[k, rew_valve_cols].any():
-                                valid_odour_counter += 1
-                                if num_continuous_odours[e]:
-                                    num_continuous_odours[e].pop() # remove false inclusion of the last first odour
-                                num_continuous_odours[e].append(valid_odour_counter)
-                                complete_sequences[e] += 1
-                                incomplete_sequences[e] -= 1 # remove false inclusion of the last first odour
-                                break 
+                        elif events_df.loc[k, next_odours].any() & valid_odour:
+                            valid_odour_counter += 1
+                            valid_trial = True
+                            # if num_continuous_odours[e]:
+                            #     num_continuous_odours[e].pop() # remove false inclusion of the last first odour
+                            # num_continuous_odours[e].append(valid_odour_counter)
+                            break 
 
-                            elif events_df.loc[k, next_odours].any():
-                                valid_odour_counter += 1
-                                if num_continuous_odours[e]:
-                                    num_continuous_odours[e].pop() # remove false inclusion of the last first odour
-                                num_continuous_odours[e].append(valid_odour_counter)
-                                break 
+                        elif events_df.loc[k, first_odour[e]] and not valid_odour:
+                            # invalid trial only if first odour is invalid, otherwise proceed into the sequence
+                            valid_trial = False 
+                            break
 
-                        # Find commited vs uncommited (reward attempt before completion) sequences
+                        elif events_df.loc[k, rew_valve_cols].any() and not valid_odour:
+                            valid_trial = True
+                            incomplete[e] += 1 
+                            break 
+
+                        elif events_df.loc[k, next_odours].any() and not valid_odour:
+                            # num_continuous_odours[e].append(0)
+                            incomplete[e] += 1
+                            break
+
+                    # Find commited vs uncommited (reward attempt before completion) sequences
+                    if valid_trial and not trial_end:
+                    # if valid_trial and not complete[e] >= 1 and not incomplete[e] >= 1:
+                        commited = False
                         for l in range(k + 1, end_idx):
                             if events_df.loc[l, olf_valve_cols].any():
+                                commited = True
                                 break
                             elif events_df.loc[l, ['r1_poke', 'r2_poke']].any():
-                                uncommited_sequences += 1
+                                early_rew_sampling[e] += 1
+                                commited = False
                                 break
-            
-            num_continuous_odours[e] = [x + 1 for x in num_continuous_odours[e]] 
-            assert len(num_continuous_odours[e]) == complete_sequences[e] + incomplete_sequences[e], 'Weird number of sequences'
+
+                        if not commited:
+                            incomplete[e] += 1
+                    else:
+                        continue
         
-        except Exception as e:
-            print(f"Error during odour processing for sequence completion: {e}")
-
-        try:
-            # Get all complete and incomplete sequences from the session
-            complete_sequences = sum(trial for trial in complete_sequences)
-            incomplete_sequences = sum(trial for trial in incomplete_sequences)
-
-            # Calculate sequence completion ratio with safety checks for division by zero
-            completion_ratio = complete_sequences / (complete_sequences + incomplete_sequences) * 100 if (complete_sequences + incomplete_sequences) > 0 else 0
-            
-            # Calculate sequence commitment ratio with safety checks for division by zero 
-            commitment_ratio = commited_sequences / (commited_sequences + uncommited_sequences) * 100 if (commited_sequences + uncommited_sequences) > 0 else 0
-        except Exception as e:
-            print(f"Error during sequence completion and commitment calculation: {e}")
+        # num_continuous_odours[e] = [x + 1 for x in num_continuous_odours[e]] 
+        # assert len(num_continuous_odours[e]) == complete[e] + incomplete[e], 'Weird number of sequences'
     
-    else:
-        # 1. Trial end is marked by partial sequence completion if sampling time is greater than the 
-        # minimum for at least one odour 
-        # 2. Reward does not need to be collected before the next sequence can start
-        # sequence completion = num of trials with rewarded odour presentation / all trials
-        # sequence commitment = N/A
+    except Exception as e:
+        print(f"Error during odour processing for sequence completion: {e}")
 
-        # Initialize counters
-        complete_sequences = 0
-        incomplete_sequences = 0
-    
-        # Process each trial (trial = all odours until poke out)
-        num_continuous_odours = [[] for _ in range(complete_sequences)]        
-
-        # Process each trial
-        for e, end_idx in enumerate(end_initiation_indices[:-1]):
-            # Determine trial type (r1, r2, or non-rewarded odour) by finding the most recent valve activation
-            closest_valve_idx = None
-            trial_type = None
-            for i in range(end_idx - 1, -1, -1):
-                if events_df.loc[i, 'r1_olf_valve']:
-                    closest_valve_idx = i
-                    trial_type = 'r1'
-                    break
-                elif events_df.loc[i, 'r2_olf_valve']:
-                    closest_valve_idx = i
-                    trial_type = 'r2'
-                    break 
-                elif events_df.loc[i, 'odourC_olf_valve']:
-                    closest_valve_idx = i
-                    trial_type = 'C'
-                    break
-                elif events_df.loc[i, 'odourD_olf_valve']:
-                    closest_valve_idx = i
-                    trial_type = 'D'
-                    break
-                elif events_df.loc[i, 'odourE_olf_valve']:
-                    closest_valve_idx = i
-                    trial_type = 'E'
-                    break
-                elif events_df.loc[i, 'odourF_olf_valve']:
-                    closest_valve_idx = i
-                    trial_type = 'F'
-                    break
-                elif events_df.loc[i, 'odourG_olf_valve']:
-                    closest_valve_idx = i
-                    trial_type = 'G'
-                    break
-
-            # Skip if no valve activation found before this trial end
-            if closest_valve_idx is None:
-                continue
-                
-            # Count trial by type
-            if trial_type == 'r1' or trial_type == 'r2':
-                complete_sequences += 1
-            else:
-                incomplete_sequences += 1
-
-        # Calculate sequence completion ratio with safety checks for division by zero
-        completion_ratio = complete_sequences / (complete_sequences + incomplete_sequences) * 100 if (complete_sequences + incomplete_sequences) > 0 else 0
-
-        commited_sequences = 0
-        uncommited_sequences = 0
-        commitment_ratio = 0
+    try:
+        # Get all complete and incomplete sequences from the session
+        complete = np.array(complete)
+        # incomplete = np.array(incomplete)
+        initiated_sequences = np.sum(np.array(initiated))
+        early_rew_sampling = np.array(early_rew_sampling)
+        
+        complete_sequences = len(np.where(complete == 1)[0])
+        # incomplete_sequences = num_trials - complete_sequences
+        
+        completion_ratio = complete_sequences / num_trials if num_trials > 0 else 0 
+        commitment_ratio = complete_sequences / initiated_sequences if initiated_sequences > 0 else 0
+        early_reward_sampling_ratio = np.sum(early_rew_sampling) / complete_sequences if complete_sequences > 0 else 0
+        
+    except Exception as e:
+        print(f"Error during sequence completion and commitment calculation: {e}")
 
     return {
+        'initiated_sequences': initiated_sequences,
+        'terminated_sequences': num_trials,
         'complete_sequences': complete_sequences,
-        'incomplete_sequences': incomplete_sequences,
-        'commited_sequences': commited_sequences,
-        'uncommited_sequences': uncommited_sequences,
+        'early_rew_sampling': np.sum(early_rew_sampling),
         'completion_ratio': completion_ratio,
-        'commitment_ratio': commitment_ratio        
+        'commitment_ratio': commitment_ratio,
+        'early_rew_sampling_ratio': early_reward_sampling_ratio
     }
 
 def calculate_overall_decision_sensitivity(events_df):
@@ -2211,6 +2191,8 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
 
 
 def is_odour_valid(idx, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime):
+    tolerance = 0.01 # s
+
     # Odour valve onset
     olf_valve_on_ts = events_df.loc[idx, 'timestamp']
     
@@ -2228,7 +2210,7 @@ def is_odour_valid(idx, events_df, odour_poke_events_df, sampleOffsetTime, minim
 
     next_poke_onset = poke_onset + 2
     while (next_poke_onset + 1 < len(odour_poke_events_df) and
-        (odour_poke_events_df.loc[next_poke_onset, 'timestamp'] - poke_offset_ts).total_seconds() < sampleOffsetTime):
+        (odour_poke_events_df.loc[next_poke_onset, 'timestamp'] - poke_offset_ts).total_seconds() < sampleOffsetTime + tolerance):
         poke_offset_ts = odour_poke_events_df.loc[next_poke_onset + 1, 'timestamp']
         next_poke_onset += 2
     

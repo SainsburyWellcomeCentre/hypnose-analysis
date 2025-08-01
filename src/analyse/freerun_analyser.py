@@ -109,10 +109,10 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_diff_olf_rew_pairing = 0
 
     # sequence completion variables 
+    all_initiated_sequences = 0
+    all_terminated_sequences = 0
+    all_early_rew_sampling = 0    
     all_complete_sequences = 0
-    all_incomplete_sequences = 0
-    all_commited_sequences = 0
-    all_uncommited_sequences = 0
     
     # sensitivity varibles 
     all_r1_respond = 0
@@ -457,27 +457,29 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             
         # Add sequence completion data
         if sequence_completion:
+            all_initiated_sequences += sequence_completion['initiated_sequences']
+            all_terminated_sequences += sequence_completion['terminated_sequences']
             all_complete_sequences += sequence_completion['complete_sequences']
-            all_incomplete_sequences += sequence_completion['incomplete_sequences']
-            all_commited_sequences += sequence_completion['commited_sequences']
-            all_uncommited_sequences += sequence_completion['uncommited_sequences']
-
+            all_early_rew_sampling += sequence_completion['early_rew_sampling']
+            
             session_info.update({
+                'initiated_sequences': sequence_completion['initiated_sequences'],
+                'terminated_sequences': sequence_completion['terminated_sequences'],
                 'complete_sequences': sequence_completion['complete_sequences'],
-                'incomplete_sequences': sequence_completion['incomplete_sequences'],
-                'commited_sequences': sequence_completion['commited_sequences'],
-                'uncommited_sequences': sequence_completion['uncommited_sequences'],
+                'early_rew_sampling': sequence_completion['early_rew_sampling'],
                 'completion_ratio': sequence_completion['completion_ratio'],
-                'commitment_ratio': sequence_completion['commitment_ratio']
+                'commitment_ratio': sequence_completion['commitment_ratio'],
+                'early_rew_sampling_ratio': sequence_completion['early_rew_sampling_ratio']
             })
         else:
             session_info.update({
+                'initiated_sequences': 0,
+                'terminated_sequences': 0,
                 'complete_sequences': 0,
-                'incomplete_sequences': 0,
-                'commited_sequences': 0,
-                'uncommited_sequences': 0,
+                'early_rew_sampling': 0,
                 'completion_ratio': 0,
-                'commitment_ratio': 0
+                'commitment_ratio': 0,
+                'early_rew_sampling_ratio': 0
             })    
         
         # Add sensitivity data
@@ -537,9 +539,10 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             print(f"  Overall false alarm diff-olfactometer bias rate: {false_alarm_bias['diff_olf_false_alarm']:.1f}%")
             print(f"  Overall false alarm same-olfactometer-reward bias rate: {false_alarm_bias['same_olf_rew_false_alarm']:.1f}%")
             print(f"  Overall false alarm diff-olfactometer-reward bias rate: {false_alarm_bias['diff_olf_rew_false_alarm']:.1f}%")
-        if sequence_completion and all(value != 0 for value in sequence_completion.values()):
+        if sequence_completion: # and all(value != 0 for value in sequence_completion.values()):
             print(f"  Sequence completion ratio: {sequence_completion['completion_ratio']:.1f}%")
             print(f"  Sequence commitment ratio: {sequence_completion['commitment_ratio']:.1f}%")
+            print(f"  Early reward sampling ratio: {sequence_completion['early_rew_sampling_ratio']:.1f}%")
         
         if sensitivity and all(value != 0 for value in sensitivity.values()):
             print(f"  Sensitivity: A={sensitivity['r1_sensitivity']:.1f}% ({sensitivity['r1_respond']}/{sensitivity['r1_total']}), "
@@ -624,11 +627,13 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
     # Calculate overall sequence completion and commitment ratios
     if stage >= 9:
-        overall_completion_ratio = all_complete_sequences / (all_complete_sequences + all_incomplete_sequences) * 100 if (all_complete_sequences + all_incomplete_sequences) > 0 else 0
-        overall_commitment_ratio = all_commited_sequences / (all_commited_sequences + all_uncommited_sequences) * 100 if (all_commited_sequences + all_uncommited_sequences) > 0 else 0
+        overall_completion_ratio = all_complete_sequences / all_terminated_sequences * 100 if all_terminated_sequences > 0 else 0
+        overall_commitment_ratio = all_complete_sequences / all_initiated_sequences * 100 if all_initiated_sequences > 0 else 0
+        overall_early_rew_sampling_ratio = all_early_rew_sampling / all_complete_sequences * 100 if all_complete_sequences > 0 else 0
     else:
         overall_completion_ratio = 0
         overall_commitment_ratio = 0
+        overall_early_rew_sampling_ratio = 0
 
     # Calculate overall sensitivity
     if stage >= 8.2:
@@ -662,8 +667,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         print(f"False alarm same-olfactometer-port bias: {all_same_olf_rew_false_alarm:.1f}%")
         print(f"False alarm diff-olfactometer-port bias: {all_diff_olf_rew_false_alarm:.1f}%")
     if stage >= 9:
-        print(f"Overall sequence completion: {overall_completion_ratio:.1f}%")
-        print(f"Overall sequence commitment: {overall_commitment_ratio:.1f}%")
+        print(f"Overall sequence completion ratio: {overall_completion_ratio:.1f}%")
+        print(f"Overall sequence commitment ratio: {overall_commitment_ratio:.1f}%")
+        print(f"Overall early reward sampling ratio: {overall_early_rew_sampling_ratio:.1f}%")
     if stage >= 8.2 and stage < 9:
         print(f"Sensitivity: A={all_r1_sensitivity:.1f}% ({all_r1_respond}/{all_r1_total}), B={all_r2_sensitivity:.1f}% ({all_r2_respond}/{all_r2_total})")
         print(f"Overall sensitivity: {all_overall_sensitivity:.1f}%")
@@ -707,6 +713,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'all_overall_false_alarm': all_overall_false_alarm,
         'overall_completion_ratio': overall_completion_ratio, 
         'overall_commitment_ratio': overall_commitment_ratio, 
+        'overall_early_rew_sampling_ratio': overall_early_rew_sampling_ratio,
         'all_odour_interval_pokes': all_odour_interval_pokes,
         'all_odour_interval_trials': all_odour_interval_trials,
         'all_odour_interval_false_alarm': all_odour_interval_false_alarm,
@@ -741,7 +748,8 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-88_date-20250723/")
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-83_date-20250718")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-90_date-20250728/")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-93_date-20250730")
+        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-90_date-20250728/")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")
