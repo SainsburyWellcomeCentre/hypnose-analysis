@@ -61,7 +61,7 @@ class TimestampedCsvReader(Csv):
 def load_json(reader: SessionData, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(root.name)}_*.{reader.extension}"
-    print(pattern)
+    # print(pattern)
     data = [reader.read(Path(file)) for file in sorted(glob(pattern))]
     return pd.concat(data)
 

@@ -21,11 +21,24 @@ def main(subject_folder, output_file=None):
         print(f"No valid session directories found in {subject_path}")
         return
     
+    # Load existing results if output_file exists
+    existing_results = pd.DataFrame()
+    processed_session_ids = set()
+    
+    if output_file and Path(output_file).exists():
+        print(f"Loading existing results from {output_file}")
+        existing_results = pd.read_csv(output_file)
+        if 'session_id' in existing_results.columns:
+            processed_session_ids = set(existing_results['session_id'].astype(str))
+    
     # Create a list to store results
     results = []
     
     # Process each session (already sorted by session ID)
     for session_id, session_date, session_path in session_roots:
+        if str(session_id) in processed_session_ids:
+            print(f"Skipping already processed session {session_id}")
+            continue
         try:
             stage = detect_stage(session_path)
             print(f"Session ID: {session_id}, Date: {session_date}, Path: {session_path.name}, Stage: {stage}")
@@ -52,10 +65,18 @@ def main(subject_folder, output_file=None):
     for result in results:
         print(f"Session {result['session_id']}: Stage {result['stage']} ({result['session_date']})")
     
-    # Save results to CSV if requested
+    # Append to output file
     if output_file:
-        results_df = pd.DataFrame(results)
-        results_df.to_csv(output_file, index=False)
+        output_path = Path(output_file)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        new_results_df = pd.DataFrame(results)
+
+        if not existing_results.empty:
+            combined_df = pd.concat([existing_results, new_results_df], ignore_index=True)
+        else:
+            combined_df = new_results_df
+
+        combined_df.to_csv(output_file, index=False)
         print(f"\nResults saved to {output_file}")
     
     return results
@@ -63,6 +84,8 @@ def main(subject_folder, output_file=None):
 if __name__ == "__main__":
     if len(sys.argv) == 1:
         sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/")
+        sys.argv.append("--output")
+        sys.argv.append("/Volumes/harris/Athina/hypnose/analysis/sub-025_id-076/stages.csv")
 
     parser = argparse.ArgumentParser(description="Detect training stage of behavioral sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")

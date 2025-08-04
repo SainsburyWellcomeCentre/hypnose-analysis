@@ -2095,6 +2095,13 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
     poke = np.array(poke)
 
     nonR_odours = ['C', 'D', 'E', 'F', 'G']
+
+    odour_false_alarm_trials = {}
+    for odour in nonR_odours:
+        odour_false_alarm_trials[odour] = len(np.where((binary_poke[1:] == 1) & (trial_type[1:] == odour))[0])
+    
+    all_olf_pokes = np.sum([odour_false_alarm_trials[odour] for odour in nonR_odours])
+
     odour_interval_pokes = {odour: {} for odour in nonR_odours}
     odour_interval_trials = {odour: {} for odour in nonR_odours}
     odour_interval_false_alarm = {odour: {} for odour in nonR_odours}
@@ -2103,8 +2110,9 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
         for i in np.unique(intervals):
             odour_interval_pokes[odour][i] = len(np.where((binary_poke == 1) & (trial_type == odour) & (intervals == i))[0])
             odour_interval_trials[odour][i] = len(np.where((trial_type == odour) & (intervals == i))[0])
-            odour_interval_false_alarm[odour][i] = (odour_interval_pokes[odour][i] / odour_interval_trials[odour][i] * 100) if odour_interval_trials[odour][i] else 0
-    
+            # odour_interval_false_alarm[odour][i] = (odour_interval_pokes[odour][i] / odour_interval_trials[odour][i] * 100) if odour_interval_trials[odour][i] else 0
+            odour_interval_false_alarm[odour][i] = (odour_interval_pokes[odour][i] / odour_false_alarm_trials[odour] * 100) if odour_false_alarm_trials[odour] else 0
+
     # Calculate overall false alarm rate for each interval
     interval_pokes = {}
     interval_trials = {}
@@ -2112,7 +2120,8 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
     for i in np.unique(intervals):
         interval_pokes[i] = np.sum([odour_interval_pokes[odour][i] for odour in nonR_odours])
         interval_trials[i] = np.sum([odour_interval_trials[odour][i] for odour in nonR_odours])
-        interval_false_alarm[i] = (interval_pokes[i] / interval_trials[i] * 100) if interval_trials[i] else 0
+        # interval_false_alarm[i] = (interval_pokes[i] / interval_trials[i] * 100) if interval_trials[i] else 0
+        interval_false_alarm[i] = (interval_pokes[i] / all_olf_pokes * 100) if all_olf_pokes else 0
    
     # Calculate false alarm rate for each odour depending on preceding olfactometer (olfactometer bias)
     odour_same_olf_pokes = {}
@@ -2121,11 +2130,9 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
     odour_diff_olf_pokes = {}
     odour_diff_olf_trials = {}
     odour_diff_olf_false_alarm = {}
-    odour_false_alarm_trials = {}
     
     for odour in nonR_odours:
         olfactometer_change = np.abs(np.diff(olfactometer))
-        odour_false_alarm_trials[odour] = len(np.where((binary_poke[1:] == 1) & (trial_type[1:] == odour))[0])
         
         odour_same_olf_pokes[odour] = len(np.where((binary_poke[1:] == 1) & (trial_type[1:] == odour) & (olfactometer_change == 0))[0])
         odour_same_olf_trials[odour] = len(np.where((trial_type[1:] == odour) & (olfactometer_change == 0))[0])
@@ -2134,8 +2141,6 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
         odour_diff_olf_pokes[odour] = len(np.where((binary_poke[1:] == 1) & (trial_type[1:] == odour) & (olfactometer_change == 1))[0])
         odour_diff_olf_trials[odour] = len(np.where((trial_type[1:] == odour) & (olfactometer_change == 1))[0])
         odour_diff_olf_false_alarm[odour] = (odour_diff_olf_pokes[odour] / odour_false_alarm_trials[odour] * 100) if odour_false_alarm_trials[odour] else 0
-
-    all_olf_pokes = np.sum([odour_false_alarm_trials[odour] for odour in nonR_odours])
 
     same_olf_pokes = np.sum([odour_same_olf_pokes[odour] for odour in nonR_odours])
     same_olf_trials = np.sum([odour_same_olf_trials[odour] for odour in nonR_odours])
@@ -2151,9 +2156,15 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
 
     odour_same_olf_rew_pairing = {}
     odour_diff_olf_rew_pairing = {}
+    odour_same_olf_rew_false_alarm = {}
+    odour_diff_olf_rew_false_alarm = {}
+
     for odour in nonR_odours:
         odour_same_olf_rew_pairing[odour] = len(np.where((binary_poke == 1) & (trial_type == odour) & (rew_olf_map == olfactometer))[0])
         odour_diff_olf_rew_pairing[odour] = len(np.where((binary_poke == 1) & (trial_type == odour) & (rew_olf_map != olfactometer))[0])
+
+        odour_same_olf_rew_false_alarm[odour] = odour_same_olf_rew_pairing[odour] / odour_false_alarm_trials[odour] if odour_false_alarm_trials[odour] else 0
+        odour_diff_olf_rew_false_alarm[odour] = odour_diff_olf_rew_pairing[odour] / odour_false_alarm_trials[odour] if odour_false_alarm_trials[odour] else 0
 
     same_olf_rew_pairing = np.sum([odour_same_olf_rew_pairing[odour] for odour in nonR_odours])
     diff_olf_rew_pairing = np.sum([odour_diff_olf_rew_pairing[odour] for odour in nonR_odours])
@@ -2183,6 +2194,8 @@ def calculate_overall_false_alarm_bias(events_df, odour_poke_df, odour_poke_off_
         'odour_false_alarm_trials': odour_false_alarm_trials,
         'odour_same_olf_rew_pairing': odour_same_olf_rew_pairing,
         'odour_diff_olf_rew_pairing': odour_diff_olf_rew_pairing,
+        'odour_same_olf_rew_false_alarm': odour_same_olf_rew_false_alarm,
+        'odour_diff_olf_rew_false_alarm': odour_diff_olf_rew_false_alarm,
         'same_olf_rew_pairing': same_olf_rew_pairing,
         'diff_olf_rew_pairing': diff_olf_rew_pairing,
         'same_olf_rew_false_alarm': same_olf_rew_false_alarm,
