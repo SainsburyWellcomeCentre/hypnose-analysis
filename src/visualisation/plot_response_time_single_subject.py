@@ -298,7 +298,7 @@ def main(data_folder, across_sessions=True, stage=8, sessions=None, plot_file=No
                         'r2_avg_incorrect_rt': 0,
                         'r2_avg_rt': 0,
                         'hit_rt': 0,
-                        'false_alarm_rt': 0,
+                        'miss_rt': 0,
                         'trial_id': 0
                     }:
                         # Add to totals

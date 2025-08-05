@@ -588,7 +588,7 @@ class RewardAnalyser:
                             'r1_avg_correct_rt': [], 'r1_avg_incorrect_rt': [], 'r1_avg_rt': [],
                             'r2_correct_rt': [], 'r2_incorrect_rt': [],
                             'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
-                            'hit_rt': [], 'false_alarm_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
+                            'hit_rt': [], 'miss_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                         }
                         # Add empty false alarm data
                         session_data['false_alarm'] = {
@@ -678,7 +678,7 @@ class RewardAnalyser:
                         'r1_avg_correct_rt': [], 'r1_avg_incorrect_rt': [], 'r1_avg_rt': [],
                         'r2_correct_rt': [], 'r2_incorrect_rt': [],
                         'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
-                        'hit_rt': [], 'false_alarm_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
+                        'hit_rt': [], 'miss_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                     }
                     # Add empty false alarm data
                     session_data['false_alarm'] = {
@@ -767,7 +767,7 @@ class RewardAnalyser:
                     'r1_avg_correct_rt': [], 'r1_avg_incorrect_rt': [], 'r1_avg_rt': [],
                     'r2_correct_rt': [], 'r2_incorrect_rt': [],
                     'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
-                    'hit_rt': [], 'false_alarm_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
+                    'hit_rt': [], 'miss_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                 }
                 # Add empty false alarm data
                 session_data['false_alarm'] = {
@@ -860,7 +860,7 @@ class RewardAnalyser:
                     'r1_avg_correct_rt': [], 'r1_avg_incorrect_rt': [], 'r1_avg_rt': [],
                     'r2_correct_rt': [], 'r2_incorrect_rt': [],
                     'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
-                    'hit_rt': [], 'false_alarm_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
+                    'hit_rt': [], 'miss_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                 },
                 'false_alarm': {               
                     'C_pokes': 0, 'C_trials': 0,
@@ -1103,7 +1103,7 @@ class RewardAnalyser:
                         'r1_avg_correct_rt': [], 'r1_avg_incorrect_rt': [], 'r1_avg_rt': [],
                         'r2_correct_rt': [], 'r2_incorrect_rt': [],
                         'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
-                        'hit_rt': [], 'false_alarm_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
+                        'hit_rt': [], 'miss_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                     })
 
     @staticmethod
@@ -1663,7 +1663,7 @@ def calculate_overall_response_time(events_df):
     r2_avg_rt = np.mean(np.concatenate([r2_correct_rt, r2_incorrect_rt]))
 
     hit_rt = np.mean(np.concatenate([r1_correct_rt, r2_correct_rt]))
-    false_alarm_rt = np.mean(np.concatenate([r1_incorrect_rt, r2_incorrect_rt]))
+    miss_rt = np.mean(np.concatenate([r1_incorrect_rt, r2_incorrect_rt]))
     
     # Return detailed response time metrics
     return {
@@ -1679,7 +1679,7 @@ def calculate_overall_response_time(events_df):
         'r2_avg_incorrect_rt': r2_avg_incorrect_rt,
         'r2_avg_rt': r2_avg_rt,
         'hit_rt': hit_rt,
-        'false_alarm_rt': false_alarm_rt,
+        'miss_rt': miss_rt,
         'trial_id': trial_id
     }
 

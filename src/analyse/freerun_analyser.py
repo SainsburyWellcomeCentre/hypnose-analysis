@@ -337,7 +337,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'r2_avg_incorrect_rt': response_time['r2_avg_incorrect_rt'],
                 'r2_avg_rt': response_time['r2_avg_rt'],
                 'hit_rt': response_time['hit_rt'],
-                'false_alarm_rt': response_time['false_alarm_rt'], 
+                'miss_rt': response_time['miss_rt'], 
                 'trial_id': response_time['trial_id']
             })
         else:
@@ -353,7 +353,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'r2_avg_incorrect_rt': np.nan,
                 'r2_avg_rt': np.nan,
                 'hit_rt': np.nan,
-                'false_alarm_rt': np.nan, 
+                'miss_rt': np.nan, 
                 'trial_id': np.nan
             })
 
@@ -672,7 +672,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_r1_rt = np.mean(np.concatenate([all_r1_correct_rt, all_r1_incorrect_rt]))
     all_r2_rt = np.mean(np.concatenate([all_r2_correct_rt, all_r2_incorrect_rt]))
     all_hit_rt = np.mean(np.concatenate([all_r1_correct_rt, all_r2_correct_rt]))
-    all_false_alarm_rt = np.mean(np.concatenate([all_r1_incorrect_rt, all_r2_incorrect_rt]))
+    all_miss_rt = np.mean(np.concatenate([all_r1_incorrect_rt, all_r2_incorrect_rt]))
 
     # Calculate overall false alarm 
     all_C_pokes = np.sum(all_C_pokes)
@@ -774,7 +774,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     print(f"Total rewards: R1={all_rewards_r1} ({all_rewards_r1 * reward_a:.1f}µL), R2={all_rewards_r2} ({all_rewards_r2 * reward_b:.1f}µL)")
     print(f"Combined total rewards: {all_rewards_r1 + all_rewards_r2} ({all_rewards_r1 * reward_a + all_rewards_r2 * reward_b:.1f}µL)")
     print(f"Response time: R1={all_r1_rt:.1f} s, R2={all_r2_rt:.1f} s")
-    print(f"Response time: Hit={all_hit_rt:.1f} s, FalseAlarm={all_false_alarm_rt:.1f} s")
+    print(f"Response time: Hit={all_hit_rt:.1f} s, Miss={all_miss_rt:.1f} s")
     if stage > 7:
         print(f"False alarm rate: C={all_C_false_alarm:.1f}%, D={all_D_false_alarm:.1f}%, E={all_E_false_alarm:.1f}%, F={all_F_false_alarm:.1f}%, G={all_G_false_alarm:.1f}%")
         print(f"Overall false alarm rate: {all_overall_false_alarm:.1f}%")
@@ -833,7 +833,7 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'all_r1_rt': all_r1_rt,
         'all_r2_rt': all_r2_rt,
         'all_hit_rt': all_hit_rt,
-        'all_false_alarm_rt': all_false_alarm_rt,
+        'all_miss_rt': all_miss_rt,
         'avg_response_time': avg_response_time, 
         'all_trial_id': all_trial_id,
         'all_C_false_alarm': all_C_false_alarm,

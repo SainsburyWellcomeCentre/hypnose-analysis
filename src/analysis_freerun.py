@@ -491,7 +491,7 @@ class RewardAnalyser:
                             'r1_avg_correct_rt': 0, 'r1_avg_incorrect_rt': 0, 'r1_avg_rt': 0,
                             'r2_correct_rt': 0, 'r2_incorrect_rt': 0,
                             'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
-                            'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
+                            'hit_rt': 0, 'miss_rt': 0, 'trial_id': 0
                         }
                 
                 except Exception as e:
@@ -508,7 +508,7 @@ class RewardAnalyser:
                         'r1_avg_correct_rt': 0, 'r1_avg_incorrect_rt': 0, 'r1_avg_rt': 0,
                         'r2_correct_rt': 0, 'r2_incorrect_rt': 0,
                         'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
-                        'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
+                        'hit_rt': 0, 'miss_rt': 0, 'trial_id': 0
                     }
             else:
                 print("No events available for decision accuracy calculation")
@@ -537,7 +537,7 @@ class RewardAnalyser:
                     'r1_avg_correct_rt': 0, 'r1_avg_incorrect_rt': 0, 'r1_avg_rt': 0,
                     'r2_correct_rt': 0, 'r2_incorrect_rt': 0,
                     'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
-                    'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
+                    'hit_rt': 0, 'miss_rt': 0, 'trial_id': 0
                 }
             }
         
@@ -603,7 +603,7 @@ class RewardAnalyser:
                         'r1_avg_correct_rt': 0, 'r1_avg_incorrect_rt': 0, 'r1_avg_rt': 0,
                         'r2_correct_rt': 0, 'r2_incorrect_rt': 0,
                         'r2_avg_correct_rt': 0, 'r2_avg_incorrect_rt': 0, 'r2_avg_rt': 0,
-                        'hit_rt': 0, 'false_alarm_rt': 0, 'trial_id': 0
+                        'hit_rt': 0, 'miss_rt': 0, 'trial_id': 0
                     })
 
     def _detect_stage(self):
@@ -973,7 +973,7 @@ def calculate_overall_response_time(events_df):
     r2_avg_rt = np.mean(np.concatenate([r2_correct_rt, r2_incorrect_rt]))
 
     hit_rt = np.mean(np.concatenate([r1_correct_rt, r2_correct_rt]))
-    false_alarm_rt = np.mean(np.concatenate([r1_incorrect_rt, r2_incorrect_rt]))
+    miss_rt = np.mean(np.concatenate([r1_incorrect_rt, r2_incorrect_rt]))
     
     # Return detailed response time metrics
     return {
@@ -989,7 +989,7 @@ def calculate_overall_response_time(events_df):
         'r2_avg_incorrect_rt': r2_avg_incorrect_rt,
         'r2_avg_rt': r2_avg_rt,
         'hit_rt': hit_rt,
-        'false_alarm_rt': false_alarm_rt,
+        'miss_rt': miss_rt,
         'trial_id': trial_id
     }
 
