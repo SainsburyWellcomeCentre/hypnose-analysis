@@ -11,7 +11,7 @@ from collections import defaultdict
 from src import utils
 from src.analysis import RewardAnalyser, get_decision_accuracy, get_response_time, \
     get_decision_sensitivity, get_false_alarm, get_sequence_completion, get_false_alarm_bias, \
-    get_sequence_summary, get_abortion_positions
+    get_sequence_summary, get_abortion_positions, get_false_alarm_response_time
 from src.processing.detect_stage import detect_stage
 from src.processing.detect_settings import detect_settings
 
@@ -114,6 +114,13 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_same_olf_rew_pairing = 0
     all_diff_olf_rew_pairing = 0
 
+    # false alarm response time variables
+    all_C_false_alarm_rt = []
+    all_D_false_alarm_rt = []
+    all_E_false_alarm_rt = []
+    all_F_false_alarm_rt = []
+    all_G_false_alarm_rt = []
+
     # sequence completion variables 
     all_initiated_sequences = 0
     all_terminated_sequences = 0
@@ -191,6 +198,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
         # Calculate false alarm bias
         false_alarm_bias = get_false_alarm_bias(session_dir)
+        
+        # Calculate false alarm response time
+        false_alarm_response_time = get_false_alarm_response_time(session_dir)
 
         # Calculate sequence completion 
         sequence_completion = get_sequence_completion(session_dir)
@@ -499,6 +509,32 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                     'same_olf_rew_false_alarm': 0,
                     'diff_olf_rew_false_alarm': 0
                     })
+        
+        # Process false alarm response time data
+        if false_alarm_response_time:
+            all_C_false_alarm_rt.extend(false_alarm_response_time['C_false_alarm_rt'])
+            all_D_false_alarm_rt.extend(false_alarm_response_time['D_false_alarm_rt']) 
+            all_E_false_alarm_rt.extend(false_alarm_response_time['E_false_alarm_rt'])
+            all_F_false_alarm_rt.extend(false_alarm_response_time['F_false_alarm_rt'])
+            all_G_false_alarm_rt.extend(false_alarm_response_time['G_false_alarm_rt'])
+            
+            session_info.update({
+                'C_avg_false_alarm_rt': false_alarm_response_time['C_avg_false_alarm_rt'],
+                'D_avg_false_alarm_rt': false_alarm_response_time['D_avg_false_alarm_rt'],
+                'E_avg_false_alarm_rt': false_alarm_response_time['E_avg_false_alarm_rt'],
+                'F_avg_false_alarm_rt': false_alarm_response_time['F_avg_false_alarm_rt'],
+                'G_avg_false_alarm_rt': false_alarm_response_time['G_avg_false_alarm_rt'],
+                'overall_avg_false_alarm_rt': false_alarm_response_time['overall_avg_false_alarm_rt']
+            })
+        else:
+            session_info.update({
+                'C_avg_false_alarm_rt': np.nan,
+                'D_avg_false_alarm_rt': np.nan,
+                'E_avg_false_alarm_rt': np.nan,
+                'F_avg_false_alarm_rt': np.nan,
+                'G_avg_false_alarm_rt': np.nan,
+                'overall_avg_false_alarm_rt': np.nan
+            })
             
         # Add sequence completion data
         if sequence_completion:
@@ -674,6 +710,17 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_hit_rt = np.mean(np.concatenate([all_r1_correct_rt, all_r2_correct_rt]))
     all_miss_rt = np.mean(np.concatenate([all_r1_incorrect_rt, all_r2_incorrect_rt]))
 
+    # Calculate overall false alarm response times
+    all_C_avg_false_alarm_rt = np.mean(all_C_false_alarm_rt) if all_C_false_alarm_rt else 0
+    all_D_avg_false_alarm_rt = np.mean(all_D_false_alarm_rt) if all_D_false_alarm_rt else 0
+    all_E_avg_false_alarm_rt = np.mean(all_E_false_alarm_rt) if all_E_false_alarm_rt else 0
+    all_F_avg_false_alarm_rt = np.mean(all_F_false_alarm_rt) if all_F_false_alarm_rt else 0
+    all_G_avg_false_alarm_rt = np.mean(all_G_false_alarm_rt) if all_G_false_alarm_rt else 0
+    
+    # Calculate overall average false alarm response time across all odours
+    all_combined_false_alarm_rt = all_C_false_alarm_rt + all_D_false_alarm_rt + all_E_false_alarm_rt + all_F_false_alarm_rt + all_G_false_alarm_rt
+    all_overall_avg_false_alarm_rt = np.mean(all_combined_false_alarm_rt) if all_combined_false_alarm_rt else 0
+
     # Calculate overall false alarm 
     all_C_pokes = np.sum(all_C_pokes)
     all_D_pokes = np.sum(all_D_pokes)
@@ -776,6 +823,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     print(f"Response time: R1={all_r1_rt:.1f} s, R2={all_r2_rt:.1f} s")
     print(f"Response time: Hit={all_hit_rt:.1f} s, Miss={all_miss_rt:.1f} s")
     if stage > 7:
+        print(f"False alarm response time: C={all_C_avg_false_alarm_rt:.1f} s, D={all_D_avg_false_alarm_rt:.1f} s, E={all_E_avg_false_alarm_rt:.1f} s, F={all_F_avg_false_alarm_rt:.1f} s, G={all_G_avg_false_alarm_rt:.1f} s")
+        print(f"Overall false alarm response time: {all_overall_avg_false_alarm_rt:.1f} s")
+    if stage > 7:
         print(f"False alarm rate: C={all_C_false_alarm:.1f}%, D={all_D_false_alarm:.1f}%, E={all_E_false_alarm:.1f}%, F={all_F_false_alarm:.1f}%, G={all_G_false_alarm:.1f}%")
         print(f"Overall false alarm rate: {all_overall_false_alarm:.1f}%")
         print(f"False alarm same-olfactometer bias: {all_same_olf_false_alarm:.1f}%")
@@ -834,6 +884,12 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'all_r2_rt': all_r2_rt,
         'all_hit_rt': all_hit_rt,
         'all_miss_rt': all_miss_rt,
+        'all_C_avg_false_alarm_rt': all_C_avg_false_alarm_rt,
+        'all_D_avg_false_alarm_rt': all_D_avg_false_alarm_rt,
+        'all_E_avg_false_alarm_rt': all_E_avg_false_alarm_rt,
+        'all_F_avg_false_alarm_rt': all_F_avg_false_alarm_rt,
+        'all_G_avg_false_alarm_rt': all_G_avg_false_alarm_rt,
+        'all_overall_avg_false_alarm_rt': all_overall_avg_false_alarm_rt,
         'avg_response_time': avg_response_time, 
         'all_trial_id': all_trial_id,
         'all_C_false_alarm': all_C_false_alarm,

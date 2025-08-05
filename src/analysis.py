@@ -557,6 +557,7 @@ class RewardAnalyser:
                         if stage > 7:  
                             session_data['false_alarm'] = calculate_overall_false_alarm(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
                             session_data['false_alarm_bias'] = calculate_overall_false_alarm_bias(all_events_df, odour_poke_df, odour_poke_off_df, session_schema, odour_to_olfactometer_map)
+                            session_data['false_alarm_response_time'] = calculate_false_alarm_response_time(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
                         
                         # Calculate sequence completion (sequences)
                         if stage >= 9:  
@@ -628,6 +629,20 @@ class RewardAnalyser:
                             'diff_olf_rew_pairing': 0,
                             'same_olf_rew_false_alarm': 0,
                             'diff_olf_rew_false_alarm': 0
+                        }
+                        # Add empty false alarm response time data
+                        session_data['false_alarm_response_time'] = {
+                            'C_false_alarm_rt': [],
+                            'D_false_alarm_rt': [],
+                            'E_false_alarm_rt': [],
+                            'F_false_alarm_rt': [],
+                            'G_false_alarm_rt': [],
+                            'C_avg_false_alarm_rt': 0,
+                            'D_avg_false_alarm_rt': 0,
+                            'E_avg_false_alarm_rt': 0,
+                            'F_avg_false_alarm_rt': 0,
+                            'G_avg_false_alarm_rt': 0,
+                            'overall_avg_false_alarm_rt': 0
                         }
                         # Add empty sequence completion data 
                         session_data['sequence_completion'] = {
@@ -719,6 +734,20 @@ class RewardAnalyser:
                         'same_olf_rew_false_alarm': 0,
                         'diff_olf_rew_false_alarm': 0
                     }
+                    # Add empty false alarm response time data
+                    session_data['false_alarm_response_time'] = {
+                        'C_false_alarm_rt': [],
+                        'D_false_alarm_rt': [],
+                        'E_false_alarm_rt': [],
+                        'F_false_alarm_rt': [],
+                        'G_false_alarm_rt': [],
+                        'C_avg_false_alarm_rt': 0,
+                        'D_avg_false_alarm_rt': 0,
+                        'E_avg_false_alarm_rt': 0,
+                        'F_avg_false_alarm_rt': 0,
+                        'G_avg_false_alarm_rt': 0,
+                        'overall_avg_false_alarm_rt': 0
+                    }
                     # Add empty sequence completion data 
                     session_data['sequence_completion'] = {
                         'initiated_sequences': 0,
@@ -807,6 +836,20 @@ class RewardAnalyser:
                     'diff_olf_rew_pairing': 0,
                     'same_olf_rew_false_alarm': 0,
                     'diff_olf_rew_false_alarm': 0
+                }
+                # Add empty false alarm response time data
+                session_data['false_alarm_response_time'] = {
+                    'C_false_alarm_rt': [],
+                    'D_false_alarm_rt': [],
+                    'E_false_alarm_rt': [],
+                    'F_false_alarm_rt': [],
+                    'G_false_alarm_rt': [],
+                    'C_avg_false_alarm_rt': 0,
+                    'D_avg_false_alarm_rt': 0,
+                    'E_avg_false_alarm_rt': 0,
+                    'F_avg_false_alarm_rt': 0,
+                    'G_avg_false_alarm_rt': 0,
+                    'overall_avg_false_alarm_rt': 0
                 }
                 # Add empty sequence completion data 
                 session_data['sequence_completion'] = {
@@ -898,6 +941,19 @@ class RewardAnalyser:
                     'diff_olf_rew_pairing': 0,
                     'same_olf_rew_false_alarm': 0,
                     'diff_olf_rew_false_alarm': 0
+                },
+                'false_alarm_response_time': {
+                    'C_false_alarm_rt': [],
+                    'D_false_alarm_rt': [],
+                    'E_false_alarm_rt': [],
+                    'F_false_alarm_rt': [],
+                    'G_false_alarm_rt': [],
+                    'C_avg_false_alarm_rt': 0,
+                    'D_avg_false_alarm_rt': 0,
+                    'E_avg_false_alarm_rt': 0,
+                    'F_avg_false_alarm_rt': 0,
+                    'G_avg_false_alarm_rt': 0,
+                    'overall_avg_false_alarm_rt': 0
                 },
                 'sequence_completion': {
                     'initiated_sequences': 0,
@@ -1105,6 +1161,45 @@ class RewardAnalyser:
                         'r2_avg_correct_rt': [], 'r2_avg_incorrect_rt': [], 'r2_avg_rt': [],
                         'hit_rt': [], 'miss_rt': [], 'trial_id': np.array([]).reshape(-1, 2)
                     })
+
+    @staticmethod
+    def get_false_alarm_response_time(data_path):
+        """
+        Static method to calculate false alarm response time for each odour in a single session.
+        
+        Parameters:
+        -----------
+        data_path : str or Path
+            Path to session data directory
+            
+        Returns:
+        --------
+        dict
+            Dictionary with false alarm response time metrics or None if calculation fails
+        """
+        root = Path(data_path)
+        
+        # Process the given directory directly
+        print(f"Processing false alarm response time for: {root}")
+        
+        # Create a temporary instance to access the _get_session_data method
+        temp_instance = RewardAnalyser.__new__(RewardAnalyser)
+        session_data = temp_instance._get_session_data(root)
+        
+        # Return just the false alarm response time summary
+        return session_data.get('false_alarm_response_time', {
+            'C_false_alarm_rt': [],
+            'D_false_alarm_rt': [],
+            'E_false_alarm_rt': [],
+            'F_false_alarm_rt': [],
+            'G_false_alarm_rt': [],
+            'C_avg_false_alarm_rt': 0,
+            'D_avg_false_alarm_rt': 0,
+            'E_avg_false_alarm_rt': 0,
+            'F_avg_false_alarm_rt': 0,
+            'G_avg_false_alarm_rt': 0,
+            'overall_avg_false_alarm_rt': 0
+        })
 
     @staticmethod
     def get_sequence_completion(data_path):
@@ -1681,6 +1776,141 @@ def calculate_overall_response_time(events_df):
         'hit_rt': hit_rt,
         'miss_rt': miss_rt,
         'trial_id': trial_id
+    }
+
+def calculate_false_alarm_response_time(events_df, odour_poke_df, odour_poke_off_df, session_schema):
+    """
+    Calculate response time to false alarms for each non-rewarded odour (C, D, E, F, G).
+    Measures time from odour poke exit to decision poke for false alarm trials.
+    
+    Parameters:
+    -----------
+    events_df : pandas.DataFrame
+        DataFrame containing trial events with timing information
+    odour_poke_df : pandas.DataFrame
+        DataFrame containing odour poke onset events
+    odour_poke_off_df : pandas.DataFrame
+        DataFrame containing odour poke offset events
+    session_schema : dict
+        Session configuration containing timing parameters
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing false alarm response times for each odour and overall average
+    """
+    # Define useful variables
+    olf_valve_cols = ['odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']
+    minimumSamplingTime = session_schema['minimumSamplingTime']
+    sampleOffsetTime = session_schema['sampleOffsetTime']
+    
+    # Collect all poke onset and offset events
+    odour_poke_events_df = get_odour_poke_df(odour_poke_df, odour_poke_off_df)
+
+    # Initialize response time lists for each odour
+    C_false_alarm_rt = []
+    D_false_alarm_rt = []
+    E_false_alarm_rt = []
+    F_false_alarm_rt = []
+    G_false_alarm_rt = []
+    
+    # Find all trial end points
+    end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+
+    # Process each trial
+    for e in range(len(end_initiation_indices)):
+        end_idx = end_initiation_indices[e]
+        if e == len(end_initiation_indices) - 1:
+            next_end_idx = len(events_df)
+        else:
+            next_end_idx = end_initiation_indices[e + 1]
+
+        if e == 0:
+            prev_end_idx = 0
+        else:
+            prev_end_idx = end_initiation_indices[e - 1]
+        
+        for i in range(prev_end_idx, end_idx):
+            valid_odour = False
+            if events_df.loc[i, olf_valve_cols].any():
+                # Determine if an odour is valid based on sampling
+                valid_odour = is_odour_valid(i, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime)
+                if not valid_odour: 
+                    continue
+
+            # Process valid odours only
+            if valid_odour: 
+                k = i 
+                odour = next((od for od in olf_valve_cols if events_df.loc[k, od]), None)
+                
+                if odour:
+                    # Find the end of trial (EndInitiation)
+                    trial_end_time = events_df.loc[end_idx, 'timestamp']
+                    
+                    # Find odour poke exit time for this trial
+                    odour_exit_time = None
+                    for j in range(k, end_idx + 1):
+                        if j < len(events_df) and events_df.loc[j, 'odour_poke_off']:
+                            odour_exit_time = events_df.loc[j, 'timestamp']
+                            break
+                    
+                    # Find first decision poke (r1 or r2) after odour exit
+                    decision_poke_time = None
+                    if odour_exit_time:
+                        for j in range(k, min(next_end_idx, len(events_df))):
+                            if (events_df.loc[j, 'timestamp'] > odour_exit_time and 
+                                (events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke'])):
+                                decision_poke_time = events_df.loc[j, 'timestamp']
+                                break
+                    
+                    # Calculate response time if we have both times and this is a false alarm
+                    if odour_exit_time and decision_poke_time:
+                        # Check if this is a false alarm (response to non-rewarded odour)
+                        has_reward = False
+                        for j in range(k, min(next_end_idx, len(events_df))):
+                            if (events_df.loc[j, 'PulseSupplyPort1'] or events_df.loc[j, 'PulseSupplyPort2']):
+                                has_reward = True
+                                break
+                        
+                        # If no reward was delivered, this is a false alarm
+                        if not has_reward:
+                            response_time = (decision_poke_time - odour_exit_time).total_seconds()
+                            
+                            # Store response time for the specific odour
+                            if odour == 'odourC_olf_valve':
+                                C_false_alarm_rt.append(response_time)
+                            elif odour == 'odourD_olf_valve':
+                                D_false_alarm_rt.append(response_time)
+                            elif odour == 'odourE_olf_valve':
+                                E_false_alarm_rt.append(response_time)
+                            elif odour == 'odourF_olf_valve':
+                                F_false_alarm_rt.append(response_time)
+                            elif odour == 'odourG_olf_valve':
+                                G_false_alarm_rt.append(response_time)
+
+    # Calculate averages for each odour
+    C_avg_false_alarm_rt = np.mean(C_false_alarm_rt) if C_false_alarm_rt else 0
+    D_avg_false_alarm_rt = np.mean(D_false_alarm_rt) if D_false_alarm_rt else 0
+    E_avg_false_alarm_rt = np.mean(E_false_alarm_rt) if E_false_alarm_rt else 0
+    F_avg_false_alarm_rt = np.mean(F_false_alarm_rt) if F_false_alarm_rt else 0
+    G_avg_false_alarm_rt = np.mean(G_false_alarm_rt) if G_false_alarm_rt else 0
+    
+    # Calculate overall average false alarm response time
+    all_false_alarm_rt = C_false_alarm_rt + D_false_alarm_rt + E_false_alarm_rt + F_false_alarm_rt + G_false_alarm_rt
+    overall_avg_false_alarm_rt = np.mean(all_false_alarm_rt) if all_false_alarm_rt else 0
+    
+    return {
+        'C_false_alarm_rt': C_false_alarm_rt,
+        'D_false_alarm_rt': D_false_alarm_rt,
+        'E_false_alarm_rt': E_false_alarm_rt,
+        'F_false_alarm_rt': F_false_alarm_rt,
+        'G_false_alarm_rt': G_false_alarm_rt,
+        'C_avg_false_alarm_rt': C_avg_false_alarm_rt,
+        'D_avg_false_alarm_rt': D_avg_false_alarm_rt,
+        'E_avg_false_alarm_rt': E_avg_false_alarm_rt,
+        'F_avg_false_alarm_rt': F_avg_false_alarm_rt,
+        'G_avg_false_alarm_rt': G_avg_false_alarm_rt,
+        'overall_avg_false_alarm_rt': overall_avg_false_alarm_rt
     }
 
 def calculate_overall_false_alarm(events_df, odour_poke_df, odour_poke_off_df, session_schema): 
@@ -2713,3 +2943,6 @@ def get_odour_poke_df(odour_poke_df, odour_poke_off_df):
     odour_poke_events_df.reset_index(drop=True, inplace=True)
 
     return odour_poke_events_df
+
+# Function aliases for easier importing
+get_false_alarm_response_time = RewardAnalyser.get_false_alarm_response_time
