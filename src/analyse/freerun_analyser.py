@@ -11,7 +11,7 @@ from collections import defaultdict
 from src import utils
 from src.analysis import RewardAnalyser, get_decision_accuracy, get_response_time, \
     get_decision_sensitivity, get_false_alarm, get_sequence_completion, get_false_alarm_bias, \
-    get_sequence_summary
+    get_sequence_summary, get_abortion_positions
 from src.processing.detect_stage import detect_stage
 from src.processing.detect_settings import detect_settings
 
@@ -125,6 +125,10 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_total_completed_sequences = 0
     all_total_aborted_sequences = 0
     
+    # abortion positions variables
+    all_abortion_positions = {}  # position -> count
+    all_max_sequence_length = 0
+    
     # sensitivity varibles 
     all_r1_respond = 0
     all_r1_total = 0
@@ -200,6 +204,16 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         except Exception as e:
             print(f"Error calculating sequence summary: {e}")
             sequence_summary = None
+
+        # Calculate abortion positions
+        abortion_positions = None
+        try:
+            # Only calculate abortion positions for stages >= 9 (freerun stages)
+            if stage and int(stage) >= 9:
+                abortion_positions = get_abortion_positions(session_dir)
+        except Exception as e:
+            print(f"Error calculating abortion positions: {e}")
+            abortion_positions = None
 
         # Calculate decision sensitivity
         sensitivity = get_decision_sensitivity(session_dir)
@@ -534,6 +548,27 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'sequence_completion_rate': 0,
                 'sequence_abort_rate': 0
             })    
+            
+        # Add abortion positions data
+        if abortion_positions:
+            # Accumulate abortion positions across sessions
+            for position, count in abortion_positions['abortion_positions'].items():
+                all_abortion_positions[position] = all_abortion_positions.get(position, 0) + count
+            all_max_sequence_length = max(all_max_sequence_length, abortion_positions['max_sequence_length'])
+            
+            session_info.update({
+                'abortion_positions': abortion_positions['abortion_positions'],
+                'abortion_percentages': abortion_positions['abortion_percentages'],
+                'abortion_total_aborted_sequences': abortion_positions['total_aborted_sequences'],
+                'abortion_max_sequence_length': abortion_positions['max_sequence_length']
+            })
+        else:
+            session_info.update({
+                'abortion_positions': {},
+                'abortion_percentages': {},
+                'abortion_total_aborted_sequences': 0,
+                'abortion_max_sequence_length': 0
+            })
         
         # Add sensitivity data
         if sensitivity:
@@ -604,6 +639,13 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             print(f"  Total aborted sequences: {sequence_summary['total_aborted_sequences']}")
             print(f"  Sequence completion rate: {sequence_summary['sequence_completion_rate']:.1f}%")
             print(f"  Sequence abort rate: {sequence_summary['sequence_abort_rate']:.1f}%")
+        
+        if abortion_positions and abortion_positions['total_aborted_sequences'] > 0:
+            print(f"  Abortion positions:")
+            for position in sorted(abortion_positions['abortion_percentages'].keys()):
+                percentage = abortion_positions['abortion_percentages'][position]
+                count = abortion_positions['abortion_positions'][position]
+                print(f"    Position {position}: {count} abortions ({percentage:.1f}%)")
         
         if sensitivity and all(value != 0 for value in sensitivity.values()):
             print(f"  Sensitivity: A={sensitivity['r1_sensitivity']:.1f}% ({sensitivity['r1_respond']}/{sensitivity['r1_total']}), "
@@ -749,6 +791,16 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         print(f"Total aborted sequences: {all_total_aborted_sequences}")
         print(f"Overall sequence completion rate: {all_total_completed_sequences / all_total_initiated_sequences * 100 if all_total_initiated_sequences > 0 else 0:.1f}%")
         print(f"Overall sequence abort rate: {all_total_aborted_sequences / all_total_initiated_sequences * 100 if all_total_initiated_sequences > 0 else 0:.1f}%")
+        
+        # Calculate and display overall abortion positions
+        if all_abortion_positions and all_total_aborted_sequences > 0:
+            print(f"Overall abortion positions:")
+            all_abortion_percentages = {}
+            for position, count in sorted(all_abortion_positions.items()):
+                percentage = (count / all_total_aborted_sequences) * 100
+                all_abortion_percentages[position] = percentage
+                print(f"  Position {position}: {count} abortions ({percentage:.1f}%)")
+        
     if stage >= 8.2 and stage < 9:
         print(f"Sensitivity: A={all_r1_sensitivity:.1f}% ({all_r1_respond}/{all_r1_total}), B={all_r2_sensitivity:.1f}% ({all_r2_respond}/{all_r2_total})")
         print(f"Overall sensitivity: {all_overall_sensitivity:.1f}%")
@@ -798,6 +850,9 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'all_total_aborted_sequences': all_total_aborted_sequences,
         'overall_sequence_completion_rate': all_total_completed_sequences / all_total_initiated_sequences * 100 if all_total_initiated_sequences > 0 else 0,
         'overall_sequence_abort_rate': all_total_aborted_sequences / all_total_initiated_sequences * 100 if all_total_initiated_sequences > 0 else 0,
+        'all_abortion_positions': all_abortion_positions,
+        'all_abortion_percentages': all_abortion_percentages if 'all_abortion_percentages' in locals() else {},
+        'all_max_sequence_length': all_max_sequence_length,
         'all_odour_interval_pokes': all_odour_interval_pokes,
         'all_odour_interval_trials': all_odour_interval_trials,
         'all_odour_interval_false_alarm': all_odour_interval_false_alarm,

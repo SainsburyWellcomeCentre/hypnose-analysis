@@ -562,6 +562,7 @@ class RewardAnalyser:
                         if stage >= 9:  
                             session_data['sequence_completion'] = calculate_overall_sequence_completion(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
                             session_data['sequence_summary'] = calculate_sequence_summary(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
+                            session_data['abortion_positions'] = calculate_abortion_positions(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
                             
                         # Calculate decision sensitivity (freerun)
                         if stage >= 8.2 and stage < 9:  # TODO: update for later sequence stages
@@ -646,6 +647,13 @@ class RewardAnalyser:
                             'sequence_completion_rate': 0,
                             'sequence_abort_rate': 0
                         }
+                        # Add empty abortion positions data
+                        session_data['abortion_positions'] = {
+                            'abortion_positions': {},
+                            'abortion_percentages': {},
+                            'total_aborted_sequences': 0,
+                            'max_sequence_length': 0
+                        }
                         # Add empty sensitivity data
                         session_data['sensitivity'] = {'r1_total': 0,
                             'r1_respond': 0,
@@ -729,6 +737,13 @@ class RewardAnalyser:
                         'sequence_completion_rate': 0,
                         'sequence_abort_rate': 0
                     }
+                    # Add empty abortion positions data
+                    session_data['abortion_positions'] = {
+                        'abortion_positions': {},
+                        'abortion_percentages': {},
+                        'total_aborted_sequences': 0,
+                        'max_sequence_length': 0
+                    }
                     # Add empty sensitivity data
                     session_data['sensitivity'] = {'r1_total': 0,
                         'r1_respond': 0,
@@ -810,6 +825,13 @@ class RewardAnalyser:
                     'total_aborted_sequences': 0,
                     'sequence_completion_rate': 0,
                     'sequence_abort_rate': 0
+                }
+                # Add empty abortion positions data
+                session_data['abortion_positions'] = {
+                    'abortion_positions': {},
+                    'abortion_percentages': {},
+                    'total_aborted_sequences': 0,
+                    'max_sequence_length': 0
                 }
                 # Add empty sensitivity data
                 session_data['sensitivity'] = {'r1_total': 0,
@@ -1150,6 +1172,38 @@ class RewardAnalyser:
             'sequence_abort_rate': 0
         })
 
+    @staticmethod
+    def get_abortion_positions(data_path):
+        """
+        Static method to calculate abortion positions for a single session.
+        
+        Parameters:
+        -----------
+        data_path : str or Path
+            Path to session data directory
+            
+        Returns:
+        --------
+        dict
+            Dictionary with abortion position metrics or None if calculation fails
+        """
+        root = Path(data_path)
+        
+        # Process the given directory directly
+        print(f"Processing abortion positions for: {root}")
+        
+        # Create a temporary instance to access the _get_session_data method
+        temp_instance = RewardAnalyser.__new__(RewardAnalyser)
+        session_data = temp_instance._get_session_data(root)
+        
+        # Return the abortion positions data
+        return session_data.get('abortion_positions', {
+            'abortion_positions': {},
+            'abortion_percentages': {},
+            'total_aborted_sequences': 0,
+            'max_sequence_length': 0
+        })
+
     def _detect_stage(self):
         """
         Extracts the stage from metadata if available.
@@ -1360,6 +1414,22 @@ def get_decision_specificity(data_path):
         Dictionary with specificity metrics or None if calculation fails
     """
     return RewardAnalyser.get_decision_specificity(data_path)
+
+def get_abortion_positions(data_path):
+    """
+    Calculate abortion positions for a single session.
+    
+    Parameters:
+    -----------
+    data_path : str or Path
+        Path to session data directory
+        
+    Returns:
+    --------
+    dict
+        Dictionary with abortion position metrics or None if calculation fails
+    """
+    return RewardAnalyser.get_abortion_positions(data_path)
 
 def calculate_overall_decision_accuracy(events_df):
     """
@@ -2432,6 +2502,162 @@ def calculate_sequence_summary(events_df, odour_poke_df, odour_poke_off_df, sess
         'total_aborted_sequences': total_aborted_sequences,
         'sequence_completion_rate': sequence_completion_rate,
         'sequence_abort_rate': sequence_abort_rate
+    }
+
+def calculate_abortion_positions(events_df, odour_poke_df, odour_poke_off_df, session_schema):
+    """
+    Calculate the percentage of sequence abortions occurring at each odour position.
+    
+    Logic:
+    - A sequence is INITIATED when the first odour following an InitiationSequence event is validly sampled
+    - A sequence is ABORTED when it's initiated but doesn't reach completion (no EndInitiation with r1/r2 valve)
+    - Track the last valid odour position reached before abortion
+    
+    Parameters:
+    -----------
+    events_df : pandas.DataFrame
+        DataFrame containing trial events with columns: 'timestamp', 'r1_poke', 'r2_poke', 'r1_olf_valve', 'r2_olf_valve', 
+                                            'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 
+                                                'odourG_olf_valve', 'r1_olf_valve_off', 'r2_olf_valve_off', 'odourC_olf_valve_off', 
+                                                    'odourD_olf_valve_off', 'odourE_olf_valve_off', 'odourF_olf_valve_off', 
+                                                        'odourG_olf_valve_off', 'EndInitiation', 'InitiationSequence', 'odour_poke', 'odour_poke_off', 
+                                                        'PulseSupplyPort1', 'PulseSupplyPort2'
+    odour_poke_df : pandas.DataFrame
+        DataFrame containing odour poke onset events
+    odour_poke_off_df : pandas.DataFrame  
+        DataFrame containing odour poke offset events
+    session_schema : dict
+        Dictionary containing session parameters including minimumSamplingTime and sampleOffsetTime
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing abortion position analysis:
+        - abortion_positions: Dict with odour position (1, 2, 3, etc.) as keys and count as values
+        - abortion_percentages: Dict with odour position as keys and percentage of abortions as values
+        - total_aborted_sequences: Total number of aborted sequences analyzed
+        - max_sequence_length: Maximum sequence length observed
+    """
+    # Define useful variables
+    olf_valve_cols = ['r1_olf_valve', 'r2_olf_valve', 'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']
+    rew_valve_cols = ['r1_olf_valve', 'r2_olf_valve']
+    minimumSamplingTime = session_schema['minimumSamplingTime']
+    sampleOffsetTime = session_schema['sampleOffsetTime']
+    
+    # Collect all poke onset and offset events
+    odour_poke_events_df = get_odour_poke_df(odour_poke_df, odour_poke_off_df)
+
+    # Get sequence boundaries
+    initiation_sequence_indices = events_df.index[events_df['InitiationSequence'] == True].tolist()
+    end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+    
+    # Track abortion positions
+    abortion_positions = {}  # position -> count
+    max_sequence_length = 0
+    total_aborted_sequences = 0
+    
+    print(f"ABORTION POSITION ANALYSIS:")
+    print(f"  Found {len(initiation_sequence_indices)} InitiationSequence events")
+    print(f"  Found {len(end_initiation_indices)} EndInitiation events")
+    
+    # Analyze each initiated sequence
+    for seq_idx in range(len(initiation_sequence_indices)):
+        init_idx = initiation_sequence_indices[seq_idx]
+        
+        # Find the corresponding EndInitiation for this sequence
+        corresponding_end_idx = None
+        for end_idx in end_initiation_indices:
+            if end_idx > init_idx:
+                corresponding_end_idx = end_idx
+                break
+        
+        if corresponding_end_idx is None:
+            # No EndInitiation found - sequence extends to end of recording
+            sequence_end = len(events_df)
+        else:
+            sequence_end = corresponding_end_idx
+        
+        # Check if this sequence was initiated (first odour is valid)
+        sequence_initiated = False
+        first_odour_idx = None
+        
+        # Look for first odour after InitiationSequence
+        for i in range(init_idx + 1, sequence_end):
+            if events_df.loc[i, olf_valve_cols].any():
+                try:
+                    valid_odour = is_odour_valid(i, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime)
+                    if valid_odour:
+                        sequence_initiated = True
+                        first_odour_idx = i
+                        break
+                except:
+                    pass
+                break  # Stop at first odour regardless of validity
+        
+        if not sequence_initiated:
+            continue  # Skip non-initiated sequences
+        
+        # Check if sequence was completed (has r1/r2 valve before EndInitiation)
+        sequence_completed = False
+        if corresponding_end_idx is not None:
+            # Look backwards from EndInitiation to find most recent valve activation
+            for i in range(corresponding_end_idx - 1, init_idx, -1):
+                if events_df.loc[i, 'r1_olf_valve'] or events_df.loc[i, 'r2_olf_valve']:
+                    sequence_completed = True
+                    break
+                elif events_df.loc[i, ['odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']].any():
+                    # Found non-reward odour before reward odour
+                    break
+        
+        # If sequence was initiated but not completed, it's aborted
+        if sequence_initiated and not sequence_completed:
+            # Count odour positions in this aborted sequence
+            odour_position = 0
+            last_valid_position = 0
+            
+            for i in range(first_odour_idx, sequence_end):
+                if events_df.loc[i, olf_valve_cols].any():
+                    odour_position += 1
+                    
+                    # Check if this odour is valid
+                    try:
+                        valid_odour = is_odour_valid(i, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime)
+                        if valid_odour:
+                            last_valid_position = odour_position
+                    except:
+                        # If validation fails, don't count as valid
+                        pass
+            
+            # Record the abortion position (last valid odour position reached)
+            if last_valid_position > 0:
+                abortion_positions[last_valid_position] = abortion_positions.get(last_valid_position, 0) + 1
+                total_aborted_sequences += 1
+                max_sequence_length = max(max_sequence_length, last_valid_position)
+                
+                # Debug output for first few aborted sequences
+                if total_aborted_sequences <= 5:
+                    print(f"  Aborted sequence {total_aborted_sequences}: Reached position {last_valid_position}")
+    
+    # Calculate abortion percentages
+    abortion_percentages = {}
+    if total_aborted_sequences > 0:
+        for position, count in abortion_positions.items():
+            abortion_percentages[position] = (count / total_aborted_sequences) * 100
+    
+    print(f"  Total aborted sequences analyzed: {total_aborted_sequences}")
+    print(f"  Maximum sequence length reached: {max_sequence_length}")
+    
+    # Debug output
+    for position in sorted(abortion_positions.keys()):
+        count = abortion_positions[position]
+        percentage = abortion_percentages[position]
+        print(f"  Position {position}: {count} abortions ({percentage:.1f}%)")
+    
+    return {
+        'abortion_positions': abortion_positions,
+        'abortion_percentages': abortion_percentages,
+        'total_aborted_sequences': total_aborted_sequences,
+        'max_sequence_length': max_sequence_length
     }
 
 def is_odour_valid(idx, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime):
