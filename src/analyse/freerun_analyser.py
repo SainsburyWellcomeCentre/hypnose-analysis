@@ -10,7 +10,8 @@ from collections import defaultdict
 
 from src import utils
 from src.analysis import RewardAnalyser, get_decision_accuracy, get_response_time, \
-    get_decision_sensitivity, get_false_alarm, get_sequence_completion, get_false_alarm_bias
+    get_decision_sensitivity, get_false_alarm, get_sequence_completion, get_false_alarm_bias, \
+    get_sequence_summary
 from src.processing.detect_stage import detect_stage
 from src.processing.detect_settings import detect_settings
 
@@ -119,6 +120,11 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_early_rew_sampling = 0    
     all_complete_sequences = 0
     
+    # sequence summary variables (total counts)
+    all_total_initiated_sequences = 0
+    all_total_completed_sequences = 0
+    all_total_aborted_sequences = 0
+    
     # sensitivity varibles 
     all_r1_respond = 0
     all_r1_total = 0
@@ -184,6 +190,16 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
 
         # Calculate sequence completion 
         sequence_completion = get_sequence_completion(session_dir)
+
+        # Calculate sequence summary (total initiated, completed, aborted)
+        sequence_summary = None
+        try:
+            # Only calculate sequence summary for stages >= 9 (freerun stages)
+            if stage and int(stage) >= 9:
+                sequence_summary = get_sequence_summary(session_dir)
+        except Exception as e:
+            print(f"Error calculating sequence summary: {e}")
+            sequence_summary = None
 
         # Calculate decision sensitivity
         sensitivity = get_decision_sensitivity(session_dir)
@@ -495,6 +511,28 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'completion_ratio': 0,
                 'commitment_ratio': 0,
                 'early_rew_sampling_ratio': 0
+            })
+            
+        # Add sequence summary data (total counts)
+        if sequence_summary:
+            all_total_initiated_sequences += sequence_summary['total_initiated_sequences']
+            all_total_completed_sequences += sequence_summary['total_completed_sequences']
+            all_total_aborted_sequences += sequence_summary['total_aborted_sequences']
+            
+            session_info.update({
+                'total_initiated_sequences': sequence_summary['total_initiated_sequences'],
+                'total_completed_sequences': sequence_summary['total_completed_sequences'],
+                'total_aborted_sequences': sequence_summary['total_aborted_sequences'],
+                'sequence_completion_rate': sequence_summary['sequence_completion_rate'],
+                'sequence_abort_rate': sequence_summary['sequence_abort_rate']
+            })
+        else:
+            session_info.update({
+                'total_initiated_sequences': 0,
+                'total_completed_sequences': 0,
+                'total_aborted_sequences': 0,
+                'sequence_completion_rate': 0,
+                'sequence_abort_rate': 0
             })    
         
         # Add sensitivity data
@@ -559,6 +597,13 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
             print(f"  Sequence completion ratio: {sequence_completion['completion_ratio']:.1f}%")
             print(f"  Sequence commitment ratio: {sequence_completion['commitment_ratio']:.1f}%")
             print(f"  Early reward sampling ratio: {sequence_completion['early_rew_sampling_ratio']:.1f}%")
+        
+        if sequence_summary:
+            print(f"  Total initiated sequences: {sequence_summary['total_initiated_sequences']}")
+            print(f"  Total completed sequences: {sequence_summary['total_completed_sequences']}")
+            print(f"  Total aborted sequences: {sequence_summary['total_aborted_sequences']}")
+            print(f"  Sequence completion rate: {sequence_summary['sequence_completion_rate']:.1f}%")
+            print(f"  Sequence abort rate: {sequence_summary['sequence_abort_rate']:.1f}%")
         
         if sensitivity and all(value != 0 for value in sensitivity.values()):
             print(f"  Sensitivity: A={sensitivity['r1_sensitivity']:.1f}% ({sensitivity['r1_respond']}/{sensitivity['r1_total']}), "
@@ -699,6 +744,11 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         print(f"Overall sequence completion ratio: {overall_completion_ratio:.1f}%")
         print(f"Overall sequence commitment ratio: {overall_commitment_ratio:.1f}%")
         print(f"Overall early reward sampling ratio: {overall_early_rew_sampling_ratio:.1f}%")
+        print(f"Total initiated sequences: {all_total_initiated_sequences}")
+        print(f"Total completed sequences: {all_total_completed_sequences}")
+        print(f"Total aborted sequences: {all_total_aborted_sequences}")
+        print(f"Overall sequence completion rate: {all_total_completed_sequences / all_total_initiated_sequences * 100 if all_total_initiated_sequences > 0 else 0:.1f}%")
+        print(f"Overall sequence abort rate: {all_total_aborted_sequences / all_total_initiated_sequences * 100 if all_total_initiated_sequences > 0 else 0:.1f}%")
     if stage >= 8.2 and stage < 9:
         print(f"Sensitivity: A={all_r1_sensitivity:.1f}% ({all_r1_respond}/{all_r1_total}), B={all_r2_sensitivity:.1f}% ({all_r2_respond}/{all_r2_total})")
         print(f"Overall sensitivity: {all_overall_sensitivity:.1f}%")
@@ -743,6 +793,11 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'overall_completion_ratio': overall_completion_ratio, 
         'overall_commitment_ratio': overall_commitment_ratio, 
         'overall_early_rew_sampling_ratio': overall_early_rew_sampling_ratio,
+        'all_total_initiated_sequences': all_total_initiated_sequences,
+        'all_total_completed_sequences': all_total_completed_sequences, 
+        'all_total_aborted_sequences': all_total_aborted_sequences,
+        'overall_sequence_completion_rate': all_total_completed_sequences / all_total_initiated_sequences * 100 if all_total_initiated_sequences > 0 else 0,
+        'overall_sequence_abort_rate': all_total_aborted_sequences / all_total_initiated_sequences * 100 if all_total_initiated_sequences > 0 else 0,
         'all_odour_interval_pokes': all_odour_interval_pokes,
         'all_odour_interval_trials': all_odour_interval_trials,
         'all_odour_interval_false_alarm': all_odour_interval_false_alarm,
@@ -779,7 +834,7 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-88_date-20250723/")
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-83_date-20250718")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-93_date-20250730")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-95_date-20250804")
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-90_date-20250728/")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
