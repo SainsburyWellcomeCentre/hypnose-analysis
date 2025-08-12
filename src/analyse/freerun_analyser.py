@@ -11,7 +11,7 @@ from collections import defaultdict
 from src import utils
 from src.analysis import RewardAnalyser, get_decision_accuracy, get_response_time, \
     get_decision_sensitivity, get_false_alarm, get_sequence_completion, get_false_alarm_bias, \
-    get_sequence_summary, get_abortion_positions, get_false_alarm_response_time
+    get_sequence_summary, get_abortion_positions, get_false_alarm_response_time, get_abortion_position_response_time
 from src.processing.detect_stage import detect_stage
 from src.processing.detect_settings import detect_settings
 
@@ -121,6 +121,18 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_F_false_alarm_rt = []
     all_G_false_alarm_rt = []
 
+    # abortion position response time variables
+    all_position_1_abortion_rt = []
+    all_position_2_abortion_rt = []
+    all_position_3_abortion_rt = []
+    all_position_4_abortion_rt = []
+    all_position_5_abortion_rt = []
+    all_position_6_abortion_rt = []
+    all_position_7_abortion_rt = []
+    all_position_8_abortion_rt = []
+    all_position_9_abortion_rt = []
+    all_position_10_abortion_rt = []
+
     # sequence completion variables 
     all_initiated_sequences = 0
     all_terminated_sequences = 0
@@ -224,6 +236,16 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         except Exception as e:
             print(f"Error calculating abortion positions: {e}")
             abortion_positions = None
+
+        # Calculate abortion position response time
+        abortion_position_response_time = None
+        try:
+            # Only calculate abortion position response time for stages >= 9 (freerun stages)
+            if stage and int(stage) >= 9:
+                abortion_position_response_time = get_abortion_position_response_time(session_dir)
+        except Exception as e:
+            print(f"Error calculating abortion position response time: {e}")
+            abortion_position_response_time = None
 
         # Calculate decision sensitivity
         sensitivity = get_decision_sensitivity(session_dir)
@@ -536,6 +558,53 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
                 'overall_avg_false_alarm_rt': np.nan
             })
             
+        # Process abortion position response time data
+        if abortion_position_response_time:
+            for position in range(1, 11):  # Support positions 1-10
+                position_rt_key = f'position_{position}_abortion_rt'
+                if position_rt_key in abortion_position_response_time:
+                    if position == 1:
+                        all_position_1_abortion_rt.extend(abortion_position_response_time[position_rt_key])
+                    elif position == 2:
+                        all_position_2_abortion_rt.extend(abortion_position_response_time[position_rt_key])
+                    elif position == 3:
+                        all_position_3_abortion_rt.extend(abortion_position_response_time[position_rt_key])
+                    elif position == 4:
+                        all_position_4_abortion_rt.extend(abortion_position_response_time[position_rt_key])
+                    elif position == 5:
+                        all_position_5_abortion_rt.extend(abortion_position_response_time[position_rt_key])
+                    elif position == 6:
+                        all_position_6_abortion_rt.extend(abortion_position_response_time[position_rt_key])
+                    elif position == 7:
+                        all_position_7_abortion_rt.extend(abortion_position_response_time[position_rt_key])
+                    elif position == 8:
+                        all_position_8_abortion_rt.extend(abortion_position_response_time[position_rt_key])
+                    elif position == 9:
+                        all_position_9_abortion_rt.extend(abortion_position_response_time[position_rt_key])
+                    elif position == 10:
+                        all_position_10_abortion_rt.extend(abortion_position_response_time[position_rt_key])
+            
+            # Add session info for abortion position RT
+            session_update = {}
+            for position in range(1, 11):
+                avg_key = f'position_{position}_avg_abortion_rt'
+                if avg_key in abortion_position_response_time:
+                    session_update[avg_key] = abortion_position_response_time[avg_key]
+                else:
+                    session_update[avg_key] = np.nan
+            
+            session_update['overall_avg_abortion_rt'] = abortion_position_response_time.get('overall_avg_abortion_rt', np.nan)
+            session_update['max_abortion_position'] = abortion_position_response_time.get('max_position', 0)
+            session_info.update(session_update)
+        else:
+            # Add default NaN values for abortion position RT
+            session_update = {}
+            for position in range(1, 11):
+                session_update[f'position_{position}_avg_abortion_rt'] = np.nan
+            session_update['overall_avg_abortion_rt'] = np.nan
+            session_update['max_abortion_position'] = 0
+            session_info.update(session_update)
+            
         # Add sequence completion data
         if sequence_completion:
             all_initiated_sequences += sequence_completion['initiated_sequences']
@@ -721,6 +790,24 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     all_combined_false_alarm_rt = all_C_false_alarm_rt + all_D_false_alarm_rt + all_E_false_alarm_rt + all_F_false_alarm_rt + all_G_false_alarm_rt
     all_overall_avg_false_alarm_rt = np.mean(all_combined_false_alarm_rt) if all_combined_false_alarm_rt else 0
 
+    # Calculate overall abortion position response times
+    all_position_1_avg_abortion_rt = np.mean(all_position_1_abortion_rt) if all_position_1_abortion_rt else 0
+    all_position_2_avg_abortion_rt = np.mean(all_position_2_abortion_rt) if all_position_2_abortion_rt else 0
+    all_position_3_avg_abortion_rt = np.mean(all_position_3_abortion_rt) if all_position_3_abortion_rt else 0
+    all_position_4_avg_abortion_rt = np.mean(all_position_4_abortion_rt) if all_position_4_abortion_rt else 0
+    all_position_5_avg_abortion_rt = np.mean(all_position_5_abortion_rt) if all_position_5_abortion_rt else 0
+    all_position_6_avg_abortion_rt = np.mean(all_position_6_abortion_rt) if all_position_6_abortion_rt else 0
+    all_position_7_avg_abortion_rt = np.mean(all_position_7_abortion_rt) if all_position_7_abortion_rt else 0
+    all_position_8_avg_abortion_rt = np.mean(all_position_8_abortion_rt) if all_position_8_abortion_rt else 0
+    all_position_9_avg_abortion_rt = np.mean(all_position_9_abortion_rt) if all_position_9_abortion_rt else 0
+    all_position_10_avg_abortion_rt = np.mean(all_position_10_abortion_rt) if all_position_10_abortion_rt else 0
+    
+    # Calculate overall average abortion position response time across all positions
+    all_combined_abortion_rt = (all_position_1_abortion_rt + all_position_2_abortion_rt + all_position_3_abortion_rt + 
+                               all_position_4_abortion_rt + all_position_5_abortion_rt + all_position_6_abortion_rt +
+                               all_position_7_abortion_rt + all_position_8_abortion_rt + all_position_9_abortion_rt + all_position_10_abortion_rt)
+    all_overall_avg_abortion_rt = np.mean(all_combined_abortion_rt) if all_combined_abortion_rt else 0
+
     # Calculate overall false alarm 
     all_C_pokes = np.sum(all_C_pokes)
     all_D_pokes = np.sum(all_D_pokes)
@@ -825,6 +912,36 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
     if stage > 7:
         print(f"False alarm response time: C={all_C_avg_false_alarm_rt:.1f} s, D={all_D_avg_false_alarm_rt:.1f} s, E={all_E_avg_false_alarm_rt:.1f} s, F={all_F_avg_false_alarm_rt:.1f} s, G={all_G_avg_false_alarm_rt:.1f} s")
         print(f"Overall false alarm response time: {all_overall_avg_false_alarm_rt:.1f} s")
+    if stage >= 9:
+        # Only print positions that have data
+        abortion_rt_parts = []
+        if all_position_1_avg_abortion_rt > 0:
+            abortion_rt_parts.append(f"Pos1={all_position_1_avg_abortion_rt:.1f} s")
+        if all_position_2_avg_abortion_rt > 0:
+            abortion_rt_parts.append(f"Pos2={all_position_2_avg_abortion_rt:.1f} s")
+        if all_position_3_avg_abortion_rt > 0:
+            abortion_rt_parts.append(f"Pos3={all_position_3_avg_abortion_rt:.1f} s")
+        if all_position_4_avg_abortion_rt > 0:
+            abortion_rt_parts.append(f"Pos4={all_position_4_avg_abortion_rt:.1f} s")
+        if all_position_5_avg_abortion_rt > 0:
+            abortion_rt_parts.append(f"Pos5={all_position_5_avg_abortion_rt:.1f} s")
+        if all_position_6_avg_abortion_rt > 0:
+            abortion_rt_parts.append(f"Pos6={all_position_6_avg_abortion_rt:.1f} s")
+        if all_position_7_avg_abortion_rt > 0:
+            abortion_rt_parts.append(f"Pos7={all_position_7_avg_abortion_rt:.1f} s")
+        if all_position_8_avg_abortion_rt > 0:
+            abortion_rt_parts.append(f"Pos8={all_position_8_avg_abortion_rt:.1f} s")
+        if all_position_9_avg_abortion_rt > 0:
+            abortion_rt_parts.append(f"Pos9={all_position_9_avg_abortion_rt:.1f} s")
+        if all_position_10_avg_abortion_rt > 0:
+            abortion_rt_parts.append(f"Pos10={all_position_10_avg_abortion_rt:.1f} s")
+        
+        if abortion_rt_parts:
+            print(f"Abortion position response time: {', '.join(abortion_rt_parts)}")
+            print(f"Overall abortion position response time: {all_overall_avg_abortion_rt:.1f} s")
+        else:
+            print("Abortion position response time: No data available")
+            print("Overall abortion position response time: 0.0 s")
     if stage > 7:
         print(f"False alarm rate: C={all_C_false_alarm:.1f}%, D={all_D_false_alarm:.1f}%, E={all_E_false_alarm:.1f}%, F={all_F_false_alarm:.1f}%, G={all_G_false_alarm:.1f}%")
         print(f"Overall false alarm rate: {all_overall_false_alarm:.1f}%")
@@ -890,6 +1007,17 @@ def analyze_session_folder(session_folder, reward_a=8.0, reward_b=8.0, verbose=F
         'all_F_avg_false_alarm_rt': all_F_avg_false_alarm_rt,
         'all_G_avg_false_alarm_rt': all_G_avg_false_alarm_rt,
         'all_overall_avg_false_alarm_rt': all_overall_avg_false_alarm_rt,
+        'all_position_1_avg_abortion_rt': all_position_1_avg_abortion_rt,
+        'all_position_2_avg_abortion_rt': all_position_2_avg_abortion_rt,
+        'all_position_3_avg_abortion_rt': all_position_3_avg_abortion_rt,
+        'all_position_4_avg_abortion_rt': all_position_4_avg_abortion_rt,
+        'all_position_5_avg_abortion_rt': all_position_5_avg_abortion_rt,
+        'all_position_6_avg_abortion_rt': all_position_6_avg_abortion_rt,
+        'all_position_7_avg_abortion_rt': all_position_7_avg_abortion_rt,
+        'all_position_8_avg_abortion_rt': all_position_8_avg_abortion_rt,
+        'all_position_9_avg_abortion_rt': all_position_9_avg_abortion_rt,
+        'all_position_10_avg_abortion_rt': all_position_10_avg_abortion_rt,
+        'all_overall_avg_abortion_rt': all_overall_avg_abortion_rt,
         'avg_response_time': avg_response_time, 
         'all_trial_id': all_trial_id,
         'all_C_false_alarm': all_C_false_alarm,
@@ -945,7 +1073,7 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-88_date-20250723/")
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-83_date-20250718")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-95_date-20250804")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-97_date-20250805")
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-90_date-20250728/")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")

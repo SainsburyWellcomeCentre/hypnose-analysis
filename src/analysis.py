@@ -564,6 +564,7 @@ class RewardAnalyser:
                             session_data['sequence_completion'] = calculate_overall_sequence_completion(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
                             session_data['sequence_summary'] = calculate_sequence_summary(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
                             session_data['abortion_positions'] = calculate_abortion_positions(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
+                            session_data['abortion_position_response_time'] = calculate_abortion_position_response_time(all_events_df, odour_poke_df, odour_poke_off_df, session_schema)
                             
                         # Calculate decision sensitivity (freerun)
                         if stage >= 8.2 and stage < 9:  # TODO: update for later sequence stages
@@ -1200,6 +1201,53 @@ class RewardAnalyser:
             'G_avg_false_alarm_rt': 0,
             'overall_avg_false_alarm_rt': 0
         })
+
+    @staticmethod
+    def get_abortion_position_response_time(data_path):
+        """
+        Static method to calculate abortion position response time for each position in a single session.
+        
+        Parameters:
+        -----------
+        data_path : str or Path
+            Path to session data directory
+            
+        Returns:
+        --------
+        dict
+            Dictionary with abortion position response time metrics or None if calculation fails
+        """
+        root = Path(data_path)
+        
+        # Process the given directory directly
+        print(f"Processing abortion position response time for: {root}")
+        
+        # Create a temporary instance to access the _get_session_data method
+        temp_instance = RewardAnalyser.__new__(RewardAnalyser)
+        session_data = temp_instance._get_session_data(root)
+        
+        # Get the abortion position response time data
+        abortion_rt_data = session_data.get('abortion_position_response_time', {})
+        
+        # Create default empty structure with up to 10 positions
+        default_data = {'max_position': 0, 'overall_avg_abortion_rt': 0}
+        for position in range(1, 11):  # Support up to position 10
+            default_data[f'position_{position}_abortion_rt'] = []
+            default_data[f'position_{position}_avg_abortion_rt'] = 0
+        
+        # Return the data or default empty structure
+        if abortion_rt_data:
+            # Fill in any missing positions with empty data
+            for position in range(1, 11):
+                rt_key = f'position_{position}_abortion_rt'
+                avg_key = f'position_{position}_avg_abortion_rt'
+                if rt_key not in abortion_rt_data:
+                    abortion_rt_data[rt_key] = []
+                if avg_key not in abortion_rt_data:
+                    abortion_rt_data[avg_key] = 0
+            return abortion_rt_data
+        else:
+            return default_data
 
     @staticmethod
     def get_sequence_completion(data_path):
@@ -2890,6 +2938,175 @@ def calculate_abortion_positions(events_df, odour_poke_df, odour_poke_off_df, se
         'max_sequence_length': max_sequence_length
     }
 
+def calculate_abortion_position_response_time(events_df, odour_poke_df, odour_poke_off_df, session_schema):
+    """
+    Calculate response time for abortion positions using EndInitiation-based trial detection.
+    
+    Logic:
+    1. Use EndInitiation events to define trial boundaries (like false alarm response time)
+    2. Work backwards from EndInitiation to determine if trial was aborted
+    3. Count valid odour positions to determine abortion position
+    4. Find the exact abortion moment (last valid odour poke offset)
+    5. Measure time from abortion moment to next reward port entry
+    6. Ensure no reward was delivered (genuine false alarm)
+    
+    This measures the reaction time from sequence abandonment to reward-seeking behavior.
+    
+    Parameters:
+    -----------
+    events_df : pandas.DataFrame
+        DataFrame containing trial events with timing information
+    odour_poke_df : pandas.DataFrame
+        DataFrame containing odour poke onset events
+    odour_poke_off_df : pandas.DataFrame
+        DataFrame containing odour poke offset events
+    session_schema : dict
+        Session configuration containing timing parameters
+        
+    Returns:
+    --------
+    dict
+        Dictionary containing abortion position response times:
+        - position_N_abortion_rt: List of response times for position N abortions
+        - position_N_avg_abortion_rt: Average response time for position N abortions
+        - overall_avg_abortion_rt: Overall average abortion response time across all positions
+        - max_position: Maximum abortion position found
+    """
+    # Define useful variables
+    olf_valve_cols = ['r1_olf_valve', 'r2_olf_valve', 'odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']
+    rew_valve_cols = ['r1_olf_valve', 'r2_olf_valve']
+    minimumSamplingTime = session_schema['minimumSamplingTime']
+    sampleOffsetTime = session_schema['sampleOffsetTime']
+    
+    # Collect all poke onset and offset events
+    odour_poke_events_df = get_odour_poke_df(odour_poke_df, odour_poke_off_df)
+
+    # Track response times by abortion position
+    abortion_position_rt = {}  # position -> list of response times
+    max_position = 0
+    
+    # Find all trial end points
+    end_initiation_indices = events_df.index[events_df['EndInitiation'] == True].tolist()
+
+    # Process each trial
+    for e in range(len(end_initiation_indices)):
+        end_idx = end_initiation_indices[e]
+        if e == len(end_initiation_indices) - 1:
+            next_end_idx = len(events_df)
+        else:
+            next_end_idx = end_initiation_indices[e + 1]
+
+        if e == 0:
+            prev_end_idx = 0
+        else:
+            prev_end_idx = end_initiation_indices[e - 1]
+        
+        # Step 1: Determine if this trial was aborted by checking the last valve activation
+        trial_type = None
+        last_valve_idx = None
+        for i in range(end_idx - 1, prev_end_idx - 1, -1):
+            if events_df.loc[i, 'r1_olf_valve']:
+                trial_type = 'r1'
+                last_valve_idx = i
+                break
+            elif events_df.loc[i, 'r2_olf_valve']:
+                trial_type = 'r2'
+                last_valve_idx = i
+                break
+            elif events_df.loc[i, ['odourC_olf_valve', 'odourD_olf_valve', 'odourE_olf_valve', 'odourF_olf_valve', 'odourG_olf_valve']].any():
+                trial_type = 'nonR'
+                last_valve_idx = i
+                break
+        
+        # Only process aborted trials (ending with non-rewarded odours)
+        if trial_type != 'nonR' or last_valve_idx is None:
+            continue
+            
+        # Step 2: Count valid odour positions to determine abortion position
+        odour_position = 0
+        last_valid_position = 0
+        last_valid_odour_idx = None
+        
+        for i in range(prev_end_idx, end_idx):
+            if events_df.loc[i, olf_valve_cols].any():
+                odour_position += 1
+                
+                # Check if this odour is valid
+                try:
+                    valid_odour = is_odour_valid(i, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime)
+                    if valid_odour:
+                        last_valid_position = odour_position
+                        last_valid_odour_idx = i
+                except:
+                    # If validation fails, don't count as valid
+                    pass
+        
+        # Step 3: Find the exact abortion moment (last valid odour poke offset)
+        abortion_time = None
+        if last_valid_position > 0 and last_valid_odour_idx is not None:
+            # Find odour poke exit time for the last valid odour
+            for j in range(last_valid_odour_idx, end_idx + 1):
+                if j < len(events_df) and events_df.loc[j, 'odour_poke_off']:
+                    abortion_time = events_df.loc[j, 'timestamp']
+                    break
+        
+        # Step 4: Find the next reward port entry after abortion
+        if abortion_time is not None and last_valid_position > 0:
+            reward_poke_time = None
+            
+            # Look for reward poke after abortion time
+            for j in range(last_valid_odour_idx, min(next_end_idx, len(events_df))):
+                if (events_df.loc[j, 'timestamp'] > abortion_time and 
+                    (events_df.loc[j, 'r1_poke'] or events_df.loc[j, 'r2_poke'])):
+                    reward_poke_time = events_df.loc[j, 'timestamp']
+                    break
+            
+            # Step 5: Calculate response time if reward poke was found
+            if reward_poke_time is not None:
+                # Step 6: Ensure no reward was delivered (genuine false alarm)
+                has_reward = False
+                for j in range(last_valid_odour_idx, min(next_end_idx, len(events_df))):
+                    if (events_df.loc[j, 'PulseSupplyPort1'] or events_df.loc[j, 'PulseSupplyPort2']):
+                        has_reward = True
+                        break
+                
+                # Only record response time if no reward was delivered
+                if not has_reward:
+                    response_time = (reward_poke_time - abortion_time).total_seconds()
+                    
+                    # Store response time for this abortion position
+                    if last_valid_position not in abortion_position_rt:
+                        abortion_position_rt[last_valid_position] = []
+                    abortion_position_rt[last_valid_position].append(response_time)
+                    max_position = max(max_position, last_valid_position)
+    
+    # Calculate averages for each position and prepare return data
+    result = {
+        'max_position': max_position,
+        'overall_avg_abortion_rt': 0
+    }
+    
+    all_abortion_rt = []
+    
+    # Add data for each position found
+    for position in range(1, max_position + 1):
+        position_rt_key = f'position_{position}_abortion_rt'
+        position_avg_key = f'position_{position}_avg_abortion_rt'
+        
+        if position in abortion_position_rt:
+            position_rts = abortion_position_rt[position]
+            result[position_rt_key] = position_rts
+            result[position_avg_key] = np.mean(position_rts)
+            all_abortion_rt.extend(position_rts)
+        else:
+            result[position_rt_key] = []
+            result[position_avg_key] = 0
+    
+    # Calculate overall average
+    result['overall_avg_abortion_rt'] = np.mean(all_abortion_rt) if all_abortion_rt else 0
+    
+    return result
+
 def is_odour_valid(idx, events_df, odour_poke_events_df, sampleOffsetTime, minimumSamplingTime):
     tolerance = 0.01 # s
 
@@ -2946,3 +3163,4 @@ def get_odour_poke_df(odour_poke_df, odour_poke_off_df):
 
 # Function aliases for easier importing
 get_false_alarm_response_time = RewardAnalyser.get_false_alarm_response_time
+get_abortion_position_response_time = RewardAnalyser.get_abortion_position_response_time
