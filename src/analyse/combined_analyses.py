@@ -36,16 +36,17 @@ def calculate_combined_session_accuracy(subject_path, stage=None, sessions=None)
         # Apply filtering rules
         session_id_int = int(session_id)
         session_allowed = (sessions is None or session_id_int in sessions)
-        if stage is None:
-            stage_allowed = True
-        elif isinstance(stage, int):
-            stage_allowed = int(detected_stage) == stage
-        else:
-            stage_allowed = detected_stage == stage
+        if session_allowed:
+            if stage is None:
+                stage_allowed = True
+            elif isinstance(stage, int):
+                stage_allowed = int(detected_stage) == stage
+            else:
+                stage_allowed = detected_stage == stage
 
-        if session_allowed and stage_allowed:
-            key = (session_id, session_date)
-            grouped_sessions.setdefault(key, []).append(session_path)
+            if stage_allowed:
+                key = (session_id, session_date)
+                grouped_sessions.setdefault(key, []).append(session_path)
     
     # Create a list to store combined results
     results = []
@@ -191,16 +192,17 @@ def calculate_combined_session_sensitivity(subject_path, stage=None, sessions=No
         # Apply filtering rules
         session_id_int = int(session_id)
         session_allowed = (sessions is None or session_id_int in sessions)
-        if stage is None:
-            stage_allowed = True
-        elif isinstance(stage, int):
-            stage_allowed = int(detected_stage) == stage
-        else:
-            stage_allowed = detected_stage == stage
+        if session_allowed:
+            if stage is None:
+                stage_allowed = True
+            elif isinstance(stage, int):
+                stage_allowed = int(detected_stage) == stage
+            else:
+                stage_allowed = detected_stage == stage
 
-        if session_allowed and stage_allowed:
-            key = (session_id, session_date)
-            grouped_sessions.setdefault(key, []).append(session_path)
+            if stage_allowed:
+                key = (session_id, session_date)
+                grouped_sessions.setdefault(key, []).append(session_path)
     
     # Create a list to store combined results
     results = []
@@ -346,16 +348,17 @@ def calculate_combined_session_false_alarms(subject_path, stage=None, sessions=N
         # Apply filtering rules
         session_id_int = int(session_id)
         session_allowed = (sessions is None or session_id_int in sessions)
-        if stage is None:
-            stage_allowed = True
-        elif isinstance(stage, int):
-            stage_allowed = int(detected_stage) == stage
-        else:
-            stage_allowed = detected_stage == stage
+        if session_allowed:
+            if stage is None:
+                stage_allowed = True
+            elif isinstance(stage, int):
+                stage_allowed = int(detected_stage) == stage
+            else:
+                stage_allowed = detected_stage == stage
 
-        if session_allowed and stage_allowed:
-            key = (session_id, session_date)
-            grouped_sessions.setdefault(key, []).append(session_path)
+            if stage_allowed:
+                key = (session_id, session_date)
+                grouped_sessions.setdefault(key, []).append(session_path)
     
     # Create a list to store combined results
     results = []
@@ -561,16 +564,17 @@ def calculate_combined_session_false_alarm_bias(subject_path, stage=None, sessio
         # Apply filtering rules
         session_id_int = int(session_id)
         session_allowed = (sessions is None or session_id_int in sessions)
-        if stage is None:
-            stage_allowed = True
-        elif isinstance(stage, int):
-            stage_allowed = int(detected_stage) == stage
-        else:
-            stage_allowed = detected_stage == stage
+        if session_allowed:
+            if stage is None:
+                stage_allowed = True
+            elif isinstance(stage, int):
+                stage_allowed = int(detected_stage) == stage
+            else:
+                stage_allowed = detected_stage == stage
 
-        if session_allowed and stage_allowed:
-            key = (session_id, session_date)
-            grouped_sessions.setdefault(key, []).append(session_path)
+            if stage_allowed:
+                key = (session_id, session_date)
+                grouped_sessions.setdefault(key, []).append(session_path)
     
     # Create a list to store combined results
     results = []
@@ -874,16 +878,17 @@ def calculate_combined_session_completion_commitment(subject_path, stage=None, s
         # Apply filtering rules
         session_id_int = int(session_id)
         session_allowed = (sessions is None or session_id_int in sessions)
-        if stage is None:
-            stage_allowed = True
-        elif isinstance(stage, int):
-            stage_allowed = int(detected_stage) == stage
-        else:
-            stage_allowed = detected_stage == stage
+        if session_allowed:
+            if stage is None:
+                stage_allowed = True
+            elif isinstance(stage, int):
+                stage_allowed = int(detected_stage) == stage
+            else:
+                stage_allowed = detected_stage == stage
 
-        if session_allowed and stage_allowed:
-            key = (session_id, session_date)
-            grouped_sessions.setdefault(key, []).append(session_path)
+            if stage_allowed:
+                key = (session_id, session_date)
+                grouped_sessions.setdefault(key, []).append(session_path)
     
     # Create a list to store combined results
     results = []

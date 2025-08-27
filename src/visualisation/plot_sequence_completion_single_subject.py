@@ -216,7 +216,7 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description="Calculate and plot sequence completion data across sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")
-    parser.add_argument("--sessions", default=np.arange(76, 94), help="List of session IDs (optional)") 
+    parser.add_argument("--sessions", default=np.arange(80, 94), help="List of session IDs (optional)") 
     parser.add_argument("--stage", "--s", default=12, help="Stage to be analysed (optional)")
     parser.add_argument("--output", "-o", help="Path to save CSV output (optional)")
     parser.add_argument("--plot", "-p", help="Path to save plot image (optional)")

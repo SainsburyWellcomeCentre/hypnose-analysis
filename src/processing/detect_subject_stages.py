@@ -83,9 +83,9 @@ def main(subject_folder, output_file=None):
 
 if __name__ == "__main__":
     if len(sys.argv) == 1:
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/")
         sys.argv.append("--output")
-        sys.argv.append("/Volumes/harris/Athina/hypnose/analysis/sub-025_id-076/stages.csv")
+        sys.argv.append("/Volumes/harris/Athina/hypnose/analysis/sub-020_id-072/stages.csv")
 
     parser = argparse.ArgumentParser(description="Detect training stage of behavioral sessions")
     parser.add_argument("subject_folder", help="Path to the subject's folder containing session data")

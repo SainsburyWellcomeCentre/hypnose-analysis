@@ -779,7 +779,7 @@ if __name__ == "__main__":
     if len(sys.argv) == 1:
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-88_date-20250723/")
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-83_date-20250718")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-93_date-20250730")
+        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-026_id-077/ses-79_date-20250714")
         # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-90_date-20250728/")
 
     parser = argparse.ArgumentParser(description="Analyze all behavioral sessions in a folder")
