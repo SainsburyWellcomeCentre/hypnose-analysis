@@ -1,0 +1,6 @@
+numpy
+pandas
+matplotlib
+ipympl
+harp-python
+swc-aeon

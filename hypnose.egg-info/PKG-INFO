@@ -1,0 +1,9 @@
+Metadata-Version: 2.1
+Name: hypnose
+Version: 0.1.0
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: matplotlib
+Requires-Dist: ipympl
+Requires-Dist: harp-python
+Requires-Dist: swc-aeon
