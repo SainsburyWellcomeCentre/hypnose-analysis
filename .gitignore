@@ -10,3 +10,7 @@ __pycache__/
 # Virtual environments
 venv/
 .env/
+
+# History files
+.history/
+
