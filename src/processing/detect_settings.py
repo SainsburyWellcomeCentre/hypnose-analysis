@@ -34,6 +34,7 @@ def detect_settings(root):
             
             minimumSamplingTime = sequence_metadata['sequences'][0][0]['rewardConditions'][0]['definition'][0][0]['minimumSamplingTime']
             completionRequiresEngagement = sequence_metadata['sequences'][0][0]['completionRequiresEngagement']
+            responseTime = sequence_metadata['sequences'][0][0].get('responseTime') 
         except:
             try:
                 schema_filename = metadata.metadata.initialSequence.split("/")[-1]
@@ -42,12 +43,14 @@ def detect_settings(root):
                     
                     minimumSamplingTime = sequence_schema['sequences'][0][0]['rewardConditions'][0]['definition'][0][0]['minimumSamplingTime']
                     completionRequiresEngagement = sequence_schema['sequences'][0][0]['completionRequiresEngagement']
+                    responseTime = sequence_schema['sequences'][0][0].get('responseTime') 
             except Exception as e:
                 print(f"Error loading session schema: {e}")
     else:  
         try:
             minimumSamplingTime = metadata.sequences[0][0]['rewardConditions'][0]['definition'][0][0]['minimumSamplingTime']
             completionRequiresEngagement = metadata.sequences[0][0]['completionRequiresEngagement']
+            responseTime = metadata.sequences[0][0].get('responseTime') 
         except Exception as e:
             print(f"minimumSamplingTime was not a parameter in this session: {e}")
             try:
@@ -63,6 +66,7 @@ def detect_settings(root):
     schema_settings['minimumSamplingTime'] = minimumSamplingTime
     schema_settings['sampleOffsetTime'] = metadata.metadata.sampleOffsetTime
     schema_settings['completionRequiresEngagement'] = completionRequiresEngagement
+    schema_settings['responseTime'] = responseTime
     
     return session_settings, schema_settings
 
