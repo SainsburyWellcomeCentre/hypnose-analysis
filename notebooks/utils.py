@@ -939,1509 +939,6 @@ def get_experiment_parameters(root):
     return sample_offset_time, minimum_sampling_time, response_time
 
 
-
-def classify_trial_outcomes(data, events, trial_counts): # will be combined with the analyse_trial_valve_sequences into one comprehensive classification function
-    """
-    Classify trials into hierarchical categories based on completion and reward status:
-    
-    1. completed_sequence: trials with AwaitReward event
-       - completed_sequence_rewarded: supply port activity detected
-       - completed_sequence_unrewarded: poke in Port1/Port2 within 2.5s, no supply port
-       - completed_sequence_reward_timeout: no poke in Port1/Port2 within 2.5s
-    2. aborted_sequence: trials without AwaitReward event
-    
-    Returns:
-        dict: Contains DataFrames for each trial category
-    """
-    print("=" * 60)
-    print("CLASSIFYING TRIAL OUTCOMES")
-    print("=" * 60)
-    
-    # Get base trial data
-    initiated_trials = trial_counts['initiated_sequences'].copy()
-    
-    # Get event times
-    await_reward_times = events['combined_await_reward_df']['Time'].tolist() if 'combined_await_reward_df' in events else []
-    
-    # Get supply port activities from pulse supply data (same as analyze_reward_events)
-    supply_port1_times = []
-    supply_port2_times = []
-    
-    if not data['pulse_supply_1'].empty:
-        supply_port1_times = data['pulse_supply_1'].index.tolist()
-    
-    if not data['pulse_supply_2'].empty:
-        supply_port2_times = data['pulse_supply_2'].index.tolist()
-    
-    all_supply_port_times = sorted(supply_port1_times + supply_port2_times)
-    
-    # Get reward port poke data
-    port1_pokes = data['digital_input_data']['DIPort1'] if 'DIPort1' in data['digital_input_data'] else pd.Series(dtype=bool)
-    port2_pokes = data['digital_input_data']['DIPort2'] if 'DIPort2' in data['digital_input_data'] else pd.Series(dtype=bool)
-    
-    # Initialize result containers
-    completed_sequences = []
-    aborted_sequences = []
-    completed_rewarded = []
-    completed_unrewarded = []
-    completed_timeout = []
-    
-    print(f"Analyzing {len(initiated_trials)} initiated trials...")
-    print(f"   Found {len(await_reward_times)} AwaitReward events")
-    print(f"   Found {len(supply_port1_times)} supply port 1 activities")
-    print(f"   Found {len(supply_port2_times)} supply port 2 activities")
-    print(f"   Found {len(all_supply_port_times)} total supply port activities")
-    
-    for _, trial in initiated_trials.iterrows():
-        trial_start = trial['sequence_start']
-        trial_end = trial['sequence_end']
-        trial_id = trial['trial_id']
-        
-        # Check if AwaitReward occurs within this trial
-        trial_await_rewards = [
-            t for t in await_reward_times 
-            if trial_start <= t <= trial_end
-        ]
-        
-        if trial_await_rewards:
-            # This is a completed sequence
-            completed_sequences.append(trial.to_dict())
-            
-            # Get the first AwaitReward time in this trial
-            await_reward_time = min(trial_await_rewards)
-            
-            # Check for supply port activity after AwaitReward
-            supply1_after_await = [
-                t for t in supply_port1_times 
-                if await_reward_time <= t <= trial_end
-            ]
-            supply2_after_await = [
-                t for t in supply_port2_times 
-                if await_reward_time <= t <= trial_end
-            ]
-            
-            if supply1_after_await or supply2_after_await:
-                # Rewarded trial
-                trial_dict = trial.to_dict()
-                trial_dict['await_reward_time'] = await_reward_time
-                
-                # Determine which port was rewarded first and set odor identity
-                all_supply_times = []
-                if supply1_after_await:
-                    all_supply_times.extend([(t, 1, 'A') for t in supply1_after_await])
-                if supply2_after_await:
-                    all_supply_times.extend([(t, 2, 'B') for t in supply2_after_await])
-                
-                all_supply_times.sort(key=lambda x: x[0])  # Sort by time
-                
-                first_supply_time, first_supply_port, first_supply_odor = all_supply_times[0]
-                
-                trial_dict['first_supply_time'] = first_supply_time
-                trial_dict['first_supply_port'] = first_supply_port
-                trial_dict['first_supply_odor_identity'] = first_supply_odor
-                trial_dict['supply1_count'] = len(supply1_after_await)
-                trial_dict['supply2_count'] = len(supply2_after_await)
-                trial_dict['total_supply_count'] = len(supply1_after_await) + len(supply2_after_await)
-                
-                completed_rewarded.append(trial_dict)
-            else:
-                # No supply port activity - check for reward port pokes within 2.5s
-                poke_window_end = await_reward_time + pd.Timedelta(seconds=2.5)
-                #poke_window_end = min(poke_window_end, trial_end)  # Don't exceed trial end; possibly not needed as 2.5s should be fixed.
-                
-                # Find poke events in Port1 and Port2 within the window
-                port1_pokes_in_window = []
-                port2_pokes_in_window = []
-                
-                # Check Port1 pokes
-                if not port1_pokes.empty:
-                    port1_window = port1_pokes[await_reward_time:poke_window_end]
-                    # Find poke starts (transitions from False to True)
-                    port1_starts = port1_window & ~port1_window.shift(1, fill_value=False)
-                    port1_pokes_in_window = port1_starts[port1_starts == True].index.tolist()
-                
-                # Check Port2 pokes
-                if not port2_pokes.empty:
-                    port2_window = port2_pokes[await_reward_time:poke_window_end]
-                    # Find poke starts (transitions from False to True)
-                    port2_starts = port2_window & ~port2_window.shift(1, fill_value=False)
-                    port2_pokes_in_window = port2_starts[port2_starts == True].index.tolist()
-                
-                # Create combined list with port identity and odor mapping
-                all_reward_pokes = []
-                if port1_pokes_in_window:
-                    all_reward_pokes.extend([(t, 1, 'A') for t in port1_pokes_in_window])
-                if port2_pokes_in_window:
-                    all_reward_pokes.extend([(t, 2, 'B') for t in port2_pokes_in_window])
-                
-                all_reward_pokes.sort(key=lambda x: x[0])  # Sort by time
-                
-                trial_dict = trial.to_dict()
-                trial_dict['await_reward_time'] = await_reward_time
-                trial_dict['poke_window_end'] = poke_window_end
-                trial_dict['port1_pokes_count'] = len(port1_pokes_in_window)
-                trial_dict['port2_pokes_count'] = len(port2_pokes_in_window)
-                trial_dict['total_reward_pokes'] = len(all_reward_pokes)
-                
-                if all_reward_pokes:
-                    # Unrewarded trial (poked but no reward)
-                    first_poke_time, first_poke_port, first_poke_odor = all_reward_pokes[0]
-                    trial_dict['first_reward_poke_time'] = first_poke_time
-                    trial_dict['first_reward_poke_port'] = first_poke_port
-                    trial_dict['first_reward_poke_odor_identity'] = first_poke_odor
-                    completed_unrewarded.append(trial_dict)
-                else:
-                    # Timeout trial (no poke within 2.5s)
-                    completed_timeout.append(trial_dict)
-        else:
-            # This is an aborted sequence (no AwaitReward)
-            aborted_sequences.append(trial.to_dict())
-    
-    # Create DataFrames
-    result = {
-        'completed_sequences': pd.DataFrame(completed_sequences),
-        'aborted_sequences': pd.DataFrame(aborted_sequences),
-        'completed_sequence_rewarded': pd.DataFrame(completed_rewarded),
-        'completed_sequence_unrewarded': pd.DataFrame(completed_unrewarded),
-        'completed_sequence_reward_timeout': pd.DataFrame(completed_timeout)
-    }
-    
-    # Print summary statistics
-    print(f"\nTRIAL CLASSIFICATION RESULTS:")
-    print(f"   Total initiated trials: {len(initiated_trials)}")
-    print(f"   -- Completed sequences: {len(result['completed_sequences'])} ({len(result['completed_sequences'])/len(initiated_trials)*100:.1f}%)")
-    print(f"       -- Rewarded: {len(result['completed_sequence_rewarded'])} ({len(result['completed_sequence_rewarded'])/len(initiated_trials)*100:.1f}%)")
-    print(f"       -- Unrewarded: {len(result['completed_sequence_unrewarded'])} ({len(result['completed_sequence_unrewarded'])/len(initiated_trials)*100:.1f}%)")
-    print(f"       -- Reward timeout: {len(result['completed_sequence_reward_timeout'])} ({len(result['completed_sequence_reward_timeout'])/len(initiated_trials)*100:.1f}%)")
-    print(f"   -- Aborted sequences: {len(result['aborted_sequences'])} ({len(result['aborted_sequences'])/len(initiated_trials)*100:.1f}%)")
-    
-    # Print odor identity breakdown for rewarded trials
-    if len(result['completed_sequence_rewarded']) > 0:
-        rewarded_df = result['completed_sequence_rewarded']
-        odor_a_rewarded = len(rewarded_df[rewarded_df['first_supply_odor_identity'] == 'A'])
-        odor_b_rewarded = len(rewarded_df[rewarded_df['first_supply_odor_identity'] == 'B'])
-        print(f"       Rewarded breakdown: Odor A (Port 1): {odor_a_rewarded}, Odor B (Port 2): {odor_b_rewarded}")
-    
-    # Print odor identity breakdown for unrewarded trials
-    if len(result['completed_sequence_unrewarded']) > 0:
-        unrewarded_df = result['completed_sequence_unrewarded']
-        odor_a_unrewarded = len(unrewarded_df[unrewarded_df['first_reward_poke_odor_identity'] == 'A'])
-        odor_b_unrewarded = len(unrewarded_df[unrewarded_df['first_reward_poke_odor_identity'] == 'B'])
-        print(f"       Unrewarded breakdown: Odor A (Port 1): {odor_a_unrewarded}, Odor B (Port 2): {odor_b_unrewarded}")
-    
-    # Verify totals
-    total_classified = (len(result['completed_sequence_rewarded']) + 
-                       len(result['completed_sequence_unrewarded']) + 
-                       len(result['completed_sequence_reward_timeout']) + 
-                       len(result['aborted_sequences']))
-    
-    if total_classified == len(initiated_trials):
-        print(f"Classification complete: all {len(initiated_trials)} trials classified")
-    else:
-        print(f"Classification mismatch: {total_classified} classified vs {len(initiated_trials)} total")
-    
-    return result
-
-
-def analyze_trial_valve_sequences(data, trial_outcomes, odor_map, verbose=True): # will be combined with the classify_trial_outcomes into one comprehensive classification function
-    """
-    Analyze valve opening sequences during completed trials
-    
-    Parameters:
-    -----------
-    data : dict
-        Data dictionary containing olfactometer valve data
-    trial_outcomes : dict
-        Trial outcomes from classify_trial_outcomes function
-    odor_map : dict
-        Odor mapping information
-    verbose : bool
-        Whether to print detailed information
-    
-    Returns:
-    --------
-    dict: Analysis results containing odor counts and sequences
-    """
-    if verbose:
-        print("=" * 60)
-        print("ANALYZING VALVE SEQUENCES DURING COMPLETED TRIALS")
-        print("=" * 60)
-    
-    # Get completed sequences
-    completed_sequences = trial_outcomes['completed_sequences']
-    
-    if completed_sequences.empty:
-        print("No completed sequences found")
-        return {}
-    
-    # Get valve data and mapping
-    olfactometer_valves = odor_map['olfactometer_valves']
-    valve_to_odor = odor_map['valve_to_odor']
-    
-    # Build comprehensive valve activation list
-    all_valve_activations = []
-    for olf_id, valve_data in olfactometer_valves.items():
-        if valve_data.empty:
-            continue
-        for i, valve_col in enumerate(valve_data.columns):
-            valve_key = f"{olf_id}{i}"
-            if valve_key in valve_to_odor:
-                odor_name = valve_to_odor[valve_key]
-                # Skip purge valves
-                if odor_name.lower() == 'purge':
-                    continue
-                    
-                valve_series = valve_data[valve_col]
-                valve_activations = valve_series & ~valve_series.shift(1, fill_value=False)
-                activation_times = valve_activations[valve_activations == True].index.tolist()
-                valve_deactivations = ~valve_series & valve_series.shift(1, fill_value=False)
-                deactivation_times = valve_deactivations[valve_deactivations == True].index.tolist()
-                
-                for activation_time in activation_times:
-                    next_deactivations = [t for t in deactivation_times if t > activation_time]
-                    deactivation_time = min(next_deactivations) if next_deactivations else valve_series.index[-1]
-                    
-                    all_valve_activations.append({
-                        'start_time': activation_time,
-                        'end_time': deactivation_time,
-                        'odor_name': odor_name,
-                        'valve_key': valve_key
-                    })
-    
-    # Sort valve activations by time
-    all_valve_activations.sort(key=lambda x: x['start_time'])
-    
-    if verbose:
-        print(f"Found {len(all_valve_activations)} total valve activations (excluding Purge)")
-        print(f"Analyzing {len(completed_sequences)} completed trials...")
-    
-    # Initialize counters
-    odor_count_distribution = {i: 0 for i in range(1, 7)}  # 1-6 odors
-    last_odor_counts = {}
-    trial_sequences = []
-    
-    for _, trial in completed_sequences.iterrows():
-        trial_start = trial['sequence_start']
-        trial_end = trial['sequence_end']
-        trial_id = trial['trial_id']
-        
-        # Find valve activations that occur during or overlap with this trial
-        trial_valve_activations = []
-        
-        for valve_activation in all_valve_activations:
-            valve_start = valve_activation['start_time']
-            valve_end = valve_activation['end_time']
-            
-            # Check if valve activation overlaps with trial period
-            # Include if: valve starts before trial end AND valve ends after trial start
-            if valve_start <= trial_end and valve_end >= trial_start:
-                trial_valve_activations.append(valve_activation)
-        
-        # Sort trial valve activations by start time
-        trial_valve_activations.sort(key=lambda x: x['start_time'])
-        
-        # Extract odor sequence (Purge already excluded from all_valve_activations)
-        odor_sequence = [activation['odor_name'] for activation in trial_valve_activations]
-        
-        # Count odors
-        num_odors = len(odor_sequence)
-        
-        # Limit to maximum of 6 odors for counting
-        num_odors_capped = min(num_odors, 6)
-        if num_odors_capped > 0:
-            odor_count_distribution[num_odors_capped] += 1
-        
-        # Get last odor (will not be Purge since Purge is excluded)
-        last_odor = None
-        if odor_sequence:
-            last_odor = odor_sequence[-1]
-            if last_odor not in last_odor_counts:
-                last_odor_counts[last_odor] = 0
-            last_odor_counts[last_odor] += 1
-        
-        # Store trial sequence info
-        trial_sequences.append({
-            'trial_id': trial_id,
-            'trial_start': trial_start,
-            'trial_end': trial_end,
-            'odor_sequence': odor_sequence,
-            'num_odors': num_odors,
-            'last_odor': last_odor,
-            'valve_activations': trial_valve_activations
-        })
-        
-        if verbose and len(trial_sequences) <= 10:  # Show first 10 trials as examples
-            print(f"\nTrial {trial_id}:")
-            print(f"  Duration: {(trial_end - trial_start).total_seconds():.1f}s")
-            print(f"  Odor sequence: {odor_sequence}")
-            print(f"  Number of odors: {num_odors}")
-            print(f"  Last odor: {last_odor}")
-    
-    # Print summary statistics
-    print(f"\n" + "="*40)
-    print("ODOR COUNT DISTRIBUTION:")
-    print("="*40)
-    total_trials = sum(odor_count_distribution.values())
-    for num_odors in range(1, 7):
-        count = odor_count_distribution[num_odors]
-        percentage = (count / total_trials * 100) if total_trials > 0 else 0
-        print(f"  {num_odors} odor{'s' if num_odors > 1 else ''}: {count} trials ({percentage:.1f}%)")
-    
-    print(f"\n" + "="*40)
-    print("LAST ODOR DISTRIBUTION:")
-    print("="*40)
-    for odor_name, count in sorted(last_odor_counts.items()):
-        percentage = (count / total_trials * 100) if total_trials > 0 else 0
-        print(f"  {odor_name}: {count} trials ({percentage:.1f}%)")
-    
-    # Additional statistics
-    trials_with_odors = sum(1 for seq in trial_sequences if seq['num_odors'] > 0)
-    trials_without_odors = len(trial_sequences) - trials_with_odors
-    
-    print(f"\n" + "="*40)
-    print("ADDITIONAL STATISTICS:")
-    print("="*40)
-    print(f"  Total completed trials: {len(trial_sequences)}")
-    print(f"  Trials with odor delivery: {trials_with_odors}")
-    print(f"  Trials without odor delivery: {trials_without_odors}")
-    
-    if trials_without_odors > 0:
-        print(f"  Warning: {trials_without_odors} completed trials had no odor delivery")
-    
-    return {
-        'trial_sequences': trial_sequences,
-        'odor_count_distribution': odor_count_distribution,
-        'last_odor_counts': last_odor_counts,
-        'total_trials': total_trials,
-        'trials_with_odors': trials_with_odors,
-        'trials_without_odors': trials_without_odors
-    }
-
-
-
-
-def classify_trial_outcomes_extensive(data, events, trial_counts, odor_map, stage, verbose=True):
-    """
-    Classify trials into hierarchical categories based on completion, reward status, and hidden rule detection:
-    
-    1. Non-initiated sequences (from trial_counts)
-    2. Initiated sequences (trials) subdivided into:
-       - aborted_sequence: no AwaitReward event
-         - aborted_sequence_HR: hidden rule odor (A/B) at LocationX
-       - completed_sequence: has AwaitReward event
-         - completed_sequence_HR: completed after LocationX odors (hit hidden rule)
-         - completed_sequence_HR_missed: completed after >LocationX odors (missed hidden rule)
-         
-    Each completed category further subdivided into: rewarded, unrewarded, reward_timeout
-    
-    Returns:
-        dict: Contains DataFrames for each trial category with hidden rule analysis
-    """
-    if verbose:
-        print("=" * 80)
-        print("CLASSIFYING TRIAL OUTCOMES WITH HIDDEN RULE ANALYSIS")
-        print("=" * 80)
-    
-    # Extract hidden rule location from stage parameter (which contains the sequence name)
-    hidden_rule_location = None
-    sequence_name = str(stage)
-    
-    import re
-    location_match = re.search(r'Location(\d+)', sequence_name)
-    if location_match:
-        hidden_rule_location = int(location_match.group(1))
-        if verbose:
-            print(f"Sequence name: {sequence_name}")
-            print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_location + 1})")
-    else:
-        if verbose:
-            print(f"Warning: No LocationX found in sequence name '{sequence_name}', hidden rule analysis will be skipped")
-        # Fall back to original function
-        return classify_trial_outcomes(data, events, trial_counts)
-    
-    # Get base trial data
-    initiated_trials = trial_counts['initiated_sequences'].copy()
-    non_initiated_trials = trial_counts['non_initiated_sequences'].copy()
-    
-    # Get event times
-    await_reward_times = events['combined_await_reward_df']['Time'].tolist() if 'combined_await_reward_df' in events else []
-    
-    # Get supply port activities from pulse supply data
-    supply_port1_times = []
-    supply_port2_times = []
-    
-    if not data['pulse_supply_1'].empty:
-        supply_port1_times = data['pulse_supply_1'].index.tolist()
-    
-    if not data['pulse_supply_2'].empty:
-        supply_port2_times = data['pulse_supply_2'].index.tolist()
-    
-    all_supply_port_times = sorted(supply_port1_times + supply_port2_times)
-    
-    # Get reward port poke data
-    port1_pokes = data['digital_input_data']['DIPort1'] if 'DIPort1' in data['digital_input_data'] else pd.Series(dtype=bool)
-    port2_pokes = data['digital_input_data']['DIPort2'] if 'DIPort2' in data['digital_input_data'] else pd.Series(dtype=bool)
-    
-    # Build valve activation list (same as analyze_trial_valve_sequences)
-    olfactometer_valves = odor_map['olfactometer_valves']
-    valve_to_odor = odor_map['valve_to_odor']
-    
-    all_valve_activations = []
-    for olf_id, valve_data in olfactometer_valves.items():
-        if valve_data.empty:
-            continue
-        for i, valve_col in enumerate(valve_data.columns):
-            valve_key = f"{olf_id}{i}"
-            if valve_key in valve_to_odor:
-                odor_name = valve_to_odor[valve_key]
-                # Skip purge valves
-                if odor_name.lower() == 'purge':
-                    continue
-                    
-                valve_series = valve_data[valve_col]
-                valve_activations = valve_series & ~valve_series.shift(1, fill_value=False)
-                activation_times = valve_activations[valve_activations == True].index.tolist()
-                valve_deactivations = ~valve_series & valve_series.shift(1, fill_value=False)
-                deactivation_times = valve_deactivations[valve_deactivations == True].index.tolist()
-                
-                for activation_time in activation_times:
-                    next_deactivations = [t for t in deactivation_times if t > activation_time]
-                    deactivation_time = min(next_deactivations) if next_deactivations else valve_series.index[-1]
-                    
-                    all_valve_activations.append({
-                        'start_time': activation_time,
-                        'end_time': deactivation_time,
-                        'odor_name': odor_name,
-                        'valve_key': valve_key
-                    })
-    
-    # Sort valve activations by time
-    all_valve_activations.sort(key=lambda x: x['start_time'])
-    
-    if verbose:
-        print(f"Found {len(all_valve_activations)} total valve activations (excluding Purge)")
-        print(f"Analyzing {len(initiated_trials)} initiated trials...")
-        print(f"Found {len(await_reward_times)} AwaitReward events")
-        print(f"Found {len(all_supply_port_times)} total supply port activities")
-    
-    # Initialize result containers
-    completed_sequences = []
-    aborted_sequences = []
-    aborted_sequences_hr = []
-    completed_hr = []
-    completed_hr_missed = []
-    completed_rewarded = []
-    completed_unrewarded = []
-    completed_timeout = []
-    completed_hr_rewarded = []
-    completed_hr_unrewarded = []
-    completed_hr_timeout = []
-    completed_hr_missed_rewarded = []
-    completed_hr_missed_unrewarded = []
-    completed_hr_missed_timeout = []
-    
-    # Helper function to get valve sequence for a trial
-    def get_trial_valve_sequence(trial_start, trial_end):
-        """Get chronological valve sequence for a trial period"""
-        trial_valve_activations = []
-        
-        for valve_activation in all_valve_activations:
-            valve_start = valve_activation['start_time']
-            valve_end = valve_activation['end_time']
-            
-            # Check if valve activation overlaps with trial period
-            if valve_start <= trial_end and valve_end >= trial_start:
-                trial_valve_activations.append(valve_activation)
-        
-        # Sort by start time and extract odor sequence
-        trial_valve_activations.sort(key=lambda x: x['start_time'])
-        odor_sequence = [activation['odor_name'] for activation in trial_valve_activations]
-        
-        return odor_sequence, trial_valve_activations
-    
-    # Helper function to check hidden rule
-    def check_hidden_rule(odor_sequence, hidden_rule_location):
-        """Check if hidden rule applies to this sequence"""
-        if len(odor_sequence) <= hidden_rule_location:
-            return False, False  # not_enough_odors, hit_hidden_rule
-        
-        odor_at_location = odor_sequence[hidden_rule_location]
-        hit_hidden_rule = odor_at_location in ['OdorA', 'OdorB']
-        
-        return True, hit_hidden_rule  # enough_odors, hit_hidden_rule
-    
-    # Process initiated trials
-    for _, trial in initiated_trials.iterrows():
-        trial_start = trial['sequence_start']
-        trial_end = trial['sequence_end']
-        trial_id = trial['trial_id']
-        
-        # Get valve sequence for this trial
-        odor_sequence, valve_activations = get_trial_valve_sequence(trial_start, trial_end)
-        
-        # Check if AwaitReward occurs within this trial
-        trial_await_rewards = [
-            t for t in await_reward_times 
-            if trial_start <= t <= trial_end
-        ]
-        
-        # Add basic trial info
-        trial_dict = trial.to_dict()
-        trial_dict['odor_sequence'] = odor_sequence
-        trial_dict['num_odors'] = len(odor_sequence)
-        trial_dict['last_odor'] = odor_sequence[-1] if odor_sequence else None
-        trial_dict['hidden_rule_location'] = hidden_rule_location
-        trial_dict['sequence_name'] = sequence_name
-        
-        # Check hidden rule
-        enough_odors, hit_hidden_rule = check_hidden_rule(odor_sequence, hidden_rule_location)
-        trial_dict['enough_odors_for_hr'] = enough_odors
-        trial_dict['hit_hidden_rule'] = hit_hidden_rule
-        
-        if trial_await_rewards:
-            # This is a completed sequence
-            completed_sequences.append(trial_dict.copy())
-            
-            # Get the first AwaitReward time in this trial
-            await_reward_time = min(trial_await_rewards)
-            trial_dict['await_reward_time'] = await_reward_time
-            
-            # Determine if hidden rule was followed
-            if hit_hidden_rule:
-                # Check if completed at exactly the hidden rule location
-                if len(odor_sequence) == hidden_rule_location + 1:
-                    # Completed after hidden rule (correct behavior)
-                    completed_hr.append(trial_dict.copy())
-                    hr_category = 'completed_hr'
-                else:
-                    # Missed hidden rule (continued past it)
-                    completed_hr_missed.append(trial_dict.copy())
-                    hr_category = 'completed_hr_missed'
-            else:
-                # No hidden rule involvement (normal completion)
-                hr_category = 'completed_normal'
-            
-            # Now check reward status
-            supply1_after_await = [
-                t for t in supply_port1_times 
-                if await_reward_time <= t <= trial_end
-            ]
-            supply2_after_await = [
-                t for t in supply_port2_times 
-                if await_reward_time <= t <= trial_end
-            ]
-            
-            if supply1_after_await or supply2_after_await:
-                # Rewarded trial
-                all_supply_times = []
-                if supply1_after_await:
-                    all_supply_times.extend([(t, 1, 'A') for t in supply1_after_await])
-                if supply2_after_await:
-                    all_supply_times.extend([(t, 2, 'B') for t in supply2_after_await])
-                
-                all_supply_times.sort(key=lambda x: x[0])
-                first_supply_time, first_supply_port, first_supply_odor = all_supply_times[0]
-                
-                trial_dict['first_supply_time'] = first_supply_time
-                trial_dict['first_supply_port'] = first_supply_port
-                trial_dict['first_supply_odor_identity'] = first_supply_odor
-                trial_dict['supply1_count'] = len(supply1_after_await)
-                trial_dict['supply2_count'] = len(supply2_after_await)
-                trial_dict['total_supply_count'] = len(supply1_after_await) + len(supply2_after_await)
-                
-                completed_rewarded.append(trial_dict.copy())
-                
-                # Add to HR-specific categories
-                if hr_category == 'completed_hr':
-                    completed_hr_rewarded.append(trial_dict.copy())
-                elif hr_category == 'completed_hr_missed':
-                    completed_hr_missed_rewarded.append(trial_dict.copy())
-                    
-            else:
-                # No supply port activity - check for reward port pokes within 2.5s
-                poke_window_end = await_reward_time + pd.Timedelta(seconds=2.5)
-                
-                # Find poke events in Port1 and Port2 within the window
-                port1_pokes_in_window = []
-                port2_pokes_in_window = []
-                
-                # Check Port1 pokes
-                if not port1_pokes.empty:
-                    port1_window = port1_pokes[await_reward_time:poke_window_end]
-                    port1_starts = port1_window & ~port1_window.shift(1, fill_value=False)
-                    port1_pokes_in_window = port1_starts[port1_starts == True].index.tolist()
-                
-                # Check Port2 pokes
-                if not port2_pokes.empty:
-                    port2_window = port2_pokes[await_reward_time:poke_window_end]
-                    port2_starts = port2_window & ~port2_window.shift(1, fill_value=False)
-                    port2_pokes_in_window = port2_starts[port2_starts == True].index.tolist()
-                
-                # Create combined list with port identity and odor mapping
-                all_reward_pokes = []
-                if port1_pokes_in_window:
-                    all_reward_pokes.extend([(t, 1, 'A') for t in port1_pokes_in_window])
-                if port2_pokes_in_window:
-                    all_reward_pokes.extend([(t, 2, 'B') for t in port2_pokes_in_window])
-                
-                all_reward_pokes.sort(key=lambda x: x[0])
-                
-                trial_dict['poke_window_end'] = poke_window_end
-                trial_dict['port1_pokes_count'] = len(port1_pokes_in_window)
-                trial_dict['port2_pokes_count'] = len(port2_pokes_in_window)
-                trial_dict['total_reward_pokes'] = len(all_reward_pokes)
-                
-                if all_reward_pokes:
-                    # Unrewarded trial (poked but no reward)
-                    first_poke_time, first_poke_port, first_poke_odor = all_reward_pokes[0]
-                    trial_dict['first_reward_poke_time'] = first_poke_time
-                    trial_dict['first_reward_poke_port'] = first_poke_port
-                    trial_dict['first_reward_poke_odor_identity'] = first_poke_odor
-                    
-                    completed_unrewarded.append(trial_dict.copy())
-                    
-                    # Add to HR-specific categories
-                    if hr_category == 'completed_hr':
-                        completed_hr_unrewarded.append(trial_dict.copy())
-                    elif hr_category == 'completed_hr_missed':
-                        completed_hr_missed_unrewarded.append(trial_dict.copy())
-                        
-                else:
-                    # Timeout trial (no poke within 2.5s)
-                    completed_timeout.append(trial_dict.copy())
-                    
-                    # Add to HR-specific categories
-                    if hr_category == 'completed_hr':
-                        completed_hr_timeout.append(trial_dict.copy())
-                    elif hr_category == 'completed_hr_missed':
-                        completed_hr_missed_timeout.append(trial_dict.copy())
-        else:
-            # This is an aborted sequence (no AwaitReward)
-            aborted_sequences.append(trial_dict.copy())
-            
-            # Check if it was a hidden rule trial
-            if hit_hidden_rule:
-                aborted_sequences_hr.append(trial_dict.copy())
-    
-    # Create DataFrames
-    result = {
-        # Base categories
-        'non_initiated_sequences': non_initiated_trials,
-        'initiated_sequences': initiated_trials,
-        'completed_sequences': pd.DataFrame(completed_sequences),
-        'aborted_sequences': pd.DataFrame(aborted_sequences),
-        
-        # Hidden rule categories
-        'aborted_sequences_HR': pd.DataFrame(aborted_sequences_hr),
-        'completed_sequences_HR': pd.DataFrame(completed_hr),
-        'completed_sequences_HR_missed': pd.DataFrame(completed_hr_missed),
-        
-        # Reward status categories (original)
-        'completed_sequence_rewarded': pd.DataFrame(completed_rewarded),
-        'completed_sequence_unrewarded': pd.DataFrame(completed_unrewarded),
-        'completed_sequence_reward_timeout': pd.DataFrame(completed_timeout),
-        
-        # Hidden rule + reward status categories
-        'completed_sequence_HR_rewarded': pd.DataFrame(completed_hr_rewarded),
-        'completed_sequence_HR_unrewarded': pd.DataFrame(completed_hr_unrewarded),
-        'completed_sequence_HR_reward_timeout': pd.DataFrame(completed_hr_timeout),
-        'completed_sequence_HR_missed_rewarded': pd.DataFrame(completed_hr_missed_rewarded),
-        'completed_sequence_HR_missed_unrewarded': pd.DataFrame(completed_hr_missed_unrewarded),
-        'completed_sequence_HR_missed_reward_timeout': pd.DataFrame(completed_hr_missed_timeout),
-    }
-    
-    # Print comprehensive summary statistics
-    if verbose:
-        print(f"\nTRIAL CLASSIFICATION RESULTS WITH HIDDEN RULE ANALYSIS:")
-        print(f"Hidden Rule Location: Position {hidden_rule_location + 1} (index {hidden_rule_location})")
-        print()
-        
-        total_attempts = len(initiated_trials) + len(non_initiated_trials)
-        print(f"Total attempts: {total_attempts}")
-        print(f"-- Non-initiated sequences: {len(non_initiated_trials)} ({len(non_initiated_trials)/total_attempts*100:.1f}%)")
-        print(f"-- Initiated sequences (trials): {len(initiated_trials)} ({len(initiated_trials)/total_attempts*100:.1f}%)")
-        print()
-        
-        print(f"INITIATED TRIALS BREAKDOWN:")
-        print(f"Total initiated trials: {len(initiated_trials)}")
-        print(f"-- Completed sequences: {len(result['completed_sequences'])} ({len(result['completed_sequences'])/len(initiated_trials)*100:.1f}%)")
-        print(f"   -- Hidden Rule trials (HR): {len(result['completed_sequences_HR'])} ({len(result['completed_sequences_HR'])/len(initiated_trials)*100:.1f}%)")
-        print(f"   -- Hidden Rule Missed (HR_missed): {len(result['completed_sequences_HR_missed'])} ({len(result['completed_sequences_HR_missed'])/len(initiated_trials)*100:.1f}%)")
-        print(f"-- Aborted sequences: {len(result['aborted_sequences'])} ({len(result['aborted_sequences'])/len(initiated_trials)*100:.1f}%)")
-        print(f"   -- Aborted Hidden Rule trials (HR): {len(result['aborted_sequences_HR'])} ({len(result['aborted_sequences_HR'])/len(initiated_trials)*100:.1f}%)")
-        print()
-        
-        print(f"REWARD STATUS BREAKDOWN:")
-        print(f"All completed trials: {len(result['completed_sequences'])}")
-        if len(result['completed_sequences']) > 0:
-            print(f"-- Rewarded: {len(result['completed_sequence_rewarded'])} ({len(result['completed_sequence_rewarded'])/len(result['completed_sequences'])*100:.1f}%)")
-            print(f"-- Unrewarded: {len(result['completed_sequence_unrewarded'])} ({len(result['completed_sequence_unrewarded'])/len(result['completed_sequences'])*100:.1f}%)")
-            print(f"-- Reward timeout: {len(result['completed_sequence_reward_timeout'])} ({len(result['completed_sequence_reward_timeout'])/len(result['completed_sequences'])*100:.1f}%)")
-        print()
-        
-        print(f"HIDDEN RULE SPECIFIC BREAKDOWN:")
-        hr_total = len(result['completed_sequences_HR'])
-        if hr_total > 0:
-            print(f"Completed HR trials: {hr_total}")
-            print(f"-- HR Rewarded: {len(result['completed_sequence_HR_rewarded'])} ({len(result['completed_sequence_HR_rewarded'])/hr_total*100:.1f}%)")
-            print(f"-- HR Unrewarded: {len(result['completed_sequence_HR_unrewarded'])} ({len(result['completed_sequence_HR_unrewarded'])/hr_total*100:.1f}%)")
-            print(f"-- HR Timeout: {len(result['completed_sequence_HR_reward_timeout'])} ({len(result['completed_sequence_HR_reward_timeout'])/hr_total*100:.1f}%)")
-        
-        hr_missed_total = len(result['completed_sequences_HR_missed'])
-        if hr_missed_total > 0:
-            print(f"Completed HR Missed trials: {hr_missed_total}")
-            print(f"-- HR Missed Rewarded: {len(result['completed_sequence_HR_missed_rewarded'])} ({len(result['completed_sequence_HR_missed_rewarded'])/hr_missed_total*100:.1f}%)")
-            print(f"-- HR Missed Unrewarded: {len(result['completed_sequence_HR_missed_unrewarded'])} ({len(result['completed_sequence_HR_missed_unrewarded'])/hr_missed_total*100:.1f}%)")
-            print(f"-- HR Missed Timeout: {len(result['completed_sequence_HR_missed_reward_timeout'])} ({len(result['completed_sequence_HR_missed_reward_timeout'])/hr_missed_total*100:.1f}%)")
-        print()
-        
-        # Verify totals
-        total_classified = (len(result['completed_sequence_rewarded']) + 
-                           len(result['completed_sequence_unrewarded']) + 
-                           len(result['completed_sequence_reward_timeout']) + 
-                           len(result['aborted_sequences']))
-        
-        if total_classified == len(initiated_trials):
-            print(f"Classification complete: all {len(initiated_trials)} trials classified")
-        else:
-            print(f"Classification mismatch: {total_classified} classified vs {len(initiated_trials)} total")
-    
-    return result
-
-
-
-
-
-def classify_trial_outcomes_with_pokes_and_valves(data, events, trial_counts, odor_map, stage, verbose=True):#Working version for valves, pokes, and response time. 
-    """
-    Classify trials into hierarchical categories based on completion, reward status, and hidden rule detection,
-    with integrated poke time and response time analysis:
-    
-    1. Non-initiated sequences (from trial_counts)
-    2. Initiated sequences (trials) subdivided into:
-       - aborted_sequence: no AwaitReward event
-         - aborted_sequence_HR: hidden rule odor (A/B) at LocationX
-       - completed_sequence: has AwaitReward event
-         - completed_sequence_HR: completed after LocationX odors (hit hidden rule)
-         - completed_sequence_HR_missed: completed after >LocationX odors (missed hidden rule)
-         
-    Each completed category further subdivided into: rewarded, unrewarded, reward_timeout
-    
-    NEW: Adds poke time analysis for each position/odor and response time measurement
-    Uses sequential valve grouping for positions 2-5, last individual activation for position 1
-    
-    Returns:
-        dict: Contains DataFrames for each trial category with hidden rule analysis and poke/response times
-    """
-    if verbose:
-        print("=" * 80)
-        print("CLASSIFYING TRIAL OUTCOMES WITH HIDDEN RULE AND POKE/RESPONSE TIME ANALYSIS")
-        print("=" * 80)
-    
-    # Extract hidden rule location from stage parameter (which contains the sequence name)
-    hidden_rule_location = None
-    sequence_name = str(stage)
-    location_match = re.search(r'Location(\d+)', sequence_name)
-    if location_match:
-        hidden_rule_location = int(location_match.group(1))
-        if verbose:
-            print(f"Sequence name: {sequence_name}")
-            print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_location + 1})")
-    else:
-        if verbose:
-            print(f"Warning: No LocationX found in sequence name '{sequence_name}', hidden rule analysis will be skipped")
-        # Fall back to original function
-        return classify_trial_outcomes(data, events, trial_counts)
-    
-    # Get base trial data
-    initiated_trials = trial_counts['initiated_sequences'].copy()
-    non_initiated_trials = trial_counts['non_initiated_sequences'].copy()
-    
-    # Get event times
-    await_reward_times = events['combined_await_reward_df']['Time'].tolist() if 'combined_await_reward_df' in events else []
-    
-    # Get supply port activities from pulse supply data
-    supply_port1_times = []
-    supply_port2_times = []
-    
-    if not data['pulse_supply_1'].empty:
-        supply_port1_times = data['pulse_supply_1'].index.tolist()
-    
-    if not data['pulse_supply_2'].empty:
-        supply_port2_times = data['pulse_supply_2'].index.tolist()
-    
-    all_supply_port_times = sorted(supply_port1_times + supply_port2_times)
-    
-    # Get reward port poke data
-    port1_pokes = data['digital_input_data']['DIPort1'] if 'DIPort1' in data['digital_input_data'] else pd.Series(dtype=bool)
-    port2_pokes = data['digital_input_data']['DIPort2'] if 'DIPort2' in data['digital_input_data'] else pd.Series(dtype=bool)
-    
-    # Get poke data for poke time analysis
-    poke_data = data['digital_input_data']['DIPort0'].copy()
-    
-    # Build valve activation list (same as analyze_trial_valve_sequences)
-    olfactometer_valves = odor_map['olfactometer_valves']
-    valve_to_odor = odor_map['valve_to_odor']
-    
-    all_valve_activations = []
-    for olf_id, valve_data in olfactometer_valves.items():
-        if valve_data.empty:
-            continue
-        for i, valve_col in enumerate(valve_data.columns):
-            valve_key = f"{olf_id}{i}"
-            if valve_key in valve_to_odor:
-                odor_name = valve_to_odor[valve_key]
-                # Skip purge valves
-                if odor_name.lower() == 'purge':
-                    continue
-                    
-                valve_series = valve_data[valve_col]
-                valve_activations = valve_series & ~valve_series.shift(1, fill_value=False)
-                activation_times = valve_activations[valve_activations == True].index.tolist()
-                valve_deactivations = ~valve_series & valve_series.shift(1, fill_value=False)
-                deactivation_times = valve_deactivations[valve_deactivations == True].index.tolist()
-                
-                for activation_time in activation_times:
-                    next_deactivations = [t for t in deactivation_times if t > activation_time]
-                    deactivation_time = min(next_deactivations) if next_deactivations else valve_series.index[-1]
-                    
-                    all_valve_activations.append({
-                        'start_time': activation_time,
-                        'end_time': deactivation_time,
-                        'odor_name': odor_name,
-                        'valve_key': valve_key
-                    })
-    
-    # Sort valve activations by time
-    all_valve_activations.sort(key=lambda x: x['start_time'])
-    
-    # Parameters for poke analysis
-    poke_gap_threshold_ms = 200
-    minimum_poke_threshold_ms = 350
-    
-    if verbose:
-        print(f"Found {len(all_valve_activations)} total valve activations (excluding Purge)")
-        print(f"Analyzing {len(initiated_trials)} initiated trials...")
-        print(f"Found {len(await_reward_times)} AwaitReward events")
-        print(f"Found {len(all_supply_port_times)} total supply port activities")
-    
-    # Initialize result containers
-    completed_sequences = []
-    aborted_sequences = []
-    aborted_sequences_hr = []
-    completed_hr = []
-    completed_hr_missed = []
-    completed_rewarded = []
-    completed_unrewarded = []
-    completed_timeout = []
-    completed_hr_rewarded = []
-    completed_hr_unrewarded = []
-    completed_hr_timeout = []
-    completed_hr_missed_rewarded = []
-    completed_hr_missed_unrewarded = []
-    completed_hr_missed_timeout = []
-    
-    # Helper function to get valve sequence for a trial
-    def get_trial_valve_sequence(trial_start, trial_end):
-        """Get chronological valve sequence for a trial period"""
-        trial_valve_activations = []
-        
-        for valve_activation in all_valve_activations:
-            valve_start = valve_activation['start_time']
-            valve_end = valve_activation['end_time']
-            
-            # Check if valve activation overlaps with trial period
-            if valve_start <= trial_end and valve_end >= trial_start:
-                trial_valve_activations.append(valve_activation)
-        
-        # Sort by start time and extract odor sequence
-        trial_valve_activations.sort(key=lambda x: x['start_time'])
-        odor_sequence = [activation['odor_name'] for activation in trial_valve_activations]
-        
-        return odor_sequence, trial_valve_activations
-    
-    # Helper function to check hidden rule
-    def check_hidden_rule(odor_sequence, hidden_rule_location):
-        """Check if hidden rule applies to this sequence"""
-        if len(odor_sequence) <= hidden_rule_location:
-            return False, False  # not_enough_odors, hit_hidden_rule
-        
-        odor_at_location = odor_sequence[hidden_rule_location]
-        hit_hidden_rule = odor_at_location in ['OdorA', 'OdorB']
-        
-        return True, hit_hidden_rule  # enough_odors, hit_hidden_rule
-    
-    # Helper function to get valve timing and poke analysis for each position
-    def analyze_trial_valve_and_poke_times(trial_valve_events):
-        """Analyze valve timing and poke times for each position in a trial"""
-        position_locations = {}
-        position_valve_times = {}
-        position_poke_times = {}
-        
-        # VALVE TIMING ANALYSIS
-        # Position 1: Last individual activation of first odor
-        # Positions 2-5: Group consecutive events, take first activation and last deactivation of each group
-        
-        # Handle position 1: Find LAST individual activation of first odor
-        if trial_valve_events:
-            first_odor_valve = trial_valve_events[0]['valve_key']
-            
-            # Find all individual activations of the first odor at the beginning
-            first_odor_activations = []
-            for event in trial_valve_events:
-                if event['valve_key'] == first_odor_valve:
-                    first_odor_activations.append(event)
-                else:
-                    break  # Stop when we hit a different valve
-            
-            if first_odor_activations:
-                # Use the LAST individual activation for position 1
-                position_locations[1] = first_odor_activations[-1]
-        
-        # Handle positions 2-5: Group consecutive events
-        grouped_valve_presentations = []
-        current_valve = None
-        current_start_time = None
-        current_end_time = None
-        current_odor_name = None
-        
-        for event in trial_valve_events:
-            if event['valve_key'] != current_valve:
-                # Different valve - save previous group if exists
-                if current_valve is not None:
-                    grouped_valve_presentations.append({
-                        'valve_key': current_valve,
-                        'odor_name': current_odor_name,
-                        'start_time': current_start_time,
-                        'end_time': current_end_time
-                    })
-                
-                # Start new group
-                current_valve = event['valve_key']
-                current_odor_name = event['odor_name']
-                current_start_time = event['start_time']
-                current_end_time = event['end_time']
-            else:
-                # Same valve - extend current group to latest end time
-                current_end_time = event['end_time']
-        
-        # Don't forget the last group
-        if current_valve is not None:
-            grouped_valve_presentations.append({
-                'valve_key': current_valve,
-                'odor_name': current_odor_name,
-                'start_time': current_start_time,
-                'end_time': current_end_time
-            })
-        
-        # Assign positions 2-5 based on grouped presentations
-        for i, presentation in enumerate(grouped_valve_presentations[1:], 2):  # Start from position 2
-            if i <= 5:
-                position_locations[i] = presentation
-        
-        # VALVE TIMING: Calculate valve times for each position
-        for position in range(1, 6):
-            if position not in position_locations:
-                continue
-                
-            location = position_locations[position]
-            valve_start = location['start_time']
-            valve_end = location['end_time']
-            valve_duration_ms = (valve_end - valve_start).total_seconds() * 1000
-            
-            position_valve_times[position] = {
-                'position': position,
-                'odor_name': location['odor_name'],
-                'valve_start': valve_start,
-                'valve_end': valve_end,
-                'valve_duration_ms': valve_duration_ms
-            }
-        
-        # POKE TIME ANALYSIS: For poke analysis, use individual activations for position 1
-        poke_position_locations = {}
-        
-        # Position 1 poke analysis: Use LAST individual activation (same as valve timing)
-        if 1 in position_locations:
-            poke_position_locations[1] = position_locations[1]
-        
-        # Positions 2-5 poke analysis: Use first individual activation of each group
-        current_valve = None
-        for event in trial_valve_events:
-            if event['valve_key'] != current_valve:
-                # This is the first activation of a new valve group
-                position = None
-                for pos, loc in position_locations.items():
-                    if pos >= 2 and loc['valve_key'] == event['valve_key']:
-                        position = pos
-                        break
-                
-                if position and position <= 5:
-                    poke_position_locations[position] = event
-                
-                current_valve = event['valve_key']
-        
-        # Analyze poke times for each position using individual activations
-        for position in range(1, 6):
-            if position not in poke_position_locations:
-                continue
-                
-            location = poke_position_locations[position]
-            odor_start = location['start_time']
-            odor_end = location['end_time']
-            
-            # Get poke data during this odor presentation period
-            odor_poke_data = poke_data.loc[odor_start:odor_end]
-            
-            if odor_poke_data.empty:
-                continue
-            
-            # Check if already poking when valve opens
-            valve_start_poke_status = False
-            if len(poke_data.loc[:odor_start]) > 0:
-                valve_start_poke_status = poke_data.loc[:odor_start].iloc[-1]
-            
-            # Find all poke transitions during odor period
-            poke_transitions = []
-            prev_state = valve_start_poke_status
-            
-            for timestamp, current_state in odor_poke_data.items():
-                if current_state != prev_state:
-                    poke_transitions.append({
-                        'time': timestamp,
-                        'state': current_state,  # True = poke in, False = poke out
-                        'offset_ms': (timestamp - odor_start).total_seconds() * 1000
-                    })
-                    prev_state = current_state
-            
-            # Calculate consolidated poke time (same logic as analyze_poke_time_during_odors)
-            consolidated_poke_time_ms = 0
-            
-            if valve_start_poke_status:
-                # Already poking at valve start - start from valve onset
-                current_poke_start = odor_start
-                
-                # Process transitions
-                for i, transition in enumerate(poke_transitions):
-                    if not transition['state']:  # This is a poke OUT
-                        # End current poke period
-                        poke_duration = (transition['time'] - current_poke_start).total_seconds() * 1000
-                        consolidated_poke_time_ms += poke_duration
-                        
-                        # Check if we've reached threshold
-                        if consolidated_poke_time_ms >= minimum_poke_threshold_ms:
-                            break
-                        
-                        # Look for next poke IN
-                        next_poke_in = None
-                        for j in range(i + 1, len(poke_transitions)):
-                            if poke_transitions[j]['state']:  # This is a poke IN
-                                next_poke_in = poke_transitions[j]
-                                break
-                        
-                        if next_poke_in:
-                            gap_duration = (next_poke_in['time'] - transition['time']).total_seconds() * 1000
-                            if gap_duration <= poke_gap_threshold_ms:
-                                # Add gap and continue
-                                consolidated_poke_time_ms += gap_duration
-                                current_poke_start = next_poke_in['time']
-                            else:
-                                # Gap too long, stop
-                                break
-                        else:
-                            # No more poke ins
-                            break
-                    
-                # Handle case where poke continues to end of odor
-                if len(poke_transitions) == 0 or (len(poke_transitions) > 0 and poke_transitions[-1]['state']):
-                    # Still poking at end
-                    remaining_duration = (odor_end - current_poke_start).total_seconds() * 1000
-                    consolidated_poke_time_ms += remaining_duration
-            
-            else:
-                # Not poking at valve start - find first poke IN
-                first_poke_in = None
-                for transition in poke_transitions:
-                    if transition['state']:  # This is a poke IN
-                        first_poke_in = transition
-                        break
-                
-                if first_poke_in:
-                    current_poke_start = first_poke_in['time']
-                    start_index = poke_transitions.index(first_poke_in)
-                    
-                    # Process transitions from first poke in
-                    for i in range(start_index + 1, len(poke_transitions)):
-                        transition = poke_transitions[i]
-                        
-                        if not transition['state']:  # This is a poke OUT
-                            # End current poke period
-                            poke_duration = (transition['time'] - current_poke_start).total_seconds() * 1000
-                            consolidated_poke_time_ms += poke_duration
-                            
-                            # Check if we've reached threshold
-                            if consolidated_poke_time_ms >= minimum_poke_threshold_ms:
-                                break
-                            
-                            # Look for next poke IN
-                            next_poke_in = None
-                            for j in range(i + 1, len(poke_transitions)):
-                                if poke_transitions[j]['state']:  # This is a poke IN
-                                    next_poke_in = poke_transitions[j]
-                                    break
-                            
-                            if next_poke_in:
-                                gap_duration = (next_poke_in['time'] - transition['time']).total_seconds() * 1000
-                                if gap_duration <= poke_gap_threshold_ms:
-                                    # Add gap and continue
-                                    consolidated_poke_time_ms += gap_duration
-                                    current_poke_start = next_poke_in['time']
-                                    # Skip to the poke in we just processed
-                                    while i < len(poke_transitions) - 1 and poke_transitions[i + 1] != next_poke_in:
-                                        i += 1
-                                else:
-                                    # Gap too long, stop
-                                    break
-                            else:
-                                # No more poke ins
-                                break
-                    
-                    # Handle case where first poke continues to end
-                    if len(poke_transitions) == 1 or (len(poke_transitions) > start_index and all(t['state'] for t in poke_transitions[start_index:])):
-                        # Poke continues to end of odor
-                        remaining_duration = (odor_end - current_poke_start).total_seconds() * 1000
-                        consolidated_poke_time_ms += remaining_duration
-            
-            # Record the poke result
-            if consolidated_poke_time_ms > 0:
-                position_poke_times[position] = {
-                    'position': position,
-                    'odor_name': location['odor_name'],
-                    'poke_time_ms': consolidated_poke_time_ms,
-                    'poke_odor_start': odor_start,
-                    'poke_odor_end': odor_end
-                }
-        
-        return position_valve_times, position_poke_times
-    
-    # Helper function to calculate response time
-    def calculate_response_time(trial_valve_events, await_reward_time):
-        """Calculate response time from last poke out to first reward port poke"""
-        if not trial_valve_events:
-            return None, None
-        
-        # Find the last odor presentation
-        last_odor_event = trial_valve_events[-1]
-        last_odor_start = last_odor_event['start_time']
-        last_odor_end = last_odor_event['end_time']
-        
-        # Get poke data during last odor
-        last_odor_poke_data = poke_data.loc[last_odor_start:last_odor_end]
-        
-        if last_odor_poke_data.empty:
-            return None, None
-        
-        # Find the last poke out during the last odor
-        last_poke_out_time = None
-        prev_state = poke_data.loc[:last_odor_start].iloc[-1] if len(poke_data.loc[:last_odor_start]) > 0 else False
-        
-        for timestamp, current_state in last_odor_poke_data.items():
-            if prev_state and not current_state:  # Transition from poke in to poke out
-                last_poke_out_time = timestamp
-            prev_state = current_state
-        
-        if last_poke_out_time is None:
-            return None, None
-        
-        # Find first reward port poke after await reward
-        poke_window_end = await_reward_time + pd.Timedelta(seconds=2.5)
-        
-        # Check Port1 and Port2 pokes
-        port1_pokes_in_window = []
-        port2_pokes_in_window = []
-        
-        if not port1_pokes.empty:
-            port1_window = port1_pokes[await_reward_time:poke_window_end]
-            port1_starts = port1_window & ~port1_window.shift(1, fill_value=False)
-            port1_pokes_in_window = port1_starts[port1_starts == True].index.tolist()
-        
-        if not port2_pokes.empty:
-            port2_window = port2_pokes[await_reward_time:poke_window_end]
-            port2_starts = port2_window & ~port2_window.shift(1, fill_value=False)
-            port2_pokes_in_window = port2_starts[port2_starts == True].index.tolist()
-        
-        # Combine and find first
-        all_reward_pokes = port1_pokes_in_window + port2_pokes_in_window
-        
-        if not all_reward_pokes:
-            return last_poke_out_time, None
-        
-        first_reward_poke_time = min(all_reward_pokes)
-        response_time_ms = (first_reward_poke_time - last_poke_out_time).total_seconds() * 1000
-        
-        return last_poke_out_time, response_time_ms
-    
-    # Process initiated trials
-    for _, trial in initiated_trials.iterrows():
-        trial_start = trial['sequence_start']
-        trial_end = trial['sequence_end']
-        trial_id = trial['trial_id']
-        
-        # Get valve sequence for this trial
-        odor_sequence, valve_activations = get_trial_valve_sequence(trial_start, trial_end)
-        
-        # Analyze valve timing and poke times for this trial
-        position_valve_times, position_poke_times = analyze_trial_valve_and_poke_times(valve_activations)
-        
-        # Check if AwaitReward occurs within this trial
-        trial_await_rewards = [
-            t for t in await_reward_times 
-            if trial_start <= t <= trial_end
-        ]
-        
-        # Add basic trial info
-        trial_dict = trial.to_dict()
-        trial_dict['odor_sequence'] = odor_sequence
-        trial_dict['num_odors'] = len(odor_sequence)
-        trial_dict['last_odor'] = odor_sequence[-1] if odor_sequence else None
-        trial_dict['hidden_rule_location'] = hidden_rule_location
-        trial_dict['sequence_name'] = sequence_name
-        trial_dict['position_valve_times'] = position_valve_times
-        trial_dict['position_poke_times'] = position_poke_times
-        
-        # Check hidden rule
-        enough_odors, hit_hidden_rule = check_hidden_rule(odor_sequence, hidden_rule_location)
-        trial_dict['enough_odors_for_hr'] = enough_odors
-        trial_dict['hit_hidden_rule'] = hit_hidden_rule
-        
-        if trial_await_rewards:
-            # This is a completed sequence
-            completed_sequences.append(trial_dict.copy())
-            
-            # Get the first AwaitReward time in this trial
-            await_reward_time = min(trial_await_rewards)
-            trial_dict['await_reward_time'] = await_reward_time
-            
-            # Calculate response time for completed trials
-            last_poke_out_time, response_time_ms = calculate_response_time(valve_activations, await_reward_time)
-            trial_dict['last_poke_out_time'] = last_poke_out_time
-            trial_dict['response_time_ms'] = response_time_ms
-            
-            # Determine if hidden rule was followed
-            if hit_hidden_rule:
-                # Check if completed at exactly the hidden rule location
-                if len(odor_sequence) == hidden_rule_location + 1:
-                    # Completed after hidden rule (correct behavior)
-                    completed_hr.append(trial_dict.copy())
-                    hr_category = 'completed_hr'
-                else:
-                    # Missed hidden rule (continued past it)
-                    completed_hr_missed.append(trial_dict.copy())
-                    hr_category = 'completed_hr_missed'
-            else:
-                # No hidden rule involvement (normal completion)
-                hr_category = 'completed_normal'
-            
-            # Now check reward status
-            supply1_after_await = [
-                t for t in supply_port1_times 
-                if await_reward_time <= t <= trial_end
-            ]
-            supply2_after_await = [
-                t for t in supply_port2_times 
-                if await_reward_time <= t <= trial_end
-            ]
-            
-            if supply1_after_await or supply2_after_await:
-                # Rewarded trial
-                all_supply_times = []
-                if supply1_after_await:
-                    all_supply_times.extend([(t, 1, 'A') for t in supply1_after_await])
-                if supply2_after_await:
-                    all_supply_times.extend([(t, 2, 'B') for t in supply2_after_await])
-                
-                all_supply_times.sort(key=lambda x: x[0])
-                first_supply_time, first_supply_port, first_supply_odor = all_supply_times[0]
-                
-                trial_dict['first_supply_time'] = first_supply_time
-                trial_dict['first_supply_port'] = first_supply_port
-                trial_dict['first_supply_odor_identity'] = first_supply_odor
-                trial_dict['supply1_count'] = len(supply1_after_await)
-                trial_dict['supply2_count'] = len(supply2_after_await)
-                trial_dict['total_supply_count'] = len(supply1_after_await) + len(supply2_after_await)
-                
-                completed_rewarded.append(trial_dict.copy())
-                
-                # Add to HR-specific categories
-                if hr_category == 'completed_hr':
-                    completed_hr_rewarded.append(trial_dict.copy())
-                elif hr_category == 'completed_hr_missed':
-                    completed_hr_missed_rewarded.append(trial_dict.copy())
-                    
-            else:
-                # No supply port activity - check for reward port pokes within 2.5s
-                poke_window_end = await_reward_time + pd.Timedelta(seconds=2.5)
-                
-                # Find poke events in Port1 and Port2 within the window
-                port1_pokes_in_window = []
-                port2_pokes_in_window = []
-                
-                # Check Port1 pokes
-                if not port1_pokes.empty:
-                    port1_window = port1_pokes[await_reward_time:poke_window_end]
-                    port1_starts = port1_window & ~port1_window.shift(1, fill_value=False)
-                    port1_pokes_in_window = port1_starts[port1_starts == True].index.tolist()
-                
-                # Check Port2 pokes
-                if not port2_pokes.empty:
-                    port2_window = port2_pokes[await_reward_time:poke_window_end]
-                    port2_starts = port2_window & ~port2_window.shift(1, fill_value=False)
-                    port2_pokes_in_window = port2_starts[port2_starts == True].index.tolist()
-                
-                # Create combined list with port identity and odor mapping
-                all_reward_pokes = []
-                if port1_pokes_in_window:
-                    all_reward_pokes.extend([(t, 1, 'A') for t in port1_pokes_in_window])
-                if port2_pokes_in_window:
-                    all_reward_pokes.extend([(t, 2, 'B') for t in port2_pokes_in_window])
-                
-                all_reward_pokes.sort(key=lambda x: x[0])
-                
-                trial_dict['poke_window_end'] = poke_window_end
-                trial_dict['port1_pokes_count'] = len(port1_pokes_in_window)
-                trial_dict['port2_pokes_count'] = len(port2_pokes_in_window)
-                trial_dict['total_reward_pokes'] = len(all_reward_pokes)
-                
-                if all_reward_pokes:
-                    # Unrewarded trial (poked but no reward)
-                    first_poke_time, first_poke_port, first_poke_odor = all_reward_pokes[0]
-                    trial_dict['first_reward_poke_time'] = first_poke_time
-                    trial_dict['first_reward_poke_port'] = first_poke_port
-                    trial_dict['first_reward_poke_odor_identity'] = first_poke_odor
-                    completed_unrewarded.append(trial_dict.copy())
-                    
-                    # Add to HR-specific categories
-                    if hr_category == 'completed_hr':
-                        completed_hr_unrewarded.append(trial_dict.copy())
-                    elif hr_category == 'completed_hr_missed':
-                        completed_hr_missed_unrewarded.append(trial_dict.copy())
-                        
-                else:
-                    # Timeout trial (no poke within 2.5s)
-                    completed_timeout.append(trial_dict.copy())
-                    
-                    # Add to HR-specific categories
-                    if hr_category == 'completed_hr':
-                        completed_hr_timeout.append(trial_dict.copy())
-                    elif hr_category == 'completed_hr_missed':
-                        completed_hr_missed_timeout.append(trial_dict.copy())
-        else:
-            # This is an aborted sequence (no AwaitReward)
-            aborted_sequences.append(trial_dict.copy())
-            
-            # Check if it was a hidden rule trial
-            if hit_hidden_rule:
-                aborted_sequences_hr.append(trial_dict.copy())
-    
-    # Create DataFrames
-    result = {
-        # Base categories
-        'non_initiated_sequences': non_initiated_trials,
-        'initiated_sequences': initiated_trials,
-        'completed_sequences': pd.DataFrame(completed_sequences),
-        'aborted_sequences': pd.DataFrame(aborted_sequences),
-        
-        # Hidden rule categories
-        'aborted_sequences_HR': pd.DataFrame(aborted_sequences_hr),
-        'completed_sequences_HR': pd.DataFrame(completed_hr),
-        'completed_sequences_HR_missed': pd.DataFrame(completed_hr_missed),
-        
-        # Reward status categories (original)
-        'completed_sequence_rewarded': pd.DataFrame(completed_rewarded),
-        'completed_sequence_unrewarded': pd.DataFrame(completed_unrewarded),
-        'completed_sequence_reward_timeout': pd.DataFrame(completed_timeout),
-        
-        # Hidden rule + reward status categories
-        'completed_sequence_HR_rewarded': pd.DataFrame(completed_hr_rewarded),
-        'completed_sequence_HR_unrewarded': pd.DataFrame(completed_hr_unrewarded),
-        'completed_sequence_HR_reward_timeout': pd.DataFrame(completed_hr_timeout),
-        'completed_sequence_HR_missed_rewarded': pd.DataFrame(completed_hr_missed_rewarded),
-        'completed_sequence_HR_missed_unrewarded': pd.DataFrame(completed_hr_missed_unrewarded),
-        'completed_sequence_HR_missed_reward_timeout': pd.DataFrame(completed_hr_missed_timeout),
-    }
-    
-    # Print comprehensive summary statistics
-    if verbose:
-        print(f"\nTRIAL CLASSIFICATION RESULTS WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS:")
-        print(f"Hidden Rule Location: Position {hidden_rule_location + 1} (index {hidden_rule_location})")
-        print()
-        
-        total_attempts = len(initiated_trials) + len(non_initiated_trials)
-        print(f"Total attempts: {total_attempts}")
-        print(f"-- Non-initiated sequences: {len(non_initiated_trials)} ({len(non_initiated_trials)/total_attempts*100:.1f}%)")
-        print(f"-- Initiated sequences (trials): {len(initiated_trials)} ({len(initiated_trials)/total_attempts*100:.1f}%)")
-        print()
-        
-        print(f"INITIATED TRIALS BREAKDOWN:")
-        print(f"Total initiated trials: {len(initiated_trials)}")
-        print(f"-- Completed sequences: {len(result['completed_sequences'])} ({len(result['completed_sequences'])/len(initiated_trials)*100:.1f}%)")
-        print(f"   -- Hidden Rule trials (HR): {len(result['completed_sequences_HR'])} ({len(result['completed_sequences_HR'])/len(initiated_trials)*100:.1f}%)")
-        print(f"   -- Hidden Rule Missed (HR_missed): {len(result['completed_sequences_HR_missed'])} ({len(result['completed_sequences_HR_missed'])/len(initiated_trials)*100:.1f}%)")
-        print(f"-- Aborted sequences: {len(result['aborted_sequences'])} ({len(result['aborted_sequences'])/len(initiated_trials)*100:.1f}%)")
-        print(f"   -- Aborted Hidden Rule trials (HR): {len(result['aborted_sequences_HR'])} ({len(result['aborted_sequences_HR'])/len(initiated_trials)*100:.1f}%)")
-        print()
-        
-        print(f"REWARD STATUS BREAKDOWN:")
-        print(f"All completed trials: {len(result['completed_sequences'])}")
-        if len(result['completed_sequences']) > 0:
-            print(f"-- Rewarded: {len(result['completed_sequence_rewarded'])} ({len(result['completed_sequence_rewarded'])/len(result['completed_sequences'])*100:.1f}%)")
-            print(f"-- Unrewarded: {len(result['completed_sequence_unrewarded'])} ({len(result['completed_sequence_unrewarded'])/len(result['completed_sequences'])*100:.1f}%)")
-            print(f"-- Reward timeout: {len(result['completed_sequence_reward_timeout'])} ({len(result['completed_sequence_reward_timeout'])/len(result['completed_sequences'])*100:.1f}%)")
-        print()
-        
-        print(f"HIDDEN RULE SPECIFIC BREAKDOWN:")
-        hr_total = len(result['completed_sequences_HR'])
-        if hr_total > 0:
-            print(f"Completed HR trials: {hr_total}")
-            print(f"-- HR Rewarded: {len(result['completed_sequence_HR_rewarded'])} ({len(result['completed_sequence_HR_rewarded'])/hr_total*100:.1f}%)")
-            print(f"-- HR Unrewarded: {len(result['completed_sequence_HR_unrewarded'])} ({len(result['completed_sequence_HR_unrewarded'])/hr_total*100:.1f}%)")
-            print(f"-- HR Timeout: {len(result['completed_sequence_HR_reward_timeout'])} ({len(result['completed_sequence_HR_reward_timeout'])/hr_total*100:.1f}%)")
-        
-        hr_missed_total = len(result['completed_sequences_HR_missed'])
-        if hr_missed_total > 0:
-            print(f"Completed HR Missed trials: {hr_missed_total}")
-            print(f"-- HR Missed Rewarded: {len(result['completed_sequence_HR_missed_rewarded'])} ({len(result['completed_sequence_HR_missed_rewarded'])/hr_missed_total*100:.1f}%)")
-            print(f"-- HR Missed Unrewarded: {len(result['completed_sequence_HR_missed_unrewarded'])} ({len(result['completed_sequence_HR_missed_unrewarded'])/hr_missed_total*100:.1f}%)")
-            print(f"-- HR Missed Timeout: {len(result['completed_sequence_HR_missed_reward_timeout'])} ({len(result['completed_sequence_HR_missed_reward_timeout'])/hr_missed_total*100:.1f}%)")
-        print()
-        
-        # Print valve and poke time summary
-        print(f"VALVE AND POKE TIME ANALYSIS:")
-        completed_with_valve_times = [trial for trial in completed_sequences if trial.get('position_valve_times')]
-        completed_with_poke_times = [trial for trial in completed_sequences if trial.get('position_poke_times')]
-        completed_with_response = [trial for trial in completed_sequences if trial.get('response_time_ms') is not None]
-        
-        print(f"-- Completed trials with valve time data: {len(completed_with_valve_times)}/{len(completed_sequences)}")
-        print(f"-- Completed trials with poke time data: {len(completed_with_poke_times)}/{len(completed_sequences)}")
-        print(f"-- Completed trials with response time data: {len(completed_with_response)}/{len(completed_sequences)}")
-        
-        # Verify totals
-        total_classified = (len(result['completed_sequence_rewarded']) + 
-                           len(result['completed_sequence_unrewarded']) + 
-                           len(result['completed_sequence_reward_timeout']) + 
-                           len(result['aborted_sequences']))
-        
-        if total_classified == len(initiated_trials):
-            print(f"Classification complete: all {len(initiated_trials)} trials classified")
-        else:
-            print(f"Classification mismatch: {total_classified} classified vs {len(initiated_trials)} total")
-    
-    return result
-
-
-
-
-
-
 def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=True):#working version to classify trials and get valve/poke times. Part of wrapper function
     """
     Same classification as classify_trial_outcomes_extensive, plus:
@@ -2467,17 +964,25 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
     # Hidden rule location from stage
     hidden_rule_location = None
-    sequence_name = str(stage)
-    location_match = re.search(r'Location(\d+)', sequence_name)
-    if location_match:
-        hidden_rule_location = int(location_match.group(1))
-        if verbose:
-            print(f"Sequence name: {sequence_name}")
-            print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_location + 1})")
-    else:
-        if verbose:
-            print(f"Warning: No LocationX found in sequence name '{sequence_name}', hidden rule analysis will be skipped")
-        return classify_trial_outcomes(data, events, trial_counts)
+    sequence_name = None
+    if isinstance(stage, dict):
+        sequence_name = stage.get('stage_name') or str(stage)
+        if stage.get('hidden_rule_index') is not None:
+            try:
+                hidden_rule_location = int(stage['hidden_rule_index'])
+            except Exception:
+                hidden_rule_location = None
+    if hidden_rule_location is None:
+        sequence_name = sequence_name or str(stage)
+        m = re.search(r'Location(\d+)', sequence_name)
+        if m:
+            hidden_rule_location = int(m.group(1))
+    hidden_rule_position = hidden_rule_location + 1 if isinstance(hidden_rule_location, int) else None
+    if verbose:
+        if hidden_rule_location is not None:
+            print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_position})")
+        else:
+            print(f"No Hidden Rule Location found in sequence name: {sequence_name}. Proceeding without Hidden Rule analysis.")
 
     # Base trial data
     initiated_trials = trial_counts['initiated_sequences'].copy()
@@ -2532,10 +1037,6 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
     all_valve_activations.sort(key=lambda x: x['start_time'])
 
-    # Poke-time analysis parameters
-    poke_gap_threshold_ms = sample_offset_time_ms
-    minimum_poke_threshold_ms = minimum_sampling_time_ms
-
     if verbose:
         print(f"Found {len(all_valve_activations)} total valve activations (excluding Purge)")
         print(f"Analyzing {len(initiated_trials)} initiated trials...")
@@ -2576,11 +1077,28 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         odor_sequence = [activation['odor_name'] for activation in trial_valve_activations]
         return odor_sequence, trial_valve_activations
 
+
+    hr_odor_set = None
+    if hidden_rule_location is not None:
+        try:
+            _, schema_settings = detect_settings.detect_settings(root)
+            odors = (schema_settings.get('hiddenRuleOdorsInferred') or [])
+            if len(odors) < 2:
+                raise ValueError("Hidden Rule Odor Identities could not be inferred from Schema.")
+            hr_odor_set = set(map(str, odors))
+            if verbose:
+                print(f"Hidden Rule Odors inferred: {sorted(hr_odor_set)}")
+        except Exception as e:
+            raise ValueError(f"Hidden Rule Odor Identities could not be inferred from Schema: {e}")
+
+
     def check_hidden_rule(odor_sequence, idx):
-        if len(odor_sequence) <= idx:
+        if idx is None or hr_odor_set is None:
+            return False, False
+        if idx < 0 or idx >= len(odor_sequence):
             return False, False
         odor_at_location = odor_sequence[idx]
-        hit_hidden_rule = odor_at_location in ['OdorA', 'OdorB']
+        hit_hidden_rule = odor_at_location in hr_odor_set
         return True, hit_hidden_rule
 
     def analyze_trial_valve_and_poke_times(trial_valve_events):
@@ -2652,21 +1170,9 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             }
 
         # Poke-time analysis positions
-        poke_position_locations = {}
-        if 1 in position_locations:
-            poke_position_locations[1] = position_locations[1]
+        poke_position_locations = dict(position_locations)
 
-        current_valve = None
-        for event in trial_valve_events:
-            if event['valve_key'] != current_valve:
-                position = None
-                for pos, loc in position_locations.items():
-                    if pos >= 2 and loc['valve_key'] == event['valve_key']:
-                        position = pos
-                        break
-                if position and position <= 5:
-                    poke_position_locations[position] = event
-                current_valve = event['valve_key']
+        s_bool = poke_data.astype(bool)
 
         # Compute consolidated poke time
         for position in range(1, 6):
@@ -2675,84 +1181,46 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             loc = poke_position_locations[position]
             odor_start = loc['start_time']
             odor_end = loc['end_time']
-            odor_poke_data = poke_data.loc[odor_start:odor_end]
-            if odor_poke_data.empty:
+
+            # State at window start
+            prev_slice = s_bool.loc[:odor_start]
+            state_at_start = bool(prev_slice.iloc[-1]) if len(prev_slice) else False
+
+            # Window slice
+            w = s_bool.loc[odor_start:odor_end]
+            if w.empty and not state_at_start:
                 continue
 
-            valve_start_poke_status = False
-            if len(poke_data.loc[:odor_start]) > 0:
-                valve_start_poke_status = poke_data.loc[:odor_start].iloc[-1]
+            # Edges relative to start state
+            rises = w & ~w.shift(1, fill_value=state_at_start)
+            falls = ~w & w.shift(1, fill_value=state_at_start)
 
-            poke_transitions = []
-            prev_state = valve_start_poke_status
-            for timestamp, current_state in odor_poke_data.items():
-                if current_state != prev_state:
-                    poke_transitions.append({
-                        'time': timestamp,
-                        'state': current_state,
-                        'offset_ms': (timestamp - odor_start).total_seconds() * 1000
-                    })
-                    prev_state = current_state
+            # Build IN intervals within [odor_start, odor_end]
+            intervals = []
+            current_start = odor_start if state_at_start else None
+            for ts in w.index:
+                if rises.get(ts, False) and current_start is None:
+                    current_start = ts
+                if falls.get(ts, False) and current_start is not None:
+                    intervals.append((current_start, ts))
+                    current_start = None
+            if current_start is not None:
+                intervals.append((current_start, odor_end))  # clip at odor_end
 
-            consolidated_poke_time_ms = 0
+            if not intervals:
+                continue
 
-            if valve_start_poke_status:
-                current_poke_start = odor_start
-                for i, transition in enumerate(poke_transitions):
-                    if not transition['state']:
-                        consolidated_poke_time_ms += (transition['time'] - current_poke_start).total_seconds() * 1000
-                        if consolidated_poke_time_ms >= minimum_poke_threshold_ms:
-                            break
-                        next_poke_in = None
-                        for j in range(i + 1, len(poke_transitions)):
-                            if poke_transitions[j]['state']:
-                                next_poke_in = poke_transitions[j]
-                                break
-                        if next_poke_in:
-                            gap = (next_poke_in['time'] - transition['time']).total_seconds() * 1000
-                            if gap <= poke_gap_threshold_ms:
-                                consolidated_poke_time_ms += gap
-                                current_poke_start = next_poke_in['time']
-                            else:
-                                break
-                        else:
-                            break
-                if len(poke_transitions) == 0 or (len(poke_transitions) > 0 and poke_transitions[-1]['state']):
-                    consolidated_poke_time_ms += (odor_end - current_poke_start).total_seconds() * 1000
-            else:
-                first_poke_in = None
-                for t in poke_transitions:
-                    if t['state']:
-                        first_poke_in = t
-                        break
-                if first_poke_in:
-                    current_poke_start = first_poke_in['time']
-                    start_index = poke_transitions.index(first_poke_in)
-                    i = start_index
-                    while i < len(poke_transitions):
-                        transition = poke_transitions[i]
-                        if not transition['state']:
-                            consolidated_poke_time_ms += (transition['time'] - current_poke_start).total_seconds() * 1000
-                            if consolidated_poke_time_ms >= minimum_poke_threshold_ms:
-                                break
-                            next_poke_in = None
-                            for j in range(i + 1, len(poke_transitions)):
-                                if poke_transitions[j]['state']:
-                                    next_poke_in = poke_transitions[j]
-                                    break
-                            if next_poke_in:
-                                gap = (next_poke_in['time'] - transition['time']).total_seconds() * 1000
-                                if gap <= poke_gap_threshold_ms:
-                                    consolidated_poke_time_ms += gap
-                                    current_poke_start = next_poke_in['time']
-                                    i = poke_transitions.index(next_poke_in)
-                                else:
-                                    break
-                            else:
-                                break
-                        i += 1
-                    if len(poke_transitions) == 1 or (len(poke_transitions) > start_index and all(t['state'] for t in poke_transitions[start_index:])):
-                        consolidated_poke_time_ms += (odor_end - current_poke_start).total_seconds() * 1000
+            # Merge across gaps <= sample_offset_time_ms
+            merged = [intervals[0]]
+            for start, end in intervals[1:]:
+                ls, le = merged[-1]
+                gap_ms = (start - le).total_seconds() * 1000.0
+                if gap_ms <= sample_offset_time_ms:
+                    merged[-1] = (ls, max(le, end))
+                else:
+                    merged.append((start, end))
+
+            consolidated_poke_time_ms = sum((e - s).total_seconds() * 1000.0 for s, e in merged)
 
             if consolidated_poke_time_ms > 0:
                 position_poke_times[position] = {
@@ -2760,7 +1228,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                     'odor_name': loc['odor_name'],
                     'poke_time_ms': consolidated_poke_time_ms,
                     'poke_odor_start': odor_start,
-                    'poke_odor_end': odor_end
+                    'poke_odor_end': odor_end,
                 }
 
         return position_valve_times, position_poke_times
@@ -2810,7 +1278,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             trial_dict['await_reward_time'] = await_reward_time
 
             if hit_hidden_rule:
-                if len(odor_sequence) == hidden_rule_location + 1:
+                if len(odor_sequence) == hidden_rule_position:
                     completed_hr.append(trial_dict.copy())
                     hr_category = 'completed_hr'
                 else:
@@ -2923,7 +1391,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
     if verbose:
         print(f"\nTRIAL CLASSIFICATION RESULTS WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS (NO RESPONSE-TIME):")
-        print(f"Hidden Rule Location: Position {hidden_rule_location + 1} (index {hidden_rule_location})\n")
+        print(f"Hidden Rule Location: Position {hidden_rule_position} (index {hidden_rule_location})\n")
 
         total_attempts = len(initiated_trials) + len(non_initiated_trials)
         print(f"Total attempts: {total_attempts}")
@@ -3039,16 +1507,25 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
 
     # Extract hidden rule location
     hidden_rule_location = None
-    sequence_name = str(stage)
-    location_match = re.search(r'Location(\d+)', sequence_name)
-    if location_match:
-        hidden_rule_location = int(location_match.group(1))
-        if verbose:
-            print(f"Hidden rule location: Position {hidden_rule_location + 1} (index {hidden_rule_location})")
-    else:
-        if verbose:
-            print("No hidden rule location found")
-        return None
+    sequence_name = None
+    if isinstance(stage, dict):
+        sequence_name = stage.get('stage_name') or str(stage)
+        if stage.get('hidden_rule_index') is not None:
+            try:
+                hidden_rule_location = int(stage['hidden_rule_index'])
+            except Exception:
+                hidden_rule_location = None
+    if hidden_rule_location is None:
+        sequence_name = sequence_name or str(stage)
+        m = re.search(r'Location(\d+)', sequence_name)
+        if m:
+            hidden_rule_location = int(m.group(1))
+    hidden_rule_position = hidden_rule_location + 1 if isinstance(hidden_rule_location, int) else None
+    if verbose:
+        if hidden_rule_location is not None:
+            print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_position})")
+        else:
+            print(f"No Hidden Rule Location found in sequence name: {sequence_name}. Proceeding without Hidden Rule analysis.")
 
     # Get initiated trials and events (same as main function)
     initiated_trials = trial_counts['initiated_sequences']
@@ -3124,11 +1601,27 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         odor_sequence = [activation['odor_name'] for activation in trial_valve_activations]
         return odor_sequence, trial_valve_activations
 
+    hr_odor_set = None
+    if hidden_rule_location is not None:
+        try:
+            _, schema_settings = detect_settings.detect_settings(root)
+            odors = (schema_settings.get('hiddenRuleOdorsInferred') or [])
+            if len(odors) < 2:
+                raise ValueError("Hidden Rule Odor Identities could not be inferred from Schema.")
+            hr_odor_set = set(map(str, odors))
+            if verbose:
+                print(f"Hidden Rule Odors dinferred: {sorted(hr_odor_set)}")
+        except Exception as e:
+            raise ValueError(f"Hidden Rule Odor Identities could not be inferred from Schema: {e}")
+
+
     def check_hidden_rule(odor_sequence, idx):
-        if len(odor_sequence) <= idx:
+        if idx is None or hr_odor_set is None:
+            return False, False
+        if idx < 0 or idx >= len(odor_sequence):
             return False, False
         odor_at_location = odor_sequence[idx]
-        hit_hidden_rule = odor_at_location in ['OdorA', 'OdorB']
+        hit_hidden_rule = odor_at_location in hr_odor_set
         return True, hit_hidden_rule
 
     def find_next_trial_start(current_trial_end, all_trials):
@@ -3157,7 +1650,7 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         _, hit_hidden_rule = check_hidden_rule(odor_sequence, hidden_rule_location)
 
         # Determine target odor position
-        if hit_hidden_rule and len(odor_sequence) == hidden_rule_location + 1:
+        if hit_hidden_rule and len(odor_sequence) == hidden_rule_position:
             target_position = hidden_rule_location
         else:
             target_position = len(odor_sequence) - 1
@@ -3313,7 +1806,6 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                     delayed_port1_pokes = delayed_port1_starts[delayed_port1_starts == True].index.tolist()
                 if not port2_pokes.empty and delayed_search_start < extended_search_end:
                     delayed_port2_window = port2_pokes[delayed_search_start:extended_search_end]
-                    delayed_port2_starts = port2_window & ~port2_window.shift(1, fill_value=False) if False else None  # placeholder to avoid NameError
                     delayed_port2_starts = delayed_port2_window & ~delayed_port2_window.shift(1, fill_value=False)
                     delayed_port2_pokes = delayed_port2_starts[delayed_port2_starts == True].index.tolist()
 
@@ -3427,11 +1919,27 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
         }
 
     # Parse hidden rule location (index)
-    sequence_name = str(stage)
+    sequence_name = None
     hidden_rule_location = None
-    m = re.search(r'Location(\d+)', sequence_name)
-    if m:
-        hidden_rule_location = int(m.group(1))
+    if isinstance(stage, dict):
+        sequence_name = stage.get('stage_name') or str(stage)
+        if stage.get('hidden_rule_index') is not None:
+            try:
+                hidden_rule_location = int(stage['hidden_rule_index'])
+            except Exception:
+                hidden_rule_location = None
+    if hidden_rule_location is None:
+        sequence_name = sequence_name or str(stage)
+        m = re.search(r'Location(\d+)', sequence_name)
+        if m:
+            hidden_rule_location = int(m.group(1))
+    hidden_rule_pos = hidden_rule_location + 1 if isinstance(hidden_rule_location, int) else None
+    if hidden_rule_location is not None:
+        print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_pos})")
+    else:
+        print(f"No Hidden Rule Location found in sequence name: {sequence_name}. Proceeding without Hidden Rule analysis.")
+
+
 
     # Precompute data used below
     await_reward_times = events['combined_await_reward_df']['Time'].tolist() if 'combined_await_reward_df' in events else []
@@ -3466,7 +1974,7 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
         # Determine target odor position (0-based) matching the analyzer’s rule
         num_odors = int(row.get('num_odors', 0) or 0)
         hit_hr = bool(row.get('hit_hidden_rule', False))
-        if hidden_rule_location is not None and hit_hr and num_odors == hidden_rule_location + 1:
+        if hidden_rule_location is not None and hit_hr and num_odors == hidden_rule_pos:
             target_pos_idx = hidden_rule_location  # zero-based
         else:
             target_pos_idx = max(0, num_odors - 1)
