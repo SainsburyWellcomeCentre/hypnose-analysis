@@ -1058,6 +1058,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     completed_hr_missed_rewarded = []
     completed_hr_missed_unrewarded = []
     completed_hr_missed_timeout = []
+    non_initiated_odor1_attempts = []
 
     # Aggregators for summary prints (completed trials only)
     agg_position_poke_times = {pos: [] for pos in range(1, 6)}
@@ -1105,6 +1106,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         position_locations = {}
         position_valve_times = {}
         position_poke_times = {}
+        prior_presentations = []
 
         # Position 1: last individual activation of first odor
         if trial_valve_events:
@@ -1117,6 +1119,19 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                     break
             if first_odor_activations:
                 position_locations[1] = first_odor_activations[-1]
+                prior_presentations = [
+                    {
+                        'position': 1,
+                        'odor_name': e['odor_name'],
+                        'valve_start': e['start_time'],
+                        'valve_end': e['end_time'],
+                    }
+                    for e in first_odor_activations[:-1]
+                ]
+            else:
+                prior_presentations = []
+        else:
+            prior_presentations = []
 
         # Group consecutive events for positions 2-5
         grouped = []
@@ -1161,13 +1176,16 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             valve_start = loc['start_time']
             valve_end = loc['end_time']
             valve_duration_ms = (valve_end - valve_start).total_seconds() * 1000
-            position_valve_times[position] = {
+            entry = {
                 'position': position,
                 'odor_name': loc['odor_name'],
                 'valve_start': valve_start,
                 'valve_end': valve_end,
                 'valve_duration_ms': valve_duration_ms
             }
+            if position == 1:
+                entry['prior_presentations'] = prior_presentations
+            position_valve_times[position] = entry 
 
         # Poke-time analysis positions
         poke_position_locations = dict(position_locations)
@@ -1221,6 +1239,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                     merged.append((start, end))
 
             consolidated_poke_time_ms = sum((e - s).total_seconds() * 1000.0 for s, e in merged)
+            first_poke_in = merged[0][0] if merged else None
 
             if consolidated_poke_time_ms > 0:
                 position_poke_times[position] = {
@@ -1229,6 +1248,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                     'poke_time_ms': consolidated_poke_time_ms,
                     'poke_odor_start': odor_start,
                     'poke_odor_end': odor_end,
+                    'poke_first_in': first_poke_in,
                 }
 
         return position_valve_times, position_poke_times
@@ -1241,6 +1261,21 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
         position_valve_times, position_poke_times = analyze_trial_valve_and_poke_times(valve_activations)
 
+        pos1_info = position_valve_times.get(1, {})
+        for attempt in pos1_info.get('prior_presentations', []) or []:
+            non_initiated_odor1_attempts.append({
+                'trial_id': trial['trial_id'] if 'trial_id' in trial else None,
+                'attempt_start': attempt.get('valve_start'),
+                'attempt_end': attempt.get('valve_end'),
+                'odor_name': attempt.get('odor_name'),
+            })
+
+        # Compute corrected trial start = first poke-in within last Pos1 window
+        corrected_start = None
+        pos1_poke = position_poke_times.get(1)
+        if pos1_poke:
+            corrected_start = pos1_poke.get('poke_first_in') or pos1_poke.get('poke_odor_start')
+
         trial_await_rewards = [t for t in await_reward_times if trial_start <= t <= trial_end]
 
         trial_dict = trial.to_dict()
@@ -1251,6 +1286,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_dict['sequence_name'] = sequence_name
         trial_dict['position_valve_times'] = position_valve_times
         trial_dict['position_poke_times'] = position_poke_times
+        if corrected_start is not None:
+            trial_dict['sequence_start_corrected'] = corrected_start
 
         enough_odors, hit_hidden_rule = check_hidden_rule(odor_sequence, hidden_rule_location)
         trial_dict['enough_odors_for_hr'] = enough_odors
@@ -1364,6 +1401,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         'initiated_sequences': initiated_trials,
         'completed_sequences': pd.DataFrame(completed_sequences),
         'aborted_sequences': pd.DataFrame(aborted_sequences),
+        'non_initiated_odor1_attempts': pd.DataFrame(non_initiated_odor1_attempts),
 
         'aborted_sequences_HR': pd.DataFrame(aborted_sequences_hr),
         'completed_sequences_HR': pd.DataFrame(completed_hr),
@@ -1393,9 +1431,21 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         print(f"\nTRIAL CLASSIFICATION RESULTS WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS (NO RESPONSE-TIME):")
         print(f"Hidden Rule Location: Position {hidden_rule_position} (index {hidden_rule_location})\n")
 
-        total_attempts = len(initiated_trials) + len(non_initiated_trials)
+
+        base_non_init_df = result.get('non_initiated_sequences', pd.DataFrame())
+        pos1_attempts_df = result.get('non_initiated_odor1_attempts', pd.DataFrame())
+
+        base_non_init_count = 0 if base_non_init_df is None or base_non_init_df.empty else len(base_non_init_df)
+        pos1_attempts_count = 0 if pos1_attempts_df is None or pos1_attempts_df.empty else len(pos1_attempts_df)
+
+        total_non_init = base_non_init_count + pos1_attempts_count
+        total_attempts = len(initiated_trials) + total_non_init
+        
         print(f"Total attempts: {total_attempts}")
-        print(f"-- Non-initiated sequences: {len(non_initiated_trials)} ({len(non_initiated_trials)/total_attempts*100:.1f}%)")
+        print(f"-- Non-initiated sequences (total): {total_non_init} ({total_non_init/total_attempts*100:.1f}%)")
+        if pos1_attempts_count:
+            print(f"    -- Position 1 attempts within trials {pos1_attempts_count} ({pos1_attempts_count/total_non_init*100:.1f}%)")
+            print(f"    -- Baseline non-initiated sequences {base_non_init_count} ({base_non_init_count/total_non_init*100:.1f}%)")
         print(f"-- Initiated sequences (trials): {len(initiated_trials)} ({len(initiated_trials)/total_attempts*100:.1f}%)\n")
 
         print("INITIATED TRIALS BREAKDOWN:")
@@ -1610,7 +1660,7 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                 raise ValueError("Hidden Rule Odor Identities could not be inferred from Schema.")
             hr_odor_set = set(map(str, odors))
             if verbose:
-                print(f"Hidden Rule Odors dinferred: {sorted(hr_odor_set)}")
+                print(f"Hidden Rule Odors inferred: {sorted(hr_odor_set)}")
         except Exception as e:
             raise ValueError(f"Hidden Rule Odor Identities could not be inferred from Schema: {e}")
 
