@@ -7,6 +7,7 @@ import os
 import json
 from dotmap import DotMap
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from glob import glob
 from aeon.io.reader import Reader, Csv
@@ -20,7 +21,10 @@ import zoneinfo
 import src.processing.detect_settings as detect_settings
 from datetime import datetime, timezone
 from collections import defaultdict
+from bisect import bisect_left, bisect_right
 
+
+# ============== General Utility Functions and Class Definitions =======================================
 class SessionData(Reader):
     """Extracts metadata information from a settings .jsonl file."""
 
@@ -706,6 +710,10 @@ def load_odor_mapping(root, data=None):
         }
     
 
+
+# ================= Functions for Trial Analysis and Classification ========================
+
+
 def detect_trials(data, events, root, verbose=True):
     """
     Trial Detection Function     
@@ -938,8 +946,7 @@ def get_experiment_parameters(root):
 
     return sample_offset_time, minimum_sampling_time, response_time
 
-
-def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=True):#working version to classify trials and get valve/poke times. Part of wrapper function
+def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=True):# Classify trials and get valve/poke times. Part of wrapper function
     """
     Same classification as classify_trial_outcomes_extensive, plus:
       - position_valve_times and position_poke_times per trial
@@ -956,7 +963,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
     if verbose:
         print("=" * 80)
-        print("CLASSIFYING TRIAL OUTCOMES (NO RESPONSE-TIME) WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS")
+        print("CLASSIFYING TRIAL OUTCOMES WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS")
         print("=" * 80)
         print(f"Sample offset time: {sample_offset_time_ms} ms")
         print(f"Minimum sampling time: {minimum_sampling_time_ms} ms")
@@ -1002,6 +1009,28 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
     # Nose-poke data (Port0) for poke-time analysis during odors
     poke_data = data['digital_input_data'].get('DIPort0', pd.Series(dtype=bool))
+
+    poke_series_full = poke_data.astype(bool)
+    _rises = poke_series_full & ~poke_series_full.shift(1, fill_value=False)
+    _falls = ~poke_series_full & poke_series_full.shift(1, fill_value=False)
+    _starts = list(poke_series_full.index[_rises])
+    _ends = list(poke_series_full.index[_falls])
+    poke_intervals = []
+    i = j = 0
+    while i < len(_starts) and j < len(_ends):
+        if _ends[j] <= _starts[i]:
+            j += 1
+            continue
+        poke_intervals.append((_starts[i], _ends[j]))
+        i += 1
+        j += 1
+    # If the series starts IN without a detected start edge, optionally prepend
+    if poke_series_full.size and poke_series_full.iloc[0] and (not _starts or poke_series_full.index[0] < _starts[0]):
+        # close it at the first fall after the beginning
+        first_fall = next((t for t in _ends if t > poke_series_full.index[0]), None)
+        if first_fall is not None:
+            poke_intervals.insert(0, (poke_series_full.index[0], first_fall))
+
 
     # Build valve activation list
     olfactometer_valves = odor_map['olfactometer_valves']
@@ -1092,7 +1121,6 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         except Exception as e:
             raise ValueError(f"Hidden Rule Odor Identities could not be inferred from Schema: {e}")
 
-
     def check_hidden_rule(odor_sequence, idx):
         if idx is None or hr_odor_set is None:
             return False, False
@@ -1101,6 +1129,67 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         odor_at_location = odor_sequence[idx]
         hit_hidden_rule = odor_at_location in hr_odor_set
         return True, hit_hidden_rule
+    
+    def _attempt_bout_from_poke_in(anchor_ts, cap_end=None):
+        """
+        Return (first_in_ts, bout_end_ts_capped, duration_ms) for the attempt whose valve starts at anchor_ts.
+        - If anchor_ts falls inside an IN interval, start at that interval's start.
+        - Else, use the first IN interval that starts at/after anchor_ts.
+        - Merge backward across previous IN intervals while OUT gaps <= sample_offset_time_ms
+        (to include pre-anchor pokes that are part of the same bout).
+        - Merge forward across subsequent IN intervals while OUT gaps <= sample_offset_time_ms.
+        - Cap the merged bout at cap_end if provided.
+        """
+        if anchor_ts is None or not poke_intervals:
+            return None, None, 0.0
+
+        starts_only = [s for s, _ in poke_intervals]
+
+        # Find interval covering anchor or the first one after
+        from bisect import bisect_left, bisect_right
+        idx = bisect_right(starts_only, anchor_ts) - 1
+        if 0 <= idx < len(poke_intervals) and poke_intervals[idx][0] <= anchor_ts < poke_intervals[idx][1]:
+            k = idx
+        else:
+            k = bisect_left(starts_only, anchor_ts)
+            if k >= len(poke_intervals):
+                return None, None, 0.0
+
+        # Start with the interval at k
+        bout_start, bout_end = poke_intervals[k]
+
+        # Backward merge: include prior intervals if the gap <= sample_offset_time_ms
+        m = k
+        while m - 1 >= 0:
+            prev_start, prev_end = poke_intervals[m - 1]
+            gap_ms = (bout_start - prev_end).total_seconds() * 1000.0
+            if gap_ms <= sample_offset_time_ms:
+                bout_start = prev_start
+                m -= 1
+            else:
+                break
+
+        # Forward merge: include next intervals if the gap <= sample_offset_time_ms (respect cap_end)
+        n = k
+        cur_end = bout_end
+        while n + 1 < len(poke_intervals):
+            next_start, next_end = poke_intervals[n + 1]
+            if cap_end is not None and next_start >= cap_end:
+                break
+            gap_ms = (next_start - cur_end).total_seconds() * 1000.0
+            if gap_ms <= sample_offset_time_ms:
+                cur_end = max(cur_end, next_end)
+                n += 1
+            else:
+                break
+
+        # Cap forward end at cap_end if provided
+        bout_end_capped = cur_end
+        if cap_end is not None and bout_end_capped is not None and bout_end_capped > cap_end:
+            bout_end_capped = cap_end
+
+        dur_ms = max(0.0, (bout_end_capped - bout_start).total_seconds() * 1000.0)
+        return bout_start, bout_end_capped, float(dur_ms)
 
     def analyze_trial_valve_and_poke_times(trial_valve_events):
         position_locations = {}
@@ -1261,20 +1350,29 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
         position_valve_times, position_poke_times = analyze_trial_valve_and_poke_times(valve_activations)
 
-        pos1_info = position_valve_times.get(1, {})
+        pos1_info = position_valve_times.get(1, {}) or {}
+        last_pos1_start = pos1_info.get('valve_start')
+
+        # Record earlier Position-1 presentations as non-initiated attempts with correct poke timing
         for attempt in pos1_info.get('prior_presentations', []) or []:
+            a_start = attempt.get('valve_start')   # attempt valve start (for reference)
+            # Cap at the last Pos1 valve START (trial starts at last odor 1 opening)
+            first_in, bout_end, dur_ms = _attempt_bout_from_poke_in(anchor_ts=a_start, cap_end=last_pos1_start)
             non_initiated_odor1_attempts.append({
                 'trial_id': trial['trial_id'] if 'trial_id' in trial else None,
-                'attempt_start': attempt.get('valve_start'),
+                'attempt_start': a_start,
                 'attempt_end': attempt.get('valve_end'),
                 'odor_name': attempt.get('odor_name'),
+                'attempt_first_poke_in': first_in,
+                'attempt_poke_time_ms': dur_ms,
             })
 
-        # Compute corrected trial start = first poke-in within last Pos1 window
+        # Compute corrected trial start = first poke-in within last Pos1 window (existing local window logic)
         corrected_start = None
         pos1_poke = position_poke_times.get(1)
         if pos1_poke:
             corrected_start = pos1_poke.get('poke_first_in') or pos1_poke.get('poke_odor_start')
+
 
         trial_await_rewards = [t for t in await_reward_times if trial_start <= t <= trial_end]
 
@@ -1419,6 +1517,12 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         'completed_sequence_HR_missed_reward_timeout': pd.DataFrame(completed_hr_missed_timeout),
     }
 
+    if isinstance(result['non_initiated_sequences'], pd.DataFrame) and not result['non_initiated_sequences'].empty:
+        df = result['non_initiated_sequences'].copy()
+        if 'continuous_poke_time_ms' in df.columns:
+            df['pos1_poke_time_ms'] = pd.to_numeric(df['continuous_poke_time_ms'], errors='coerce').fillna(0.0)
+        result['non_initiated_sequences'] = df
+
     # Plural aliases to prevent KeyErrors in downstream code
     result['completed_sequences_HR_rewarded'] = result['completed_sequence_HR_rewarded']
     result['completed_sequences_HR_unrewarded'] = result['completed_sequence_HR_unrewarded']
@@ -1428,7 +1532,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     result['completed_sequences_HR_missed_reward_timeout'] = result['completed_sequence_HR_missed_reward_timeout']
 
     if verbose:
-        print(f"\nTRIAL CLASSIFICATION RESULTS WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS (NO RESPONSE-TIME):")
+        print(f"\nTRIAL CLASSIFICATION RESULTS WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS:")
         print(f"Hidden Rule Location: Position {hidden_rule_position} (index {hidden_rule_location})\n")
 
 
@@ -1440,7 +1544,6 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
         total_non_init = base_non_init_count + pos1_attempts_count
         total_attempts = len(initiated_trials) + total_non_init
-        
         print(f"Total attempts: {total_attempts}")
         print(f"-- Non-initiated sequences (total): {total_non_init} ({total_non_init/total_attempts*100:.1f}%)")
         if pos1_attempts_count:
@@ -1514,6 +1617,18 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 min_v = min(times); max_v = max(times); avg_v = sum(times) / len(times)
                 print(f"{odor_name}: {min_v:.1f} - {max_v:.1f}ms (avg: {avg_v:.1f}ms, n={len(times)})")
 
+        print("\nNON-INITIATED TRIALS POKE TIMES:")
+        print("-" * 40)
+        if not result['non_initiated_sequences'].empty:
+            base = result['non_initiated_sequences']
+            pos1 = result['non_initiated_odor1_attempts']
+            print(f"Baseline non-initiated: n={len(base)} avg={base['pos1_poke_time_ms'].mean():.1f} ms range={base['pos1_poke_time_ms'].min():.1f}-{base['pos1_poke_time_ms'].max():.1f} ms")
+            if not pos1.empty:
+                s = pd.to_numeric(pos1['attempt_poke_time_ms'], errors='coerce').dropna()
+                print(f"Pos1 attempts: n={len(s)} avg={s.mean():.1f} ms range={s.min():.1f}-{s.max():.1f} ms")
+            else:
+                print("Pos1 attempts: n=0")
+
         # Verify totals
         total_classified = (len(result['completed_sequence_rewarded'])
                             + len(result['completed_sequence_unrewarded'])
@@ -1526,10 +1641,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
     return result
 
-
-
-
-def analyze_response_times(data, trial_counts, events, odor_map, stage, root, verbose=True):#working version to analyze response times for all completed trials. Part of wrapper function
+def analyze_response_times(data, trial_counts, events, odor_map, stage, root, verbose=True):# Analyze response times for all completed trials. Part of wrapper function
     """
     Analyze response times for all completed trials (clean version).
     Behavior and prints match analyze_response_times_all_trials_fixed.
@@ -1552,7 +1664,7 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
 
     if verbose:
         print("=" * 80)
-        print("RESPONSE TIME ANALYSIS - ALL COMPLETED TRIALS (FIXED)")
+        print("RESPONSE TIME ANALYSIS - ALL COMPLETED TRIALS")
         print("=" * 80)
 
     # Extract hidden rule location
@@ -1926,9 +2038,692 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         'failed_calculations': failed_calculations
     }
 
+def abortion_classification(data, events, classification, odor_map, root, verbose=True): # Classify aborted trials with response times, poke times, FA etc. Part of wrapper function
+    """
+    Further classify aborted trials:
+      - Compute valve and poke times per odor presentation (same rules as other trials)
+      - Determine last relevant odor (last valve open with duration >= sample_offset_time_ms)
+      - Compute poke time for that last odor (from poke-in that covers/starts at valve_start,
+        merging gaps <= sample_offset_time_ms, ends at first large gap)
+      - Abortion type:
+          * reinitiation_abortion if last-odor poke >= minimum_sampling_time_ms
+          * initiation_abortion otherwise
+      - Abortion time = last cue-port poke-out within the trial window
+      - False alarm (FA) detection window = (abortion_time, next cue-port poke after next InitiationSequence)
+          * If any reward-port poke occurs in this window -> FA
+            - FA_time_in: latency <= response_time
+            - FA_time_out: latency <= 3 * response_time
+            - FA_late: latency > 3 * response_time
+          * Else nFA
+
+    Returns:
+      pd.DataFrame with detailed aborted trials:
+        ['trial_id','sequence_start','sequence_end','odor_sequence',
+         'position_valve_times','position_poke_times',
+         'last_odor_position','last_odor_name','last_odor_valve_duration_ms',
+         'last_odor_poke_time_ms','abortion_type',
+         'abortion_time','fa_label','fa_time','fa_latency_ms']
+    """
+
+    # Parameters
+    sample_offset_time, minimum_sampling_time, response_time = get_experiment_parameters(root)
+    sample_offset_time_ms = float(sample_offset_time) * 1000.0
+    minimum_sampling_time_ms = float(minimum_sampling_time) * 1000.0
+    response_time_ms = float(response_time) * 1000.0
+
+    # Inputs
+    aborted_df = classification.get('aborted_sequences', pd.DataFrame())
+    if not isinstance(aborted_df, pd.DataFrame) or aborted_df.empty:
+        if verbose:
+            print("abortion_classification: no aborted trials found.")
+        return pd.DataFrame()
+
+    DIP0 = data['digital_input_data'].get('DIPort0', pd.Series(dtype=bool)).astype(bool)  # cue port
+    DIP1 = data['digital_input_data'].get('DIPort1', pd.Series(dtype=bool)).astype(bool)  # reward port 1
+    DIP2 = data['digital_input_data'].get('DIPort2', pd.Series(dtype=bool)).astype(bool)  # reward port 2
+
+    # Build global poke intervals for cue port
+    def build_intervals(series_bool):
+        rises = series_bool & ~series_bool.shift(1, fill_value=False)
+        falls = ~series_bool & series_bool.shift(1, fill_value=False)
+        starts = list(series_bool.index[rises])
+        ends = list(series_bool.index[falls])
+        intervals = []
+        i = j = 0
+        while i < len(starts) and j < len(ends):
+            if ends[j] <= starts[i]:
+                j += 1
+                continue
+            intervals.append((starts[i], ends[j]))
+            i += 1
+            j += 1
+        return intervals
+
+    cue_intervals = build_intervals(DIP0)
+
+    # Reward-port rising edges (for FA)
+    def rising_times(series_bool):
+        rises = series_bool & ~series_bool.shift(1, fill_value=False)
+        return list(series_bool.index[rises])
+
+    reward_rises = sorted(rising_times(DIP1) + rising_times(DIP2))
+    cue_rises = rising_times(DIP0)
+
+    # Helper: bout from poke-in that covers/starts after anchor, merging gaps <= sample_offset_time_ms; no cap
+    def bout_from_anchor(anchor_ts):
+        if anchor_ts is None or not cue_intervals:
+            return None, None, 0.0
+        starts_only = [s for s, _ in cue_intervals]
+        # interval covering anchor?
+        idx = bisect_right(starts_only, anchor_ts) - 1
+        within = None
+        if 0 <= idx < len(cue_intervals):
+            s0, e0 = cue_intervals[idx]
+            if s0 <= anchor_ts < e0:
+                within = idx
+        if within is not None:
+            k = within
+        else:
+            k = bisect_left(starts_only, anchor_ts)
+            if k >= len(cue_intervals):
+                return None, None, 0.0
+        # merge forward across short gaps
+        bout_start, cur_end = cue_intervals[k]
+        m = k
+        while m + 1 < len(cue_intervals):
+            s2, e2 = cue_intervals[m + 1]
+            gap_ms = (s2 - cur_end).total_seconds() * 1000.0
+            if gap_ms <= sample_offset_time_ms:
+                cur_end = max(cur_end, e2)
+                m += 1
+            else:
+                break
+        dur_ms = max(0.0, (cur_end - bout_start).total_seconds() * 1000.0)
+        return bout_start, cur_end, float(dur_ms)
+
+    # Build all valve activations (exclude Purge) with odor names
+    olfactometer_valves = odor_map.get('olfactometer_valves', {})
+    valve_to_odor = odor_map.get('valve_to_odor', {})
+
+    def resolve_odor_name(olf_id, idx, col=None):
+        # Try explicit mapping variants
+        name = valve_to_odor.get((olf_id, idx))
+        if name is None and col is not None:
+            name = valve_to_odor.get(col)
+        if name is None:
+            name = valve_to_odor.get(f"{olf_id}{idx}")
+        # Fallback to grid map
+        if not isinstance(name, str):
+            grid = odor_map.get('odour_to_olfactometer_map') or odor_map.get('odor_to_olfactometer_map')
+            if isinstance(grid, (list, tuple)) and len(grid) > olf_id:
+                row = grid[olf_id]
+                if isinstance(row, (list, tuple)) and 0 <= idx < len(row):
+                    name = row[idx]
+        return name if isinstance(name, str) else None
+
+    all_valve_activations = []
+    for olf_id, df in olfactometer_valves.items():
+        if df is None or getattr(df, 'empty', True):
+            continue
+        for i, col in enumerate(df.columns):
+            odor_name = resolve_odor_name(olf_id, i, col=col)
+            if not odor_name or odor_name.lower() == 'purge':
+                continue
+            s = df[col].astype(bool)
+            rises = s & ~s.shift(1, fill_value=False)
+            falls = ~s & s.shift(1, fill_value=False)
+            starts = list(s.index[rises])
+            ends = list(s.index[falls])
+            j = 0
+            for st in starts:
+                while j < len(ends) and ends[j] <= st:
+                    j += 1
+                if j >= len(ends):
+                    break
+                all_valve_activations.append({
+                    'start_time': starts[starts.index(st)],  # keep ref
+                    'end_time': ends[j],
+                    'odor_name': odor_name,
+                    'olf_id': olf_id,
+                    'col_index': i,
+                })
+                j += 1
+    all_valve_activations.sort(key=lambda x: x['start_time'])
+
+    # Helpers to extract trial events and per-odor poke times
+    def trial_valve_events(t_start, t_end):
+        evs = []
+        for ev in all_valve_activations:
+            if ev['end_time'] <= t_start:
+                continue
+            if ev['start_time'] >= t_end:
+                break  # because sorted
+            evs.append(ev)
+        return evs
+
+    def window_poke_summary(window_start, window_end):
+        # consolidated poke time within [window_start, window_end] (merge gaps <= sample_offset_time_ms)
+        if window_start is None or window_end is None or window_start >= window_end:
+            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+        # State at window start
+        prev = DIP0.loc[:window_start]
+        in_at_start = bool(prev.iloc[-1]) if len(prev) else False
+        w = DIP0.loc[window_start:window_end]
+        if w.empty and not in_at_start:
+            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+        rises = w & ~w.shift(1, fill_value=in_at_start)
+        falls = ~w & w.shift(1, fill_value=in_at_start)
+        intervals = []
+        cur = window_start if in_at_start else None
+        first_in = None
+        for ts in w.index:
+            if rises.get(ts, False) and cur is None:
+                cur = ts
+                if first_in is None:
+                    first_in = ts
+            if falls.get(ts, False) and cur is not None:
+                intervals.append((cur, ts))
+                cur = None
+        if cur is not None:
+            intervals.append((cur, window_end))
+        if not intervals:
+            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+        # merge across short gaps
+        merged = [intervals[0]]
+        for s2, e2 in intervals[1:]:
+            ls, le = merged[-1]
+            gap_ms = (s2 - le).total_seconds() * 1000.0
+            if gap_ms <= sample_offset_time_ms:
+                merged[-1] = (ls, max(le, e2))
+            else:
+                merged.append((s2, e2))
+        total_ms = sum((e - s).total_seconds() * 1000.0 for s, e in merged)
+        return {'poke_time_ms': float(total_ms), 'poke_first_in': first_in, 'poke_odor_start': window_start}
+
+    # InitiationSequence times (for FA end window)
+    init_times = []
+    ci_key = 'combined_initiation_sequence_df'
+    if ci_key in events and isinstance(events[ci_key], pd.DataFrame) and not events[ci_key].empty:
+        init_times = list(events[ci_key]['Time'])
+
+    # Process aborted trials
+    rows = []
+    for _, tr in aborted_df.iterrows():
+        t_start = tr.get('sequence_start') or tr.get('trial_start') or tr.get('start_time')
+        t_end = tr.get('sequence_end') or tr.get('trial_end') or tr.get('end_time')
+        trial_id = tr.get('trial_id', tr.name)
+        if pd.isna(t_start) or pd.isna(t_end) or t_start is None or t_end is None:
+            continue
+
+        # Extract valve events and odor sequence
+        evs = trial_valve_events(t_start, t_end)
+        odor_sequence = [e['odor_name'] for e in evs]
+
+        # Map first-seen odor to position 1..5
+        odor_to_pos = {}
+        next_pos = 1
+        positions = []
+        for e in evs:
+            od = e['odor_name']
+            if od not in odor_to_pos and next_pos <= 5:
+                odor_to_pos[od] = next_pos
+                next_pos += 1
+            positions.append(odor_to_pos.get(od))
+
+        # Collect ALL presentations with poke/valve timings
+        presentations_all = []
+        position_valve_times = {}
+        position_poke_times = {}
+
+        for idx_in_trial, (e, pos) in enumerate(zip(evs, positions)):
+            if not isinstance(pos, (int, np.integer)):
+                continue
+            valve_start = e['start_time']
+            valve_end = e['end_time']
+            valve_dur_ms = (valve_end - valve_start).total_seconds() * 1000.0
+
+            # Poke summary within valve window (merge gaps ≤ sample_offset_time_ms)
+            psum = window_poke_summary(valve_start, valve_end)
+
+            # Save full presentation record
+            presentations_all.append({
+                'index_in_trial': idx_in_trial,
+                'position': int(pos),
+                'odor_name': e['odor_name'],
+                'valve_start': valve_start,
+                'valve_end': valve_end,
+                'valve_duration_ms': float(valve_dur_ms),
+                'poke_time_ms': float(psum.get('poke_time_ms', 0.0)),
+                'poke_first_in': psum.get('poke_first_in'),
+            })
+
+            # Keep last presentation per position for backward-compatibility
+            position_valve_times[int(pos)] = {
+                'position': int(pos),
+                'odor_name': e['odor_name'],
+                'valve_start': valve_start,
+                'valve_end': valve_end,
+                'valve_duration_ms': float(valve_dur_ms),
+            }
+            psum_pos = dict(psum)
+            psum_pos['odor_name'] = e['odor_name']
+            position_poke_times[int(pos)] = psum_pos
+
+        # Last relevant odor (ignore < sample_offset_time_ms)
+        last_idx = None
+        for i in range(len(evs) - 1, -1, -1):
+            dur_ms = (evs[i]['end_time'] - evs[i]['start_time']).total_seconds() * 1000.0
+            if dur_ms >= sample_offset_time_ms:
+                last_idx = i
+                break
+
+        # Map first-seen odor to position 1..5
+        odor_to_pos = {}
+        next_pos = 1
+        positions = []
+        for e in evs:
+            od = e['odor_name']
+            if od not in odor_to_pos and next_pos <= 5:
+                odor_to_pos[od] = next_pos
+                next_pos += 1
+            positions.append(odor_to_pos.get(od))
+
+        # position_valve_times and position_poke_times (last presentation per position within trial)
+        position_valve_times = {}
+        position_poke_times = {}
+        for e, pos in zip(evs, positions):
+            if not isinstance(pos, (int, np.integer)):
+                continue
+            valve_start = e['start_time']; valve_end = e['end_time']
+            valve_dur_ms = (valve_end - valve_start).total_seconds() * 1000.0
+            # keep the last presentation per position
+            position_valve_times[pos] = {
+                'position': pos,
+                'odor_name': e['odor_name'],
+                'valve_start': valve_start,
+                'valve_end': valve_end,
+                'valve_duration_ms': valve_dur_ms
+            }
+            psum = window_poke_summary(valve_start, valve_end)
+            psum['odor_name'] = e['odor_name']
+            position_poke_times[pos] = psum
+
+        # Last relevant odor (ignore < sample_offset_time_ms)
+        last_idx = None
+        for i in range(len(evs) - 1, -1, -1):
+            dur_ms = (evs[i]['end_time'] - evs[i]['start_time']).total_seconds() * 1000.0
+            if dur_ms >= sample_offset_time_ms:
+                last_idx = i
+                break
+
+        last_odor_name = None
+        last_odor_pos = None
+        last_valve_dur_ms = 0.0
+        last_odor_poke_ms = 0.0
+
+        if last_idx is not None:
+            last_ev = evs[last_idx]
+            last_odor_name = last_ev['odor_name']
+            last_odor_pos = positions[last_idx]
+            last_valve_dur_ms = (last_ev['end_time'] - last_ev['start_time']).total_seconds() * 1000.0
+
+            # Poke time for last odor: from poke-in that covers/starts after valve_start, merge small gaps, end at first large gap
+            _first_in, _end, dur_ms = bout_from_anchor(last_ev['start_time'])
+            last_odor_poke_ms = dur_ms
+
+        # Abortion type
+        abortion_type = 'reinitiation_abortion' if last_odor_poke_ms >= minimum_sampling_time_ms else 'initiation_abortion'
+
+        # Abortion time = last cue-port poke-out in [t_start, t_end]
+        abortion_time = None
+        # Intervals overlapping trial
+        overlapping = [(max(s, t_start), min(e, t_end)) for (s, e) in cue_intervals if e > t_start and s < t_end]
+        if overlapping:
+            abortion_time = overlapping[-1][1]
+
+        # FA window: from abortion_time to next cue-port poke after next InitiationSequence
+        fa_label = 'nFA'
+        fa_time = pd.NaT
+        fa_latency_ms = np.nan
+
+        if abortion_time is not None:
+            # Find next initiation after t_end
+            next_init = None
+            if init_times:
+                idx = bisect_right(init_times, t_end)
+                if idx < len(init_times):
+                    next_init = init_times[idx]
+            # Find first cue-port rising AFTER next_init
+            fa_window_end = None
+            if next_init is not None and cue_rises:
+                k = bisect_right(cue_rises, next_init)
+                if k < len(cue_rises):
+                    fa_window_end = cue_rises[k]
+            # If no end found, cap at session end (last timestamp we have)
+            if fa_window_end is None:
+                # fallback: last timestamp among known streams
+                candidates = []
+                for df in [DIP0, DIP1, DIP2]:
+                    if not df.empty:
+                        candidates.append(df.index[-1])
+                fa_window_end = max(candidates) if candidates else abortion_time
+
+            # Scan for first reward-port poke in (abortion_time, fa_window_end]
+            if reward_rises:
+                lo = bisect_right(reward_rises, abortion_time)
+                hi = bisect_right(reward_rises, fa_window_end)
+                if lo < hi:
+                    fa_time = reward_rises[lo]
+                    fa_latency_ms = (fa_time - abortion_time).total_seconds() * 1000.0
+                    if fa_latency_ms <= response_time_ms:
+                        fa_label = 'FA_time_in'
+                    elif fa_latency_ms <= 3.0 * response_time_ms:
+                        fa_label = 'FA_time_out'
+                    else:
+                        fa_label = 'FA_late'
+
+        rows.append({
+            'trial_id': trial_id,
+            'sequence_start': t_start,
+            'sequence_end': t_end,
+            'odor_sequence': odor_sequence,
+            'presentations': presentations_all,     
+            'last_event_index': last_idx,            
+            'position_valve_times': position_valve_times,
+            'position_poke_times': position_poke_times,
+            'last_odor_position': last_odor_pos,
+            'last_odor_name': last_odor_name,
+            'last_odor_valve_duration_ms': float(last_valve_dur_ms),
+            'last_odor_poke_time_ms': float(last_odor_poke_ms),
+            'abortion_type': abortion_type,
+            'abortion_time': abortion_time,
+            'fa_label': fa_label,
+            'fa_time': fa_time,
+            'fa_latency_ms': float(fa_latency_ms) if pd.notna(fa_latency_ms) else np.nan,
+        })
+
+    aborted_detailed = pd.DataFrame(rows)
+
+    if verbose and not aborted_detailed.empty:
+        total = int(len(aborted_detailed))
+        ini = int((aborted_detailed['abortion_type'] == 'initiation_abortion').sum())
+        rei = int((aborted_detailed['abortion_type'] == 'reinitiation_abortion').sum())
+
+        def pct(n, d):
+            return (n / d * 100.0) if d else 0.0
 
 
-def classify_and_analyze_with_response_times(data, events, trial_counts, odor_map, stage, root, verbose=True):
+
+        print("=" * 80)
+        print("ABORTED TRIALS CLASSIFICATION SUMMARY")
+        print("=" * 80)
+
+        print(f"- Total Aborted Trials: {total}")
+        print(f"  - Re-Initiation Abortions: {rei} ({pct(rei, total):.1f}%)")
+        print(f"  - Initiation Abortions:    {ini} ({pct(ini, total):.1f}%)")
+
+        # False Alarms summary
+        nfa_count = int((aborted_detailed['fa_label'] == 'non-FA').sum())
+        fa_in_count = int((aborted_detailed['fa_label'] == 'FA_time_in').sum())
+        fa_out_count = int((aborted_detailed['fa_label'] == 'FA_time_out').sum())
+        fa_late_count = int((aborted_detailed['fa_label'] == 'FA_late').sum())
+        fa_total = fa_in_count + fa_out_count + fa_late_count
+
+        print("\nFalse Alarms:")
+        print(f"  - non-FA Abortions: {nfa_count}")
+        print(f"  - False Alarm abortions: {fa_total} ({pct(fa_total, total):.1f}%)")
+        if fa_total > 0:
+            print(f"      - FA Time In (Within Response Time Window {response_time_ms}):  {fa_in_count} ({pct(fa_in_count, fa_total):.1f}%)")
+            s_in = pd.to_numeric(
+                aborted_detailed.loc[aborted_detailed['fa_label'] == 'FA_time_in', 'fa_latency_ms'],
+                errors='coerce'
+            ).dropna()
+            if len(s_in):
+                print(f"          - Response Time: avg={s_in.mean():.1f} ms, range: {s_in.min():.1f} - {s_in.max():.1f} ms")
+            print(f"      - FA Time Out (Up to 3x Response Time Window {response_time}):  {fa_out_count} ({pct(fa_out_count, fa_total):.1f}%)")
+            s_out = pd.to_numeric(
+                aborted_detailed.loc[aborted_detailed['fa_label'] == 'FA_time_out', 'fa_latency_ms'],
+                errors='coerce'
+            ).dropna()
+            if len(s_out):
+                print(f"          - Response Time: avg={s_out.mean():.1f} ms, range: {s_out.min():.1f} - {s_out.max():.1f} ms")
+            print(f"      - FA Late (After 3x Response Time up to next trial):{fa_late_count} ({pct(fa_late_count, fa_total):.1f}%)")
+            s_late = pd.to_numeric(
+                aborted_detailed.loc[aborted_detailed['fa_label'] == 'FA_late', 'fa_latency_ms'],
+                errors='coerce'
+            ).dropna()
+            if len(s_late):
+                print(f"          - Response Time: avg={s_late.mean():.1f} ms, range: {s_late.min():.1f} - {s_late.max():.1f} ms")
+
+        # Helper for stats lines
+        def stats_line(series, label):
+            s = pd.to_numeric(series, errors='coerce').dropna()
+            if s.empty:
+                print(f"{label}: n=0")
+            else:
+                print(f"{label}: n={len(s)} | avg={s.mean():.1f} ms | range={s.min():.1f}-{s.max():.1f} ms")
+
+        # Non-last odor poke times (>= minimum_sampling_time_ms), requires 'presentations'
+        if 'presentations' in aborted_detailed.columns and 'last_event_index' in aborted_detailed.columns:
+            pres_df = aborted_detailed[['trial_id', 'presentations', 'last_event_index']].explode('presentations')
+            pres_df = pres_df.dropna(subset=['presentations']).copy()
+            if not pres_df.empty:
+                pres = pd.concat(
+                    [pres_df.drop(columns=['presentations']),
+                     pres_df['presentations'].apply(pd.Series)],
+                    axis=1
+                )
+                # Exclude the last relevant odor per trial
+                pres['is_last'] = pres['index_in_trial'] == pres['last_event_index']
+                pres = pres[~pres['is_last']].copy()
+
+                # Only pokes >= minimum_sampling_time_ms
+                pres['poke_time_ms'] = pd.to_numeric(pres['poke_time_ms'], errors='coerce')
+                pres_valid = pres[pres['poke_time_ms'] >= minimum_sampling_time_ms].copy()
+
+                print("\nNon-last Odor Pokes:")
+                stats_line(pres_valid['poke_time_ms'], "  - All non-last odors")
+
+                # By position
+                if 'position' in pres_valid.columns and not pres_valid.empty:
+                    for pos, grp in pres_valid.groupby('position'):
+                        stats_line(grp['poke_time_ms'], f"  - Position {int(pos)}")
+
+                # By odor name/type
+                if 'odor_name' in pres_valid.columns and not pres_valid.empty:
+                    for odor, grp in pres_valid.groupby('odor_name'):
+                        stats_line(grp['poke_time_ms'], f"  - Odor {odor}")
+            else:
+                print("\nNon-last Odor Pokes: n=0 (no presentations info)")
+        else:
+            print("\nNon-last odor pokes: presentations not attached; update abortion_classification to store 'presentations' and 'last_event_index'.")
+
+        # Last-odor poke stats by abortion type
+        print("\nLast Odor Poke Times:")
+        stats_line(
+            aborted_detailed.loc[aborted_detailed['abortion_type'] == 'reinitiation_abortion', 'last_odor_poke_time_ms'],
+            "  - Re-Initiation Abortions"
+        )
+        stats_line(
+            aborted_detailed.loc[aborted_detailed['abortion_type'] == 'initiation_abortion', 'last_odor_poke_time_ms'],
+            "  - Initiation Abortions"
+        )
+
+        # Counts by last odor name
+        print("\nCounts by last odor:")
+        if 'last_odor_name' in aborted_detailed.columns:
+            by_odor = (
+                aborted_detailed
+                .groupby(['last_odor_name', 'abortion_type'])
+                .size()
+                .unstack(fill_value=0)
+                .rename(columns={'reinitiation_abortion': 'Re-initiation', 'initiation_abortion': 'Initiation'})
+            )
+            # Total per odor row
+            totals = aborted_detailed.groupby('last_odor_name').size()
+            for odor in totals.index:
+                rei_c = int(by_odor.loc[odor].get('Re-initiation', 0))
+                ini_c = int(by_odor.loc[odor].get('Initiation', 0))
+                tot = int(totals.loc[odor])
+                print(f"  - {odor}: {tot} abortions, Re-initiation {rei_c}, Initiation {ini_c}")
+        else:
+            print("  (missing last_odor_name)")
+
+        # Counts by last position
+        print("\nCounts by last position:")
+        if 'last_odor_position' in aborted_detailed.columns:
+            by_pos = (
+                aborted_detailed
+                .groupby(['last_odor_position', 'abortion_type'])
+                .size()
+                .unstack(fill_value=0)
+                .rename(columns={'reinitiation_abortion': 'Re-initiation', 'initiation_abortion': 'Initiation'})
+            )
+            totals_pos = aborted_detailed.groupby('last_odor_position').size()
+            for pos in sorted(totals_pos.index):
+                rei_c = int(by_pos.loc[pos].get('Re-initiation', 0))
+                ini_c = int(by_pos.loc[pos].get('Initiation', 0))
+                tot = int(totals_pos.loc[pos])
+                print(f"  - Position {int(pos)}: {tot} abortions, Re-initiation {rei_c}, Initiation {ini_c}")
+        else:
+            print("  (missing last_odor_position)")
+
+    def build_abortion_index(df: pd.DataFrame):
+        idx = {}
+        if df is None or df.empty:
+            return {
+                'by_trial': {},
+                'by_position': {},
+                'by_odor': {},
+                'by_type': {},
+                'by_fa_label': {},
+            }
+        # Ensure trial_id exists as indexable key
+        df2 = df.copy()
+        # Some pipelines may have non-unique or NaN trial_id; drop NaN for dict keys
+        df2 = df2.dropna(subset=['trial_id'])
+        # by_trial -> full row as a dict for each trial_id
+        try:
+            by_trial = df2.set_index('trial_id', drop=False).apply(lambda r: r.to_dict(), axis=1).to_dict()
+        except Exception:
+            # fallback: iterate
+            by_trial = {row['trial_id']: row.to_dict() for _, row in df2.iterrows()}
+
+        # Helper to group trial IDs by a column
+        def group_ids(col):
+            m = {}
+            if col in df2.columns:
+                for k, g in df2.groupby(col):
+                    # Keep order by sequence_start if present
+                    trials = list(g.sort_values('sequence_start')['trial_id']) if 'sequence_start' in g else list(g['trial_id'])
+                    m[k] = trials
+            return m
+
+        idx['by_trial'] = by_trial
+        idx['by_position'] = group_ids('last_odor_position')
+        idx['by_odor'] = group_ids('last_odor_name')
+        idx['by_type'] = group_ids('abortion_type')
+        idx['by_fa_label'] = group_ids('fa_label')
+        return idx
+
+    aborted_index = build_abortion_index(aborted_detailed)
+
+    # Attach to classification dict for downstream use
+    try:
+        classification['aborted_sequences_detailed'] = aborted_detailed
+        classification['aborted_index'] = aborted_index
+    except Exception:
+        pass
+
+    return aborted_detailed
+
+def build_classification_index(classification: dict) -> dict: # Classification function for easier dictionary access later on
+    """
+    Build convenient lookup indices over classification outputs.
+    Provides:
+      - by_trial: trial_id -> full row dict (completed_with_RT preferred, else completed, else aborted_detailed)
+      - categories.completed.*_ids: lists of trial_ids for major completed categories (and HR variants)
+      - sets.*: quick sets of IDs for initiated, completed, aborted
+      - aborted: re-exposes the aborted_index (by_position/by_odor/by_type/by_fa_label)
+    """
+
+    idx = {'by_trial': {}, 'categories': {'completed': {}}, 'sets': {}, 'aborted': {}}
+
+    # Prefer completed_with_RT for richer rows
+    comp_df = classification.get('completed_sequences_with_response_times')
+    if not isinstance(comp_df, pd.DataFrame) or comp_df.empty:
+        comp_df = classification.get('completed_sequences', pd.DataFrame())
+
+    ab_det = classification.get('aborted_sequences_detailed')
+    ab_df = ab_det if isinstance(ab_det, pd.DataFrame) else classification.get('aborted_sequences', pd.DataFrame())
+
+    # by_trial: completed first (wins), then aborted to fill missing ones
+    if isinstance(comp_df, pd.DataFrame) and not comp_df.empty and 'trial_id' in comp_df:
+        for _, r in comp_df.iterrows():
+            tid = r.get('trial_id')
+            if pd.notna(tid):
+                idx['by_trial'][tid] = r.to_dict()
+    if isinstance(ab_df, pd.DataFrame) and not ab_df.empty and 'trial_id' in ab_df:
+        for _, r in ab_df.iterrows():
+            tid = r.get('trial_id')
+            if pd.notna(tid) and tid not in idx['by_trial']:
+                idx['by_trial'][tid] = r.to_dict()
+
+    # Completed category ID lists
+    def ids_from(name):
+        df = classification.get(name, pd.DataFrame())
+        return [] if not isinstance(df, pd.DataFrame) or df.empty or 'trial_id' not in df else list(df['trial_id'])
+
+    c = idx['categories']['completed']
+    c['rewarded_ids'] = ids_from('completed_sequence_rewarded')
+    c['unrewarded_ids'] = ids_from('completed_sequence_unrewarded')
+    c['timeout_ids'] = ids_from('completed_sequence_reward_timeout')
+
+    c['hr_rewarded_ids'] = ids_from('completed_sequence_HR_rewarded')
+    c['hr_unrewarded_ids'] = ids_from('completed_sequence_HR_unrewarded')
+    c['hr_timeout_ids'] = ids_from('completed_sequence_HR_reward_timeout')
+
+    c['hr_missed_rewarded_ids'] = ids_from('completed_sequence_HR_missed_rewarded')
+    c['hr_missed_unrewarded_ids'] = ids_from('completed_sequence_HR_missed_unrewarded')
+    c['hr_missed_timeout_ids'] = ids_from('completed_sequence_HR_missed_reward_timeout')
+
+    # Sets for quick membership tests
+    idx['sets']['initiated_ids'] = (
+        set(classification['initiated_sequences']['trial_id']) 
+        if isinstance(classification.get('initiated_sequences'), pd.DataFrame) 
+        and 'trial_id' in classification['initiated_sequences'] else set()
+    )
+    idx['sets']['completed_ids'] = set(comp_df['trial_id']) if isinstance(comp_df, pd.DataFrame) and 'trial_id' in comp_df else set()
+    idx['sets']['aborted_ids'] = (
+        set(classification['aborted_sequences']['trial_id']) 
+        if isinstance(classification.get('aborted_sequences'), pd.DataFrame) 
+        and 'trial_id' in classification['aborted_sequences'] else set()
+    )
+
+    # Aborted sub-index (already built by abortion_classification)
+    ab_index = classification.get('aborted_index')
+    if isinstance(ab_index, dict):
+        idx['aborted'] = ab_index
+    else:
+        # Minimal fallback
+        idx['aborted'] = {'by_trial': {}, 'by_position': {}, 'by_odor': {}, 'by_type': {}, 'by_fa_label': {}}
+        if isinstance(ab_df, pd.DataFrame) and not ab_df.empty:
+            try:
+                idx['aborted']['by_trial'] = ab_df.set_index('trial_id', drop=False).apply(lambda r: r.to_dict(), axis=1).to_dict()
+            except Exception:
+                idx['aborted']['by_trial'] = {r['trial_id']: r.to_dict() for _, r in ab_df.dropna(subset=['trial_id']).iterrows()}
+            def group_ids(col):
+                out = {}
+                if col in ab_df.columns:
+                    for k, g in ab_df.groupby(col):
+                        out[k] = list(g.sort_values('sequence_start')['trial_id']) if 'sequence_start' in g else list(g['trial_id'])
+                return out
+            for col, key in [('last_odor_position','by_position'), ('last_odor_name','by_odor'), ('abortion_type','by_type'), ('fa_label','by_fa_label')]:
+                idx['aborted'][key] = group_ids(col)
+
+    return idx
+
+def classify_and_analyze_with_response_times(data, events, trial_counts, odor_map, stage, root, verbose=True):# Wrapper function to fully classify all trials. 
     """
     Orchestrates classification + valve/poke timing + response-time augmentation.
 
@@ -1956,6 +2751,15 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
     rt_summary = analyze_response_times(
         data, trial_counts, events, odor_map, stage, root, verbose=verbose
     )
+
+    aborted_detailed = abortion_classification(
+        data, events, classification, odor_map, root, verbose=True
+    )
+
+    classification['aborted_sequences_detailed'] = aborted_detailed 
+
+    # 4) Build fast lookup indices for downstream use
+    classification['index'] = build_classification_index(classification)
 
     # 3) Augment completed trials with per-trial response times (same logic as analyzer,
     #    but reusing position_valve_times from the classifier to avoid recomputation)
@@ -2139,4 +2943,4 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
     }
 
 
-
+# ========================== Functions for saving results ==========================
