@@ -8,6 +8,7 @@ import json
 from dotmap import DotMap
 import pandas as pd
 import numpy as np
+import math
 from pathlib import Path
 from glob import glob
 from aeon.io.reader import Reader, Csv
@@ -1130,6 +1131,46 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         hit_hidden_rule = odor_at_location in hr_odor_set
         return True, hit_hidden_rule
     
+    def window_poke_summary(window_start, window_end):
+        if window_start is None or window_end is None or window_start >= window_end:
+            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+        s_bool = poke_series_full
+        # State at window start
+        prev = s_bool.loc[:window_start]
+        in_at_start = bool(prev.iloc[-1]) if len(prev) else False
+        w = s_bool.loc[window_start:window_end]
+        if w.empty and not in_at_start:
+            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+        rises = w & ~w.shift(1, fill_value=in_at_start)
+        falls = ~w & w.shift(1, fill_value=in_at_start)
+        intervals = []
+        cur = window_start if in_at_start else None
+        first_in = None
+        for ts in w.index:
+            if rises.get(ts, False) and cur is None:
+                cur = ts
+                if first_in is None:
+                    first_in = ts
+            if falls.get(ts, False) and cur is not None:
+                intervals.append((cur, ts))
+                cur = None
+        if cur is not None:
+            intervals.append((cur, window_end))
+        if not intervals:
+            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+        # Merge across gaps ≤ sample_offset_time_ms
+        merged = [intervals[0]]
+        for s2, e2 in intervals[1:]:
+            ls, le = merged[-1]
+            gap_ms = (s2 - le).total_seconds() * 1000.0
+            if gap_ms <= sample_offset_time_ms:
+                merged[-1] = (ls, max(le, e2))
+            else:
+                merged.append((s2, e2))
+        total_ms = sum((e - s).total_seconds() * 1000.0 for s, e in merged)
+        return {'poke_time_ms': float(total_ms), 'poke_first_in': first_in, 'poke_odor_start': window_start}
+
+    
     def _attempt_bout_from_poke_in(anchor_ts, cap_end=None):
         """
         Return (first_in_ts, bout_end_ts_capped, duration_ms) for the attempt whose valve starts at anchor_ts.
@@ -1348,6 +1389,43 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_end = trial['sequence_end']
         odor_sequence, valve_activations = get_trial_valve_sequence(trial_start, trial_end)
 
+        odor_to_pos = {}
+        next_pos = 1
+        positions = []
+        for ev in valve_activations:
+            od = ev['odor_name']
+            if od not in odor_to_pos and next_pos <= 5:
+                odor_to_pos[od] = next_pos
+                next_pos += 1
+            positions.append(odor_to_pos.get(od))
+
+        presentations = []
+        for idx_in_trial, (ev, pos) in enumerate(zip(valve_activations, positions)):
+            if not isinstance(pos, (int, np.integer)):
+                continue
+            vstart, vend = ev['start_time'], ev['end_time']
+            vdur_ms = (vend - vstart).total_seconds() * 1000.0
+            psum = window_poke_summary(vstart, vend)
+            presentations.append({
+                'index_in_trial': idx_in_trial,
+                'position': int(pos),
+                'odor_name': ev['odor_name'],
+                'valve_start': vstart,
+                'valve_end': vend,
+                'valve_duration_ms': float(vdur_ms),
+                'poke_time_ms': float(psum.get('poke_time_ms', 0.0)),
+                'poke_first_in': psum.get('poke_first_in'),
+            })
+
+        # Last relevant odor index (ignore valve durations < sample_offset_time_ms)
+        last_event_index = None
+        for i in range(len(valve_activations) - 1, -1, -1):
+            st, en = valve_activations[i]['start_time'], valve_activations[i]['end_time']
+            if (en - st).total_seconds() * 1000.0 >= sample_offset_time_ms:
+                last_event_index = i
+                break
+
+
         position_valve_times, position_poke_times = analyze_trial_valve_and_poke_times(valve_activations)
 
         pos1_info = position_valve_times.get(1, {}) or {}
@@ -1384,6 +1462,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_dict['sequence_name'] = sequence_name
         trial_dict['position_valve_times'] = position_valve_times
         trial_dict['position_poke_times'] = position_poke_times
+        trial_dict['presentations'] = presentations
+        trial_dict['last_event_index'] = last_event_index
         if corrected_start is not None:
             trial_dict['sequence_start_corrected'] = corrected_start
 
@@ -1392,7 +1472,6 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_dict['hit_hidden_rule'] = hit_hidden_rule
 
         if trial_await_rewards:
-            completed_sequences.append(trial_dict.copy())
             # Aggregate ranges for completed trials
             # Valve times
             for pos, v in (position_valve_times or {}).items():
@@ -1488,6 +1567,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                         completed_hr_timeout.append(trial_dict.copy())
                     elif hr_category == 'completed_hr_missed':
                         completed_hr_missed_timeout.append(trial_dict.copy())
+            completed_sequences.append(trial_dict.copy())
+
         else:
             aborted_sequences.append(trial_dict.copy())
             if hit_hidden_rule:
@@ -1796,6 +1877,7 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
     timeout_delayed_response_times = []
     timeout_response_delay_times = []
     failed_calculations = 0
+    hr_rewarded_response_times = []
 
     for trial_dict in completed_trials_all:
         trial_start = trial_dict['sequence_start']
@@ -1937,6 +2019,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         if supply1_after_await or supply2_after_await:
             if response_time_ms is not None:
                 rewarded_response_times.append(response_time_ms)
+                if hit_hidden_rule and len(odor_sequence) == hidden_rule_position:
+                    hr_rewarded_response_times.append(response_time_ms)
         else:
             # Check full window from await_reward for unrewarded vs timeout
             port1_full_window = []
@@ -1996,6 +2080,14 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
             print(f"  Median: {sorted(rewarded_response_times)[len(rewarded_response_times)//2]:.1f}ms")
         else:
             print(f"  No rewarded trials with response times")
+
+        if hr_rewarded_response_times:
+            print(f"\nHR REWARDED TRIALS (response times):")
+            print(f"  Count: {len(hr_rewarded_response_times)}")
+            print(f"  Range: {min(hr_rewarded_response_times):.1f} - {max(hr_rewarded_response_times):.1f}ms")
+            print(f"  Average: {sum(hr_rewarded_response_times)/len(hr_rewarded_response_times):.1f}ms")
+        else:
+            print(f"\nHR REWARDED TRIALS (response times): none")
 
         print(f"\nUNREWARDED TRIALS:")
         if unrewarded_response_times:
@@ -2444,6 +2536,21 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
 
     aborted_detailed = pd.DataFrame(rows)
 
+    def _norm_fa(val):
+        if pd.isna(val):
+            return 'nFA'
+        s = str(val).strip().lower()
+        if s in ('fa_time_in', 'fa in', 'fa_in', 'in'):
+            return 'FA_time_in'
+        if s in ('fa_time_out', 'fa out', 'fa_out', 'out'):
+            return 'FA_time_out'
+        if s in ('fa_late', 'late'):
+            return 'FA_late'
+        return 'nFA'
+
+    aborted_detailed['fa_label'] = aborted_detailed['fa_label'].apply(_norm_fa)
+
+
     if verbose and not aborted_detailed.empty:
         total = int(len(aborted_detailed))
         ini = int((aborted_detailed['abortion_type'] == 'initiation_abortion').sum())
@@ -2463,11 +2570,11 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
         print(f"  - Initiation Abortions:    {ini} ({pct(ini, total):.1f}%)")
 
         # False Alarms summary
-        nfa_count = int((aborted_detailed['fa_label'] == 'non-FA').sum())
-        fa_in_count = int((aborted_detailed['fa_label'] == 'FA_time_in').sum())
+        fa_in_count  = int((aborted_detailed['fa_label'] == 'FA_time_in').sum())
         fa_out_count = int((aborted_detailed['fa_label'] == 'FA_time_out').sum())
-        fa_late_count = int((aborted_detailed['fa_label'] == 'FA_late').sum())
+        fa_late_count= int((aborted_detailed['fa_label'] == 'FA_late').sum())
         fa_total = fa_in_count + fa_out_count + fa_late_count
+        nfa_count = total - fa_total
 
         print("\nFalse Alarms:")
         print(f"  - non-FA Abortions: {nfa_count}")
@@ -2494,6 +2601,63 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
             ).dropna()
             if len(s_late):
                 print(f"          - Response Time: avg={s_late.mean():.1f} ms, range: {s_late.min():.1f} - {s_late.max():.1f} ms")
+
+            hr_pos = int(classification.get('hidden_rule_position', 1))
+
+            # Normalize FA labels
+            def _norm_fa(val):
+                if pd.isna(val):
+                    return 'nFA'
+                s = str(val).strip().lower()
+                if s in ('fa_time_in', 'fa in', 'fa_in', 'in'):
+                    return 'FA_time_in'
+                if s in ('fa_time_out', 'fa out', 'fa_out', 'out'):
+                    return 'FA_time_out'
+                if s in ('fa_late', 'late'):
+                    return 'FA_late'
+                return 'nFA'
+            aborted_detailed['fa_label'] = aborted_detailed['fa_label'].apply(_norm_fa)
+
+            abortions_at_hr_pos = aborted_detailed[aborted_detailed['last_odor_position'] == hr_pos].copy()
+
+            # Resolve HR-aborted trial IDs from classification (robust to key naming)
+            hr_ab_df = None
+            for k in ('aborted_sequences_HR', 'aborted_HR_sequences', 'aborted_hidden_rule_sequences'):
+                if isinstance(classification.get(k), pd.DataFrame) and not classification[k].empty and 'trial_id' in classification[k]:
+                    hr_ab_df = classification[k]
+                    break
+            if hr_ab_df is not None:
+                hr_aborted_ids = set(hr_ab_df['trial_id'])
+            elif 'hit_hidden_rule' in abortions_at_hr_pos.columns:
+                hr_aborted_ids = set(abortions_at_hr_pos.loc[abortions_at_hr_pos['hit_hidden_rule'] == True, 'trial_id'])
+            else:
+                hr_aborted_ids = set()
+
+            in_hr_trials = abortions_at_hr_pos[abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy()
+            non_hr_trials = abortions_at_hr_pos[~abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy()
+
+            # Helper to print FA breakdown
+            def _print_fa_counts(df, indent="    "):
+                order = ['nFA', 'FA_time_in', 'FA_time_out', 'FA_late']
+                cnt = df['fa_label'].value_counts().reindex(order, fill_value=0)
+                total = int(len(df))
+                for lbl in order:
+                    v = int(cnt.get(lbl, 0))
+                    pct = (v / total * 100.0) if total else 0.0
+                    print(f"{indent}{lbl}: {v} ({pct:.1f}%)")
+
+            total_at_hr = int(len(abortions_at_hr_pos))
+            print(f"\n  Abortions at Hidden Rule Position {hr_pos}: n={total_at_hr}")
+
+            total_in_hr = int(len(in_hr_trials))
+            print(f"    Of which in Hidden Rule Trials: n={total_in_hr}")
+            if total_in_hr > 0:
+                _print_fa_counts(in_hr_trials, indent="        ")
+
+            total_non_hr = int(len(non_hr_trials))
+            print(f"    Non-Hidden Rule Abortions at HR Location: n={total_non_hr}")
+            if total_non_hr > 0:
+                _print_fa_counts(non_hr_trials, indent="        ")
 
         # Helper for stats lines
         def stats_line(series, label):
@@ -2742,6 +2906,13 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
     if response_time_sec is None:
         raise ValueError("Response time parameter cannot be extracted from Schema file. Check detect_settings function.")
 
+    params = {
+        'sample_offset_time_ms': sample_offset_time_ms,
+        'minimum_sampling_time_ms': minimum_sampling_time_ms,
+        'response_time_window_sec': response_time_sec
+    }
+
+
     # 1) Run the stable classifier (valve/poke timing included)
     classification = classify_trials(
         data, events, trial_counts, odor_map, stage, root, verbose=verbose
@@ -2756,7 +2927,7 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
         data, events, classification, odor_map, root, verbose=True
     )
 
-    classification['aborted_sequences_detailed'] = aborted_detailed 
+    classification['aborted_sequences_detailed'] = aborted_detailed
 
     # 4) Build fast lookup indices for downstream use
     classification['index'] = build_classification_index(classification)
@@ -2792,8 +2963,10 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
         print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_pos})")
     else:
         print(f"No Hidden Rule Location found in sequence name: {sequence_name}. Proceeding without Hidden Rule analysis.")
-
-
+    classification['hidden_rule_position'] = hidden_rule_pos
+    classification.update(params)
+    classification['response_time_analysis'] = rt_summary
+    classification['index'] = build_classification_index(classification)
 
     # Precompute data used below
     await_reward_times = events['combined_await_reward_df']['Time'].tolist() if 'combined_await_reward_df' in events else []
@@ -2935,6 +3108,7 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
 
     # Attach augmented DataFrame back into classification dict for convenience
     classification['completed_sequences_with_response_times'] = completed_df
+    classification.update(params)
 
     return {
         'classification': classification,
@@ -2944,3 +3118,215 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
 
 
 # ========================== Functions for saving results ==========================
+def _find_parent_named(start: Path, prefix: str) -> Path | None:
+    for p in [start] + list(start.parents):
+        if p.name.startswith(prefix):
+            return p
+    return None
+
+def _find_rawdata_root(start: Path) -> Path | None:
+    for p in [start] + list(start.parents):
+        if p.name == "rawdata":
+            return p
+    return None
+
+def resolve_derivatives_output_dir(root) -> tuple[Path, dict]:
+    """
+    Given a path inside hypnose/rawdata/sub-.../ses-.../..., return the destination:
+      hypnose/derivatives/sub-.../ses-.../saved_analysis_results
+    Returns (out_dir, info_dict)
+    """
+    root = Path(root).resolve()
+    rawdata_dir = _find_rawdata_root(root)
+    if rawdata_dir is None:
+        raise ValueError(f"Could not find 'rawdata' in parents of: {root}")
+
+    hypnose_dir = rawdata_dir.parent
+    sub_dir = _find_parent_named(root, "sub-")
+    ses_dir = _find_parent_named(root, "ses-")
+    if sub_dir is None or ses_dir is None:
+        raise ValueError(f"Could not resolve sub-/ses- from: {root}")
+
+    out_dir = hypnose_dir / "derivatives" / sub_dir.name / ses_dir.name / "saved_analysis_results"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir, {
+        "hypnose_dir": str(hypnose_dir),
+        "rawdata_dir": str(rawdata_dir),
+        "sub_folder": sub_dir.name,
+        "ses_folder": ses_dir.name,
+    }
+
+def _json_default(o):
+    if isinstance(o, (pd.Timestamp, )):
+        return o.isoformat()
+    if hasattr(o, "isoformat"):
+        try:
+            return o.isoformat()
+        except Exception:
+            pass
+    if isinstance(o, (set, tuple)):
+        return list(o)
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating,)):
+        f = float(o)
+        return None if np.isnan(f) else f
+    if isinstance(o, (np.ndarray,)):
+        return o.tolist()
+    return str(o)
+
+def _normalize_df_for_io(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
+    """
+    JSON-encode object columns containing dict/list/tuple/set/ndarray for Parquet compatibility.
+    Returns (normalized_df, jsonified_columns)
+    """
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return df, []
+    df2 = df.copy()
+    json_cols = []
+
+    # robust null check for scalars (avoids ambiguous truth on arrays)
+    def _is_nullish(v):
+        if v is None:
+            return True
+        try:
+            if isinstance(v, (float, np.floating)):
+                return math.isnan(float(v))
+        except Exception:
+            pass
+        return False
+
+    # local fallback so we don't depend on global order in notebooks
+    def _json_default_local(o):
+        try:
+            return _json_default(o)
+        except NameError:
+            if isinstance(o, (pd.Timestamp, )):
+                return o.isoformat()
+            if hasattr(o, "isoformat"):
+                try:
+                    return o.isoformat()
+                except Exception:
+                    pass
+            if isinstance(o, (set, tuple)):
+                return list(o)
+            if isinstance(o, (np.integer,)):
+                return int(o)
+            if isinstance(o, (np.floating,)):
+                f = float(o)
+                return None if np.isnan(f) else f
+            if isinstance(o, (np.ndarray,)):
+                return o.tolist()
+            return str(o)
+
+    for col in df2.columns:
+        if df2[col].dtype == "object":
+            sample = df2[col].dropna().head(10).tolist()
+            # Include numpy arrays in detection
+            needs_json = any(isinstance(v, (dict, list, tuple, set, np.ndarray)) for v in sample)
+            if needs_json:
+                json_cols.append(col)
+                df2[col] = df2[col].apply(
+                    lambda v: (None if _is_nullish(v) else json.dumps(v, default=_json_default_local))
+                )
+    return df2, json_cols
+
+def save_session_analysis_results(classification: dict, root, session_metadata: dict | None = None, verbose: bool = True) -> Path:
+    """
+    First saving function:
+    - Resolves derivatives path mirroring rawdata/sub-.../ses-...
+    - Creates saved_analysis_results folder
+    - Saves parameters.json
+    - Saves a few key tables as Parquet (+ sidecar schema listing JSON-encoded columns)
+    """
+    out_dir, info = resolve_derivatives_output_dir(root)
+    tables_dir = out_dir / "tables"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+
+    # Parameters
+    params = {
+        "sample_offset_time_ms": classification.get("sample_offset_time_ms"),
+        "minimum_sampling_time_ms": classification.get("minimum_sampling_time_ms"),
+        "response_time_window_sec": classification.get("response_time_window_sec"),
+        "hidden_rule_position": classification.get("hidden_rule_position"),
+        "paths": info,
+        "session_metadata": session_metadata or {},
+    }
+    with open(out_dir / "parameters.json", "w") as f:
+        json.dump(params, f, indent=2, default=_json_default)
+
+    # Save a minimal set of key DataFrames (extend later as needed)
+    keys_to_save = [
+        "initiated_sequences",
+        "non_initiated_sequences",
+        "non_initiated_odor1_attempts",
+
+        "completed_sequences",
+        "completed_sequences_with_response_times",
+        "completed_sequence_rewarded",
+        "completed_sequence_unrewarded",
+        "completed_sequence_reward_timeout",
+
+        "completed_sequences_HR",
+        "completed_sequence_HR_rewarded",
+        "completed_sequence_HR_unrewarded",
+        "completed_sequence_HR_reward_timeout",
+
+        "completed_sequences_HR_missed",                 
+        "completed_sequence_HR_missed_rewarded",         
+        "completed_sequence_HR_missed_unrewarded",       
+        "completed_sequence_HR_missed_reward_timeout",   
+
+        "aborted_sequences",
+        "aborted_sequences_HR",                          
+        "aborted_sequences_detailed",
+    ]
+
+    manifest = {"tables": {}, "version": "v1"}
+    for key in keys_to_save:
+        df = classification.get(key)
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            continue
+        df_norm, json_cols = _normalize_df_for_io(df)
+        table_path = tables_dir / f"{key}.parquet"
+        schema_path = tables_dir / f"{key}.schema.json"
+        try:
+            df_norm.to_parquet(table_path, index=False)
+            with open(schema_path, "w") as f:
+                json.dump({"jsonified_columns": json_cols}, f, indent=2)
+        except Exception:
+            table_path = tables_dir / f"{key}.pkl"
+            df_norm.to_pickle(table_path)
+            with open(schema_path, "w") as f:
+                json.dump({"jsonified_columns": json_cols, "format": "pickle"}, f, indent=2)
+        manifest["tables"][key] = {
+            "path": str(table_path.relative_to(out_dir)),
+            "schema": str(schema_path.relative_to(out_dir)),
+            "rows": int(len(df)),
+            "jsonified_columns": json_cols,
+        }
+
+    # Save indices for quick lookup (JSON)
+    indices_dir = out_dir / "indices"
+    indices_dir.mkdir(parents=True, exist_ok=True)
+    idx_payloads = {
+        "index": classification.get("index", {}),
+        "aborted_index": classification.get("aborted_index", {}),
+    }
+    for name, payload in idx_payloads.items():
+        with open(indices_dir / f"{name}.json", "w") as f:
+            json.dump(payload, f, indent=2, default=_json_default) 
+
+    # Save response time analysis (per-session aggregates)
+    rta = classification.get("response_time_analysis")
+    if rta is not None:
+        with open(out_dir / "response_time_analysis.json", "w") as f:
+            json.dump(rta, f, indent=2, default=_json_default) 
+
+    with open(out_dir / "manifest.json", "w") as f:
+        json.dump(manifest, f, indent=2, default=_json_default)
+
+    if verbose:
+        print(f"Saved analysis results to:\n  {out_dir}")
+        print(f"- tables written: {len(manifest['tables'])}")
+    return out_dir
