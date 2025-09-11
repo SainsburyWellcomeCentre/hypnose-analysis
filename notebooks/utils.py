@@ -20,10 +20,12 @@ import datetime
 from datetime import timezone
 import zoneinfo
 import src.processing.detect_settings as detect_settings
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from collections import defaultdict
 from bisect import bisect_left, bisect_right
 from typing import Iterable, Optional
+import io
+import contextlib
 
 
 # ============== General Utility Functions and Class Definitions =======================================
@@ -74,6 +76,11 @@ class TimestampedCsvReader(Csv):
         data.set_index("Time", inplace=True)
         return data
     
+
+def vprint(verbose: bool, *args, **kwargs):
+    if verbose:
+        print(*args, **kwargs)
+
 
 def load_json(reader: SessionData, root: Path) -> pd.DataFrame:
     root = Path(root)
@@ -211,11 +218,11 @@ def exp_data(subjid, date, index=None):
     return load_experiment(subjid, date, index)
 
 
-def load_all_streams(root, apply_corrections = True):
+def load_all_streams(root, apply_corrections = True, *args, verbose: bool = True, **kwargs):
     """
     Load all behavioral data streams with proper timestamp synchronization
     """
-    print(f"Loading data streams from: {root}")
+    vprint(verbose, f"Loading data streams from: {root}")
     
     # Create readers
     behavior_reader = harp.create_reader('device_schemas/behavior.yml', epoch=harp.REFERENCE_EPOCH)
@@ -229,7 +236,7 @@ def load_all_streams(root, apply_corrections = True):
         heartbeat = load(behavior_reader.TimestampSeconds, root/"Behavior")
         if not heartbeat.empty:
             heartbeat.reset_index(inplace=True)
-        print("Loaded heartbeat data")
+        vprint(verbose, "Loaded heartbeat data")
     except Exception as e:
         print(f"Failed to load heartbeat: {e}")
         heartbeat = pd.DataFrame(columns=['Time', 'TimestampSeconds'])
@@ -257,7 +264,7 @@ def load_all_streams(root, apply_corrections = True):
                 if start_time_dt.tzinfo is None:
                     start_time_dt = start_time_dt.replace(tzinfo=uk_tz)
                 real_time_offset = real_time_ref - start_time_dt
-                print(f"Calculated real-time offset: {real_time_offset}")
+                vprint(verbose, f"Calculated real-time offset: {real_time_offset}")
         except Exception as e:
             print(f"Error calculating real-time offset: {e}")
     
@@ -266,7 +273,7 @@ def load_all_streams(root, apply_corrections = True):
     if not heartbeat.empty and 'Time' in heartbeat.columns and 'TimestampSeconds' in heartbeat.columns:
         heartbeat['Time'] = pd.to_datetime(heartbeat['Time'], errors='coerce')
         timestamp_to_time = pd.Series(data=heartbeat['Time'].values, index=heartbeat['TimestampSeconds'])
-        print("Created timestamp interpolation mapping")
+        vprint(verbose, "Created timestamp interpolation mapping")
     
     def interpolate_time(seconds):
         """Interpolate timestamps from seconds, with safety checks"""
@@ -290,21 +297,21 @@ def load_all_streams(root, apply_corrections = True):
     # Core behavioral data
     try:
         data['digital_input_data'] = load(behavior_reader.DigitalInputState, root/"Behavior")
-        print("Loaded digital_input_data")
+        vprint(verbose, "Loaded digital_input_data")
     except Exception as e:
         print(f"Failed to load digital_input_data: {e}")
         data['digital_input_data'] = pd.DataFrame()
     
     try:
         data['output_set'] = load(behavior_reader.OutputSet, root/"Behavior")
-        print("Loaded output_set")
+        vprint(verbose, "Loaded output_set")
     except Exception as e:
         print(f"Failed to load output_set: {e}")
         data['output_set'] = pd.DataFrame()
     
     try:
         data['output_clear'] = load(behavior_reader.OutputClear, root/"Behavior")
-        print("Loaded output_clear")
+        vprint(verbose, "Loaded output_clear")
     except Exception as e:
         print(f"Failed to load output_clear: {e}")
         data['output_clear'] = pd.DataFrame()
@@ -312,14 +319,14 @@ def load_all_streams(root, apply_corrections = True):
     # Olfactometer valve data
     try:
         data['olfactometer_valves_0'] = load(olfactometer_reader.OdorValveState, root/"Olfactometer0")
-        print("Loaded olfactometer_valves_0")
+        vprint(verbose, "Loaded olfactometer_valves_0")
     except Exception as e:
         print(f"Failed to load olfactometer_valves_0: {e}")
         data['olfactometer_valves_0'] = pd.DataFrame()
     
     try:
         data['olfactometer_valves_1'] = load(olfactometer_reader.OdorValveState, root/"Olfactometer1")
-        print("Loaded olfactometer_valves_1")
+        vprint(verbose, "Loaded olfactometer_valves_1")
     except Exception as e:
         print(f"Failed to load olfactometer_valves_1: {e}")
         data['olfactometer_valves_1'] = pd.DataFrame()
@@ -327,7 +334,7 @@ def load_all_streams(root, apply_corrections = True):
     # End valve states (commented in original but included for completeness)
     try:
         data['olfactometer_end_0'] = load(olfactometer_reader.EndValveState, root/"Olfactometer0")
-        print("Loaded olfactometer_end_0")
+        vprint(verbose, "Loaded olfactometer_end_0")
     except Exception as e:
         print(f"Failed to load olfactometer_end_0: {e}")
         data['olfactometer_end_0'] = pd.DataFrame()
@@ -335,7 +342,7 @@ def load_all_streams(root, apply_corrections = True):
     # Analog data
     try:
         data['analog_data'] = load(behavior_reader.AnalogData, root/"Behavior")
-        print("Loaded analog_data")
+        vprint(verbose, "Loaded analog_data")
     except Exception as e:
         print(f"Failed to load analog_data: {e}")
         data['analog_data'] = pd.DataFrame()
@@ -343,7 +350,7 @@ def load_all_streams(root, apply_corrections = True):
     # Flow meter data
     try:
         data['flow_meter'] = load(olfactometer_reader.Flowmeter, root/"Olfactometer0")
-        print("Loaded flow_meter")
+        vprint(verbose, "Loaded flow_meter")
     except Exception as e:
         print(f"Failed to load flow_meter: {e}")
         data['flow_meter'] = pd.DataFrame()
@@ -353,7 +360,7 @@ def load_all_streams(root, apply_corrections = True):
         video_reader = Video()
         data['video_reader'] = video_reader
         data['video_data'] = load_video(video_reader, root/"VideoData")
-        print("Loaded video_data")
+        vprint(verbose, "Loaded video_data")
     except Exception as e:
         print(f"Failed to load video_data: {e}")
         data['video_reader'] = None
@@ -362,14 +369,14 @@ def load_all_streams(root, apply_corrections = True):
     # Pulse supply (reward delivery)
     try:
         data['pulse_supply_1'] = load(behavior_reader.PulseSupplyPort1, root/"Behavior")
-        print("Loaded pulse_supply_1")
+        vprint(verbose, "Loaded pulse_supply_1")
     except Exception as e:
         print(f"Failed to load pulse_supply_1: {e}")
         data['pulse_supply_1'] = pd.DataFrame()
     
     try:
         data['pulse_supply_2'] = load(behavior_reader.PulseSupplyPort2, root/"Behavior")
-        print("Loaded pulse_supply_2")
+        vprint(verbose, "Loaded pulse_supply_2")
     except Exception as e:
         print(f"Failed to load pulse_supply_2: {e}")
         data['pulse_supply_2'] = pd.DataFrame()
@@ -378,7 +385,7 @@ def load_all_streams(root, apply_corrections = True):
     try:
         if not data['output_clear'].empty and not data['output_set'].empty:
             data['odour_led'] = concat_digi_events(data['output_clear']['DOPort0'], data['output_set']['DOPort0'])
-            print("Created odour_led")
+            vprint(verbose, "Created odour_led")
         else:
             data['odour_led'] = pd.Series()
             print("Could not create odour_led (missing output data)")
@@ -391,7 +398,7 @@ def load_all_streams(root, apply_corrections = True):
     data['olfactometer_reader'] = olfactometer_reader
     
     if apply_corrections and real_time_offset != pd.Timedelta(0):
-        print("\nApplying time corrections to all data streams...")
+        vprint(verbose, "\nApplying time corrections to all data streams...")
         
         time_indexed_streams = [
             'digital_input_data', 'output_set', 'output_clear',
@@ -409,7 +416,7 @@ def load_all_streams(root, apply_corrections = True):
                         # Check if index is datetime-like
                         if hasattr(data[stream_name].index, 'dtype') and pd.api.types.is_datetime64_any_dtype(data[stream_name].index):
                             data[stream_name].index = data[stream_name].index + real_time_offset
-                            print(f"Applied correction to {stream_name}")
+                            vprint(verbose, f"Applied correction to {stream_name}")
                         else:
                             print(f"Skipped {stream_name} (not datetime index)")
                             
@@ -417,7 +424,7 @@ def load_all_streams(root, apply_corrections = True):
                         # Check if index is datetime-like
                         if hasattr(data[stream_name].index, 'dtype') and pd.api.types.is_datetime64_any_dtype(data[stream_name].index):
                             data[stream_name].index = data[stream_name].index + real_time_offset
-                            print(f"Applied correction to {stream_name}")
+                            vprint(verbose, f"Applied correction to {stream_name}")
                         else:
                             print(f"Skipped {stream_name} (not datetime index)")
                 except Exception as e:
@@ -425,17 +432,17 @@ def load_all_streams(root, apply_corrections = True):
     
 
 
-    print(f"\nData loading complete! Loaded {len([k for k, v in data.items() if not (isinstance(v, pd.DataFrame) and v.empty) and not (isinstance(v, pd.Series) and v.empty)])} streams successfully.")
+    vprint(verbose, f"\nData loading complete! Loaded {len([k for k, v in data.items() if not (isinstance(v, pd.DataFrame) and v.empty) and not (isinstance(v, pd.Series) and v.empty)])} streams successfully.")
     
     return data
 
-def load_experiment_events(root):
+def load_experiment_events(root, *args, verbose: bool = True, **kwargs):
     """
     Load and process experiment events with automatic time synchronization
     matching load_all_streams() timing corrections
     """
     
-    print("Loading experiment events...")
+    vprint(verbose, "Loading experiment events...")
     
     # === LOAD TIMING DATA ===
     try:
@@ -443,7 +450,7 @@ def load_experiment_events(root):
         heartbeat = load(behavior_reader.TimestampSeconds, root/"Behavior")
         if not heartbeat.empty:
             heartbeat.reset_index(inplace=True)
-        print("Loaded heartbeat data for timing synchronization")
+        vprint(verbose, "Loaded heartbeat data for timing synchronization")
     except Exception as e:
         print(f"Failed to load heartbeat: {e}")
         heartbeat = pd.DataFrame(columns=['Time', 'TimestampSeconds'])
@@ -471,7 +478,7 @@ def load_experiment_events(root):
                 if start_time_dt.tzinfo is None:
                     start_time_dt = start_time_dt.replace(tzinfo=uk_tz)
                 real_time_offset = real_time_ref - start_time_dt
-                print(f"Calculated real-time offset: {real_time_offset}")
+                vprint(verbose, f"Calculated real-time offset: {real_time_offset}")
         except Exception as e:
             print(f"Error calculating real-time offset: {e}")
     
@@ -493,7 +500,7 @@ def load_experiment_events(root):
                 return base_time + pd.to_timedelta(fractional_seconds, unit='s')
             return pd.NaT
         
-        print("Created timestamp interpolation mapping")
+        vprint(verbose, "Created timestamp interpolation mapping")
     
     # === LOAD EXPERIMENT EVENTS ===
     event_types = {
@@ -512,32 +519,32 @@ def load_experiment_events(root):
         return {f'combined_{event_type}_df': pd.DataFrame() for event_type in event_types.keys()}
     
     csv_files = list(experiment_events_dir.glob("*.csv"))
-    print(f"Found {len(csv_files)} experiment event files")
+    vprint(verbose, f"Found {len(csv_files)} experiment event files")
     
     # Process each CSV file
     for csv_file in csv_files:
         try:
             ev_df = pd.read_csv(csv_file)
-            print(f"Processing event file: {csv_file.name} with {len(ev_df)} rows")
+            vprint(verbose, f"Processing event file: {csv_file.name} with {len(ev_df)} rows")
             
             # Handle timestamp conversion (same logic as original notebook)
             if "Seconds" in ev_df.columns and interpolate_time is not None:
                 ev_df = ev_df.sort_values("Seconds")
                 ev_df["Time"] = ev_df["Seconds"].apply(interpolate_time)
-                print("Using Seconds column with interpolation")
+                vprint(verbose, "Using Seconds column with interpolation")
             else:
                 # Fallback: use seconds as relative time
                 ev_df["Time"] = pd.to_datetime(ev_df["Seconds"], unit='s')
-                print("Using Seconds column as raw timestamp")
+                vprint(verbose, "Using Seconds column as raw timestamp")
             
             # Apply real-time offset (CRITICAL for synchronization)
             if real_time_offset != pd.Timedelta(0):
                 ev_df["Time"] = ev_df["Time"] + real_time_offset
-                print(f"Applied real-time offset: {real_time_offset}")
+                vprint(verbose, f"Applied real-time offset: {real_time_offset}")
             
             # Extract events
             if "Value" in ev_df.columns:
-                print(f"Found Value column with values: {ev_df['Value'].unique()}")
+                vprint(verbose, f"Found Value column with values: {ev_df['Value'].unique()}")
                 
                 event_mappings = {
                     'EndInitiation': 'end_initiation',
@@ -551,7 +558,7 @@ def load_experiment_events(root):
                 for event_value, event_key in event_mappings.items():
                     event_df = ev_df[ev_df["Value"] == event_value].copy()
                     if not event_df.empty:
-                        print(f"Found {len(event_df)} {event_value} events")
+                        vprint(verbose, f"Found {len(event_df)} {event_value} events")
                         event_df[event_value] = True
                         event_types[event_key].append(event_df[["Time", event_value]])
                         
@@ -579,7 +586,7 @@ def load_experiment_events(root):
             # Sort by time for proper chronological order
             combined_df = combined_df.sort_values('Time').reset_index(drop=True)
             results[df_name] = combined_df
-            print(f"Combined {len(combined_df)} {column_name} events")
+            vprint(verbose, f"Combined {len(combined_df)} {column_name} events")
         else:
             results[df_name] = pd.DataFrame(columns=["Time", column_name])
             print(f"No {column_name} events found")
@@ -588,7 +595,7 @@ def load_experiment_events(root):
     return results
 
 
-def load_odor_mapping(root, data=None):
+def load_odor_mapping(root, *, data=None, verbose: bool = True, **kwargs):
     """
     Load odor mapping from session settings
     
@@ -605,7 +612,7 @@ def load_odor_mapping(root, data=None):
     dict containing odor mapping information
     """
     
-    print("Loading odor mapping from session settings...")
+    vprint(verbose, "Loading odor mapping from session settings...")
     
     # Get valve data
     if data is not None:
@@ -631,15 +638,15 @@ def load_odor_mapping(root, data=None):
     try:
         # Load session settings (experiment-specific configuration)
         session_settings, session_schema = detect_settings.detect_settings(root)
-        print("Loaded session settings")
+        vprint(verbose, "Loaded session settings")
         
         # Extract valve configurations for each olfactometer
         olfactometer_commands = session_settings.metadata.iloc[0].olfactometerCommands
         olf_valves0 = [cmd.valvesOpenO0 for cmd in olfactometer_commands]
         olf_valves1 = [cmd.valvesOpenO1 for cmd in olfactometer_commands]
         
-        print(f"Found {len(olf_valves0)} valve configurations for olfactometer 0")
-        print(f"Found {len(olf_valves1)} valve configurations for olfactometer 1")
+        vprint(verbose, f"Found {len(olf_valves0)} valve configurations for olfactometer 0")
+        vprint(verbose, f"Found {len(olf_valves1)} valve configurations for olfactometer 1")
         
         # Create command index mapping (valve number -> command index)
         olf_command_idx = {}
@@ -660,7 +667,7 @@ def load_odor_mapping(root, data=None):
             except StopIteration:
                 print(f"Warning: Valve {val} not found in olfactometer 1 configuration")
         
-        print(f"Created valve-to-command mapping: {olf_command_idx}")
+        vprint(verbose, f"Created valve-to-command mapping: {olf_command_idx}")
         
         # Create odor name mapping
         odour_to_olfactometer_map = [[] for _ in range(len(olfactometer_valves))]
@@ -670,7 +677,7 @@ def load_odor_mapping(root, data=None):
             odor_name = olfactometer_commands[cmd_idx].name
             odour_to_olfactometer_map[olf_id].append(odor_name)
         
-        print(f"Created odor mapping: {odour_to_olfactometer_map}")
+        vprint(verbose, f"Created odor mapping: {odour_to_olfactometer_map}")
         
         # Create reverse mapping: valve -> odor name
         valve_to_odor = {}
@@ -682,7 +689,8 @@ def load_odor_mapping(root, data=None):
         olfactometer_to_odors = {}
         for olf_id in range(len(olfactometer_valves)):
             olfactometer_to_odors[olf_id] = odour_to_olfactometer_map[olf_id]
-        
+        print("Odor mapping loaded successfully")
+
         return {
             'olfactometer_valves': olfactometer_valves,
             'session_settings': session_settings,
@@ -741,7 +749,7 @@ def detect_trials(data, events, root, verbose=True):
     minimum_sampling_time_ms = minimum_sampling_time * 1000
 
     if verbose:
-        print("TRIAL DETECTION - METHOD 3: Simplified")
+        print("TRIAL DETECTION")
         print("=" * 60)
         print(f"Parameters: minimum_sampling_time={minimum_sampling_time_ms}ms, sample_offset_time={sample_offset_time_ms}ms")
     
@@ -919,10 +927,6 @@ def detect_trials(data, events, root, verbose=True):
     print(f"Trials: {len(results['trials'])}")
     print(f"Initiated sequences: {len(results['initiated_sequences'])}")
     print(f"Non-initiated sequences: {len(results['non_initiated_sequences'])}")
-    total_attempts = len(results['initiated_sequences']) + len(results['non_initiated_sequences'])
-    if total_attempts > 0:
-        success_rate = len(results['initiated_sequences']) / total_attempts * 100
-        print(f"Success rate: {success_rate:.1f}%")
     print("="*50)
     
     return results
@@ -1011,6 +1015,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     poke_data = data['digital_input_data'].get('DIPort0', pd.Series(dtype=bool))
 
     poke_series_full = poke_data.astype(bool)
+    poke_series_full = poke_series_full.sort_index()
     _rises = poke_series_full & ~poke_series_full.shift(1, fill_value=False)
     _falls = ~poke_series_full & poke_series_full.shift(1, fill_value=False)
     _starts = list(poke_series_full.index[_rises])
@@ -1144,7 +1149,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         falls = ~w & w.shift(1, fill_value=in_at_start)
         intervals = []
         cur = window_start if in_at_start else None
-        first_in = None
+        first_in = window_start if in_at_start else None
         for ts in w.index:
             if rises.get(ts, False) and cur is None:
                 cur = ts
@@ -1166,8 +1171,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 merged[-1] = (ls, max(le, e2))
             else:
                 merged.append((s2, e2))
-        total_ms = sum((e - s).total_seconds() * 1000.0 for s, e in merged)
-        return {'poke_time_ms': float(total_ms), 'poke_first_in': first_in, 'poke_odor_start': window_start}
+        first_block_ms = (merged[0][1] - merged[0][0]).total_seconds() * 1000.0
+        return {'poke_time_ms': float(first_block_ms), 'poke_first_in': first_in, 'poke_odor_start': window_start}
 
     
     def _attempt_bout_from_poke_in(anchor_ts, cap_end=None):
@@ -1367,7 +1372,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 else:
                     merged.append((start, end))
 
-            consolidated_poke_time_ms = sum((e - s).total_seconds() * 1000.0 for s, e in merged)
+            first_block_ms = (merged[0][1] - merged[0][0]).total_seconds() * 1000.0
+            consolidated_poke_time_ms = first_block_ms
             first_poke_in = merged[0][0] if merged else None
 
             if consolidated_poke_time_ms > 0:
@@ -1611,9 +1617,13 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     result['completed_sequences_HR_missed_unrewarded'] = result['completed_sequence_HR_missed_unrewarded']
     result['completed_sequences_HR_missed_reward_timeout'] = result['completed_sequence_HR_missed_reward_timeout']
 
+    result['hidden_rule_position'] = hidden_rule_position
+    result['hidden_rule_odors'] = sorted(list(hr_odor_set)) if hr_odor_set is not None else []
+
     if verbose:
         print(f"\nTRIAL CLASSIFICATION RESULTS WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS:")
         print(f"Hidden Rule Location: Position {hidden_rule_position} (index {hidden_rule_location})\n")
+        print(f"Hidden Rule Odors: {', '.join(result['hidden_rule_odors']) if result['hidden_rule_odors'] else 'None'}\n")
 
 
         base_non_init_df = result.get('non_initiated_sequences', pd.DataFrame())
@@ -2359,20 +2369,20 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
         return evs
 
     def window_poke_summary(window_start, window_end):
-        # consolidated poke time within [window_start, window_end] (merge gaps <= sample_offset_time_ms)
         if window_start is None or window_end is None or window_start >= window_end:
             return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
-        # State at window start
-        prev = DIP0.loc[:window_start]
+        s_bool = DIP0  # cue-port boolean series
+        s_bool = s_bool.sort_index()
+        prev = s_bool.loc[:window_start]
         in_at_start = bool(prev.iloc[-1]) if len(prev) else False
-        w = DIP0.loc[window_start:window_end]
+        w = s_bool.loc[window_start:window_end]
         if w.empty and not in_at_start:
             return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
         rises = w & ~w.shift(1, fill_value=in_at_start)
         falls = ~w & w.shift(1, fill_value=in_at_start)
         intervals = []
         cur = window_start if in_at_start else None
-        first_in = None
+        first_in = window_start if in_at_start else None
         for ts in w.index:
             if rises.get(ts, False) and cur is None:
                 cur = ts
@@ -2385,7 +2395,6 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
             intervals.append((cur, window_end))
         if not intervals:
             return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
-        # merge across short gaps
         merged = [intervals[0]]
         for s2, e2 in intervals[1:]:
             ls, le = merged[-1]
@@ -2394,8 +2403,8 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
                 merged[-1] = (ls, max(le, e2))
             else:
                 merged.append((s2, e2))
-        total_ms = sum((e - s).total_seconds() * 1000.0 for s, e in merged)
-        return {'poke_time_ms': float(total_ms), 'poke_first_in': first_in, 'poke_odor_start': window_start}
+        first_block_ms = (merged[0][1] - merged[0][0]).total_seconds() * 1000.0
+        return {'poke_time_ms': float(first_block_ms), 'poke_first_in': first_in, 'poke_odor_start': window_start}
 
     # InitiationSequence times (for FA end window)
     init_times = []
@@ -2524,9 +2533,9 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
             last_odor_pos = positions[last_idx]
             last_valve_dur_ms = (last_ev['end_time'] - last_ev['start_time']).total_seconds() * 1000.0
 
-            # Poke time for last odor: from poke-in that covers/starts after valve_start, merge small gaps, end at first large gap
-            _first_in, _end, dur_ms = bout_from_anchor(last_ev['start_time'])
-            last_odor_poke_ms = dur_ms
+            # Authoritative: poke time strictly within [valve_start, valve_end]
+            psum_last = window_poke_summary(last_ev['start_time'], last_ev['end_time'])
+            last_odor_poke_ms = float(psum_last.get('poke_time_ms', 0.0))
 
         # Abortion type
         abortion_type = 'reinitiation_abortion' if last_odor_poke_ms >= minimum_sampling_time_ms else 'initiation_abortion'
@@ -2989,7 +2998,7 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
 
     # 3) Aborted trial details
     aborted_detailed = abortion_classification(
-        data, events, classification, odor_map, root, verbose=True
+        data, events, classification, odor_map, root, verbose=verbose
     )
     classification['aborted_sequences_detailed'] = aborted_detailed
 
@@ -3060,24 +3069,51 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
 
 
 # ========================== Functions for saving results ==========================
+def _json_safe(obj):
+    """Recursively convert objects to JSON-friendly types."""
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_json_safe(x) for x in obj]
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        f = float(obj)
+        return None if np.isnan(f) else f
+    if isinstance(obj, np.bool_):
+        return bool(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (pd.Timestamp, datetime, date)):
+        return obj.isoformat()
+    if hasattr(obj, "isoformat"):
+        try:
+            return obj.isoformat()
+        except Exception:
+            pass
+    try:
+        import pandas as _pd
+        if isinstance(obj, _pd.Timedelta):
+            return obj.total_seconds()
+    except Exception:
+        pass
+    if isinstance(obj, Path):
+        return str(obj)
+    return obj
+
 def _find_parent_named(start: Path, prefix: str) -> Path | None:
-    for p in [start] + list(start.parents):
+    for p in [Path(start)] + list(Path(start).parents):
         if p.name.startswith(prefix):
             return p
     return None
 
 def _find_rawdata_root(start: Path) -> Path | None:
-    for p in [start] + list(start.parents):
+    for p in [Path(start)] + list(Path(start).parents):
         if p.name == "rawdata":
             return p
     return None
 
 def resolve_derivatives_output_dir(root) -> tuple[Path, dict]:
-    """
-    Given a path inside hypnose/rawdata/sub-.../ses-.../..., return the destination:
-      hypnose/derivatives/sub-.../ses-.../saved_analysis_results
-    Returns (out_dir, info_dict)
-    """
     root = Path(root).resolve()
     rawdata_dir = _find_rawdata_root(root)
     if rawdata_dir is None:
@@ -3119,15 +3155,14 @@ def _json_default(o):
 
 def _normalize_df_for_io(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     """
-    JSON-encode object columns containing dict/list/tuple/set/ndarray for Parquet compatibility.
-    Returns (normalized_df, jsonified_columns)
+    JSON-encode object columns containing dict/list/tuple/set/ndarray.
+    Returns (normalized_df, jsonified_columns).
     """
     if df is None or not isinstance(df, pd.DataFrame) or df.empty:
         return df, []
     df2 = df.copy()
     json_cols = []
 
-    # robust null check for scalars (avoids ambiguous truth on arrays)
     def _is_nullish(v):
         if v is None:
             return True
@@ -3138,33 +3173,15 @@ def _normalize_df_for_io(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
             pass
         return False
 
-    # local fallback so we don't depend on global order in notebooks
     def _json_default_local(o):
         try:
             return _json_default(o)
         except NameError:
-            if isinstance(o, (pd.Timestamp, )):
-                return o.isoformat()
-            if hasattr(o, "isoformat"):
-                try:
-                    return o.isoformat()
-                except Exception:
-                    pass
-            if isinstance(o, (set, tuple)):
-                return list(o)
-            if isinstance(o, (np.integer,)):
-                return int(o)
-            if isinstance(o, (np.floating,)):
-                f = float(o)
-                return None if np.isnan(f) else f
-            if isinstance(o, (np.ndarray,)):
-                return o.tolist()
-            return str(o)
+            return _json_safe(o)
 
     for col in df2.columns:
         if df2[col].dtype == "object":
             sample = df2[col].dropna().head(10).tolist()
-            # Include numpy arrays in detection
             needs_json = any(isinstance(v, (dict, list, tuple, set, np.ndarray)) for v in sample)
             if needs_json:
                 json_cols.append(col)
@@ -3174,81 +3191,60 @@ def _normalize_df_for_io(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
     return df2, json_cols
 
 def save_session_analysis_results(classification: dict, root, session_metadata: dict | None = None, verbose: bool = True) -> Path:
-    """
-    First saving function:
-    - Resolves derivatives path mirroring rawdata/sub-.../ses-...
-    - Creates saved_analysis_results folder
-    - Saves parameters.json
-    - Saves a few key tables as Parquet (+ sidecar schema listing JSON-encoded columns)
-    """
     out_dir, info = resolve_derivatives_output_dir(root)
-    tables_dir = out_dir / "tables"
-    tables_dir.mkdir(parents=True, exist_ok=True)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Parameters
-    params = {
-        "sample_offset_time_ms": classification.get("sample_offset_time_ms"),
-        "minimum_sampling_time_ms": classification.get("minimum_sampling_time_ms"),
-        "response_time_window_sec": classification.get("response_time_window_sec"),
-        "hidden_rule_position": classification.get("hidden_rule_position"),
+    manifest = {
+        "created_at": datetime.now().isoformat(),
+        "session": _json_safe(session_metadata or {}),
         "paths": info,
-        "session_metadata": session_metadata or {},
+        "tables": {},
+        "artifacts": {},
+        "notes": "DataFrames saved as CSV; object columns JSON-encoded. See *.schema.json.",
     }
-    with open(out_dir / "parameters.json", "w") as f:
-        json.dump(params, f, indent=2, default=_json_default)
 
-    # Save a minimal set of key DataFrames (extend later as needed)
-    keys_to_save = [
-        "initiated_sequences",
-        "non_initiated_sequences",
-        "non_initiated_odor1_attempts",
+    saved_any = False
+    saved_names: set[str] = set()
 
-        "completed_sequences",
-        "completed_sequences_with_response_times",
-        "completed_sequence_rewarded",
-        "completed_sequence_unrewarded",
-        "completed_sequence_reward_timeout",
-
-        "completed_sequences_HR",
-        "completed_sequence_HR_rewarded",
-        "completed_sequence_HR_unrewarded",
-        "completed_sequence_HR_reward_timeout",
-
-        "completed_sequences_HR_missed",                 
-        "completed_sequence_HR_missed_rewarded",         
-        "completed_sequence_HR_missed_unrewarded",       
-        "completed_sequence_HR_missed_reward_timeout",   
-
-        "aborted_sequences",
-        "aborted_sequences_HR",                          
-        "aborted_sequences_detailed",
-    ]
-
-    manifest = {"tables": {}, "version": "v1"}
-    for key in keys_to_save:
-        df = classification.get(key)
+    def _save_df(name: str, df) -> bool:
         if not isinstance(df, pd.DataFrame) or df.empty:
-            continue
-        df_norm, json_cols = _normalize_df_for_io(df)
-        table_path = tables_dir / f"{key}.parquet"
-        schema_path = tables_dir / f"{key}.schema.json"
+            return False
+        if name in saved_names:
+            return True
+        f_csv = out_dir / f"{name}.csv"
+        f_schema = out_dir / f"{name}.schema.json"
         try:
-            df_norm.to_parquet(table_path, index=False)
-            with open(schema_path, "w") as f:
-                json.dump({"jsonified_columns": json_cols}, f, indent=2)
-        except Exception:
-            table_path = tables_dir / f"{key}.pkl"
-            df_norm.to_pickle(table_path)
-            with open(schema_path, "w") as f:
-                json.dump({"jsonified_columns": json_cols, "format": "pickle"}, f, indent=2)
-        manifest["tables"][key] = {
-            "path": str(table_path.relative_to(out_dir)),
-            "schema": str(schema_path.relative_to(out_dir)),
-            "rows": int(len(df)),
-            "jsonified_columns": json_cols,
-        }
+            df_norm, json_cols = _normalize_df_for_io(df)
+            df_norm.to_csv(f_csv, index=False)
+            with open(f_schema, "w", encoding="utf-8") as sf:
+                json.dump({"jsonified_columns": json_cols}, sf, indent=2)
+            manifest["tables"][name] = f_csv.name
+            saved_names.add(name)
+            return True
+        except Exception as e:
+            vprint(verbose, f"[save] WARNING: failed writing {name}: {e}")
+            return False
 
-    # Save indices for quick lookup (JSON)
+    # 1) Save all top-level DataFrames
+    if isinstance(classification, dict):
+        for key, val in classification.items():
+            if _save_df(key, val):
+                saved_any = True
+
+    # 2) Explicit key tables (covers merged dicts)
+    for k in [
+        "initiated_sequences","non_initiated_sequences","non_initiated_odor1_attempts",
+        "completed_sequences","completed_sequences_with_response_times",
+        "completed_sequence_rewarded","completed_sequence_unrewarded","completed_sequence_reward_timeout",
+        "completed_sequences_HR","completed_sequence_HR_rewarded","completed_sequence_HR_unrewarded","completed_sequence_HR_reward_timeout",
+        "completed_sequences_HR_missed","completed_sequence_HR_missed_rewarded","completed_sequence_HR_missed_unrewarded","completed_sequence_HR_missed_reward_timeout",
+        "aborted_sequences","aborted_sequences_HR","aborted_sequences_detailed",
+    ]:
+        df = classification.get(k) if isinstance(classification, dict) else None
+        if _save_df(k, df):
+            saved_any = True
+
+    # 3) Indices
     indices_dir = out_dir / "indices"
     indices_dir.mkdir(parents=True, exist_ok=True)
     idx_payloads = {
@@ -3256,26 +3252,66 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         "aborted_index": classification.get("aborted_index", classification.get("index", {}).get("aborted", {})),
     }
     for name, payload in idx_payloads.items():
-        with open(indices_dir / f"{name}.json", "w") as f:
-            json.dump(payload, f, indent=2, default=_json_default) 
+        with open(indices_dir / f"{name}.json", "w", encoding="utf-8") as f:
+            json.dump(_json_safe(payload), f, indent=2)
 
-    # Save response time analysis (per-session aggregates)
+    # 4) Response-time analysis artifacts
     rta = classification.get("response_time_analysis")
-    if rta is not None:
-        with open(out_dir / "response_time_analysis.json", "w") as f:
-            json.dump(rta, f, indent=2, default=_json_default) 
+    if isinstance(rta, dict):
+        try:
+            with open(out_dir / "response_time_analysis.json", "w", encoding="utf-8") as f:
+                json.dump(_json_safe(rta), f, indent=2)
+        except Exception as e:
+            vprint(verbose, f"[save] WARNING: failed writing response_time_analysis.json: {e}")
+        per_trial = rta.get("per_trial")
+        if isinstance(per_trial, pd.DataFrame) and not per_trial.empty:
+            if _save_df("response_time_per_trial", per_trial):
+                saved_any = True
 
-    with open(out_dir / "manifest.json", "w") as f:
-        json.dump(manifest, f, indent=2, default=_json_default)
+    # 5) Manifest + summary
+    try:
+        with open(out_dir / "manifest.json", "w", encoding="utf-8") as f:
+            json.dump(_json_safe(manifest), f, indent=2)
+    except Exception as e:
+        vprint(verbose, f"[save] WARNING: failed writing manifest.json: {e}")
+    counts = {}
+    def _n(name):
+        df = classification.get(name)
+        return int(len(df)) if isinstance(df, pd.DataFrame) else 0
+    for k in [
+        "initiated_sequences","non_initiated_sequences","non_initiated_odor1_attempts",
+        "completed_sequences","completed_sequences_with_response_times",
+        "completed_sequence_rewarded","completed_sequence_unrewarded","completed_sequence_reward_timeout",
+        "aborted_sequences","aborted_sequences_detailed",
+    ]:
+        counts[k] = _n(k)
 
-    if verbose:
-        print(f"Saved analysis results to:\n  {out_dir}")
-        print(f"- tables written: {len(manifest['tables'])}")
+    # Add combined non-initiated total (baseline + pos1 attempts)
+    counts["non_initiated_total"] = (
+        counts.get("non_initiated_sequences", 0)
+        + counts.get("non_initiated_odor1_attempts", 0)
+    )
+
+    params = {
+        "sample_offset_time_ms": classification.get("sample_offset_time_ms"),
+        "minimum_sampling_time_ms": classification.get("minimum_sampling_time_ms"),
+        "response_time_window_sec": classification.get("response_time_window_sec"),
+        "hidden_rule_position": classification.get("hidden_rule_position"),
+        "hidden_rule_odors": classification.get("hidden_rule_odors"),
+    }
+    summary = {
+        "created_at": manifest["created_at"],
+        "session": manifest["session"],
+        "counts": counts,
+        "params": params,
+    }
+    with open(out_dir / "summary.json", "w", encoding="utf-8") as f:
+        json.dump(_json_safe(summary), f, indent=2)
+
+    vprint(verbose, f"Saved analysis to: {out_dir} ({'some tables' if saved_any else 'no tables'})")
     return out_dir
 
-
-
-# ========================== Functions for multiple session analysis ========================== Note: Up to hear all functions work at the moment. 
+# ========================== Functions for multiple session analysis ========================== 
 
 def _concat_align(dfs: Iterable[pd.DataFrame]) -> pd.DataFrame:
     dfs = [d for d in dfs if isinstance(d, pd.DataFrame) and not d.empty]
@@ -3458,6 +3494,22 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
     merged['response_time_window_sec'] = _pick_param('response_time_window_sec')
     merged['hidden_rule_position'] = _pick_param('hidden_rule_position')
 
+    hr_odors_all: list[str] = []
+    for _, cls in per_run_cls:
+        od = cls.get('hidden_rule_odors')
+        if isinstance(od, (list, tuple)):
+            hr_odors_all.extend([str(x) for x in od if isinstance(x, str) and x])
+    if hr_odors_all:
+        seen = set()
+        uniq = []
+        for x in hr_odors_all:
+            if x not in seen:
+                seen.add(x)
+                uniq.append(x)
+        merged['hidden_rule_odors'] = uniq
+    else:
+        merged.setdefault('hidden_rule_odors', [])
+
     # Per-run counts (sanity)
     runs_meta = []
     for ridx, cls in per_run_cls:
@@ -3490,6 +3542,22 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
         if isinstance(comp, pd.DataFrame) and isinstance(comp_rt, pd.DataFrame) and not comp.empty:
             if len(comp) != len(comp_rt):
                 print(f"[merge_classifications] NOTE: completed_sequences ({len(comp)}) != completed_sequences_with_response_times ({len(comp_rt)}). Using the RT table for RT summaries.")
+
+        # Additional sanity: merged counts vs per-run sums
+        try:
+            total_non_ini = int(len(merged.get('non_initiated_sequences', [])))
+            total_pos1 = int(len(merged.get('non_initiated_odor1_attempts', [])))
+            total_initiated = int(len(merged.get('initiated_sequences', [])))
+            sum_non_ini = sum(r['counts']['non_initiated_sequences'] for r in merged.get('runs', []))
+            sum_pos1 = sum(r['counts']['non_initiated_odor1_attempts'] for r in merged.get('runs', []))
+            sum_initiated = sum(r['counts']['initiated_sequences'] for r in merged.get('runs', []))
+            if (total_non_ini != sum_non_ini) or (total_pos1 != sum_pos1) or (total_initiated != sum_initiated):
+                print("[merge_classifications] WARNING: count mismatch after merge")
+                print(f"  non_initiated total: merged={total_non_ini} vs per-run sum={sum_non_ini}")
+                print(f"  pos1 total:          merged={total_pos1} vs per-run sum={sum_pos1}")
+                print(f"  initiated total:     merged={total_initiated} vs per-run sum={sum_initiated}")
+        except Exception:
+            pass
     return merged
 
 
@@ -3542,8 +3610,10 @@ def print_merged_session_summary(merged_classification: dict) -> None:
         except Exception:
             return "n/a"
 
+    print("=" * 80, "\n")
     print("=" * 80)
-    print("CLASSIFYING TRIAL OUTCOMES WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS")
+    print("SUMMARY: TRIAL CLASSIFICATION AND POKE TIME ANALYSIS (MERGED SESSIONS)")
+    print("=" * 80, "\n")
     print("=" * 80)
     if sample_offset_time_ms is not None:
         print(f"Sample offset time: {fmt_ms(sample_offset_time_ms)} ms")
@@ -3557,13 +3627,15 @@ def print_merged_session_summary(merged_classification: dict) -> None:
     pos1_n = int(len(non_ini_pos1))
     non_ini_total = baseline_n + pos1_n
     total_attempts = int(len(ini)) + non_ini_total
-    print("\nTRIAL CLASSIFICATION RESULTS WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS:")
+    print("\nTRIAL CLASSIFICATIONs:")
     print(f"Hidden Rule Location: Position {hr_pos if hr_pos is not None else 'None'} (index {hr_idx if hr_idx is not None else 'None'})\n")
+    hr_odors = merged_classification.get('hidden_rule_odors') or []
+    print(f"Hidden Rule Odors: {', '.join(hr_odors) if hr_odors else 'None'}\n")
     print(f"Total attempts: {total_attempts}")
     print(f"-- Non-initiated sequences (total): {non_ini_total} ({pct(non_ini_total, total_attempts):.1f}%)")
     print(f"    -- Position 1 attempts within trials {pos1_n} ({pct(pos1_n, non_ini_total):.1f}%)")
     print(f"    -- Baseline non-initiated sequences {baseline_n} ({pct(baseline_n, non_ini_total):.1f}%)")
-    print(f"-- Initiated sequences (trials): {int(len(ini))} ({pct(len(ini), total_attempts):.1f}%)\n")
+    print(f"-- Initiated sequences (\033[1mtrials\033[0m]): {int(len(ini))} ({pct(len(ini), total_attempts):.1f}%)\n")
 
     # Initiated breakdown
     comp_n = int(len(comp))
@@ -3574,6 +3646,11 @@ def print_merged_session_summary(merged_classification: dict) -> None:
     print(f"   -- Hidden Rule Missed (HR_missed): {int(len(comp_hr_missed))} ({pct(len(comp_hr_missed), comp_n):.1f}%)")
     print(f"-- Aborted sequences: {ab_n} ({pct(ab_n, len(ini)): .1f}%)")
     print(f"   -- Aborted Hidden Rule trials (HR): {int(len(ab_hr))} ({pct(len(ab_hr), ab_n):.1f}%)\n")
+
+    print(f"REWARDED TRIALS BREAKDOWN:")
+    print(f"-- Rewarded: {int(len(comp_rew))} ({pct(len(comp_rew), comp_n):.1f}%)")
+    print(f"-- Unrewarded: {int(len(comp_unr))} ({pct(len(comp_unr), comp_n):.1f}%)")
+    print(f"-- Reward Timeout: {int(len(comp_tmo))} ({pct(len(comp_tmo), comp_n):.1f}%)\n")
 
     # Aggregate poke/valve time stats from completed trials (use comp, which has nested columns)
     def collect_pos_stats(df: pd.DataFrame):
@@ -3649,12 +3726,12 @@ def print_merged_session_summary(merged_classification: dict) -> None:
     if base_vals.empty:
         print(f"Baseline non-initiated: n={baseline_n} (no valid poke times)")
     else:
-        print(f"Baseline non-initiated: n={baseline_n} avg={base_vals.mean():.1f} ms range={base_vals.min():.1f}-{base_vals.max():.1f} ms")
+        print(f"Baseline non-initiated: n={baseline_n} median={base_vals.median():.1f} ms range={base_vals.min():.1f}-{base_vals.max():.1f} ms")
     pos1_vals = _choose_poke_series(non_ini_pos1, ["pos1_poke_time_ms", "attempt_poke_time_ms", "poke_time_ms", "poke_time", "poke_ms"])
     if pos1_vals.empty:
         print(f"Pos1 attempts: n={pos1_n} (no valid poke times)")
     else:
-        print(f"Pos1 attempts: n={pos1_n} avg={pos1_vals.mean():.1f} ms range={pos1_vals.min():.1f}-{pos1_vals.max():.1f} ms")
+        print(f"Pos1 attempts: n={pos1_n} median={pos1_vals.median():.1f} ms range={pos1_vals.min():.1f}-{pos1_vals.max():.1f} ms")
 
     # Response time analysis from comp_rt
     print("=" * 80)
@@ -3684,9 +3761,15 @@ def print_merged_session_summary(merged_classification: dict) -> None:
         print(f"  Average: {s.mean():.1f}ms")
         print(f"  Median: {s.median():.1f}ms\n")
 
-    rew_rt = comp_rt[comp_rt.get("response_time_category") == "rewarded"] if not comp_rt.empty else comp_rt
-    unr_rt = comp_rt[comp_rt.get("response_time_category") == "unrewarded"] if not comp_rt.empty else comp_rt
-    tdel_rt = comp_rt[comp_rt.get("response_time_category") == "timeout_delayed"] if not comp_rt.empty else comp_rt
+    def _cat(df: pd.DataFrame, cat: str) -> pd.DataFrame:
+        if not isinstance(df, pd.DataFrame) or df.empty or 'response_time_category' not in df.columns:
+            return pd.DataFrame()
+        m = df['response_time_category'].astype('object') == cat
+        return df[m]
+
+    rew_rt = _cat(comp_rt, "rewarded")
+    unr_rt = _cat(comp_rt, "unrewarded")
+    tdel_rt = _cat(comp_rt, "timeout_delayed")
 
     rt_block(rew_rt, "REWARDED TRIALS")
 
@@ -3702,9 +3785,9 @@ def print_merged_session_summary(merged_classification: dict) -> None:
 
     rt_block(unr_rt, "UNREWARDED TRIALS")
     if tdel_rt.empty:
-        print("TIMEOUT TRIALS WITH DELAYED RESPONSES:\n  No timeout trials with delayed responses\n")
+        print("REWARD TIMEOUT TRIALS:\n  No reward timeout trials\n")
     else:
-        rt_block(tdel_rt, "TIMEOUT TRIALS WITH DELAYED RESPONSES")
+        rt_block(tdel_rt, "REWARD TIMEOUT TRIALS")
 
     s_all = pd.to_numeric(comp_rt.get("response_time_ms"), errors="coerce").dropna() if not comp_rt.empty else pd.Series([], dtype=float)
     print("ALL TRIALS WITH RESPONSE TIMES:")
@@ -3750,13 +3833,13 @@ def print_merged_session_summary(merged_classification: dict) -> None:
         nfa = total - fa_total
 
         print("False Alarms:")
-        print(f"  - non-FA Abortions: {nfa}")
+        print(f"  - non-FA Abortions: {nfa} ({pct(nfa, total):.1f}%)")
         print(f"  - False Alarm abortions: {fa_total} ({pct(fa_total, total):.1f}%)")
         if fa_total > 0:
             print(f"      - FA Time In - Within Response Time Window ({float(response_time_window_sec) if response_time_window_sec is not None else 'n/a'} s):  {fa_in} ({pct(fa_in, fa_total):.1f}%)")
             s_in = pd.to_numeric(ab_det.loc[ab_det['fa_label'] == 'FA_time_in', 'fa_latency_ms'], errors='coerce').dropna() if 'fa_latency_ms' in ab_det.columns else pd.Series([], dtype=float)
             if len(s_in):
-                print(f"          - Response Time: avg={s_in.mean():.1f} ms, range: {s_in.min():.1f} - {s_in.max():.1f} ms")
+                print(f"          - Response Time: median={s_in.median():.1f} ms, avg={s_in.mean():.1f} ms, range: {s_in.min():.1f} - {s_in.max():.1f} ms")
             if response_time_window_sec is not None:
                 lower_rt = response_time_window_sec
                 upper_rt = response_time_window_sec * 3
@@ -3765,34 +3848,171 @@ def print_merged_session_summary(merged_classification: dict) -> None:
                 print(f"      - FA Time Out: {fa_out} ({pct(fa_out, fa_total):.1f}%)")
             s_out = pd.to_numeric(ab_det.loc[ab_det['fa_label'] == 'FA_time_out', 'fa_latency_ms'], errors='coerce').dropna() if 'fa_latency_ms' in ab_det.columns else pd.Series([], dtype=float)
             if len(s_out):
-                print(f"          - Response Time: avg={s_out.mean():.1f} ms, range: {s_out.min():.1f} - {s_out.max():.1f} ms")
+                print(f"          - Response Time: median={s_out.median():.1f} ms, avg={s_out.mean():.1f} ms, range: {s_out.min():.1f} - {s_out.max():.1f} ms")
             print(f"      - FA Late - After 3x Response Time up to next trial: {fa_late} ({pct(fa_late, fa_total):.1f}%)")
             s_late = pd.to_numeric(ab_det.loc[ab_det['fa_label'] == 'FA_late', 'fa_latency_ms'], errors='coerce').dropna() if 'fa_latency_ms' in ab_det.columns else pd.Series([], dtype=float)
             if len(s_late):
-                print(f"          - Response Time: avg={s_late.mean():.1f} ms, range: {s_late.min():.1f} - {s_late.max():.1f} ms")
+                print(f"          - Response Time: median={s_late.median():.1f} ms, avg={s_late.mean():.1f} ms, range: {s_late.min():.1f} - {s_late.max():.1f} ms")
 
+        # Abortions at Hidden Rule position: split into HR vs non-HR trials, with FA breakdown
+        if hr_pos is not None and 'last_odor_position' in ab_det.columns:
+            abortions_at_hr_pos = ab_det[ab_det['last_odor_position'] == hr_pos].copy()
+            # Resolve HR-aborted trial IDs from merged classification
+            hr_ab_df = cls.get('aborted_sequences_HR')
+            if isinstance(hr_ab_df, pd.DataFrame) and not hr_ab_df.empty and 'trial_id' in hr_ab_df.columns:
+                hr_aborted_ids = set(hr_ab_df['trial_id'].dropna().tolist())
+            else:
+                hr_aborted_ids = set()
+            in_hr_trials = abortions_at_hr_pos[abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy() if 'trial_id' in abortions_at_hr_pos.columns else pd.DataFrame()
+            non_hr_trials = abortions_at_hr_pos[~abortions_at_hr_pos.get('trial_id', pd.Series([])).isin(hr_aborted_ids)].copy() if 'trial_id' in abortions_at_hr_pos.columns else abortions_at_hr_pos.copy()
 
+            def _print_fa_counts(df, indent="        "):
+                order = ['nFA', 'FA_time_in', 'FA_time_out', 'FA_late']
+                if df is None or df.empty or 'fa_label' not in df.columns:
+                    return
+                cnt = df['fa_label'].value_counts().reindex(order, fill_value=0)
+                total_n = int(len(df))
+                for lbl in order:
+                    v = int(cnt.get(lbl, 0))
+                    p = (v / total_n * 100.0) if total_n else 0.0
+                    print(f"{indent}{lbl}: {v} ({p:.1f}%)")
 
+            total_at_hr = int(len(abortions_at_hr_pos))
+            print(f"\n  Abortions at Hidden Rule Position {hr_pos}: n={total_at_hr}")
+            print(f"    Of which in Hidden Rule Trials: n={int(len(in_hr_trials))}")
+            print(f"    Non-Hidden Rule Abortions at HR Location: n={int(len(non_hr_trials))}")
+            _print_fa_counts(non_hr_trials)
+
+        # Helper for stats lines
+        def _stats_line(series, label):
+            s = pd.to_numeric(series, errors='coerce').dropna()
+            if s.empty:
+                print(f"{label}: n=0")
+            else:
+                print(f"{label}: n={len(s)} | median={s.median():.1f} ms | avg={s.mean():.1f} ms | range={s.min():.1f}-{s.max():.1f} ms")
+
+        # Non-last Odor Pokes (exclude last_event_index per trial), only >= minimum_sampling_time_ms
+        if {'presentations', 'last_event_index'}.issubset(ab_det.columns):
+            pres_df = ab_det[['trial_id', 'presentations', 'last_event_index']].explode('presentations').dropna(subset=['presentations']).copy()
+            if not pres_df.empty:
+                pres = pd.concat([pres_df.drop(columns=['presentations']), pres_df['presentations'].apply(pd.Series)], axis=1)
+                pres['is_last'] = pres['index_in_trial'] == pres['last_event_index']
+                pres = pres[~pres['is_last']].copy()
+                pres['poke_time_ms'] = pd.to_numeric(pres.get('poke_time_ms'), errors='coerce')
+                pres_valid = pres[(pres['poke_time_ms'] >= (minimum_sampling_time_ms or 0))].copy()
+
+                print("\nPoke Times for all Odors (Except aborted Odor):")
+                _stats_line(pres_valid['poke_time_ms'], "  - All Odors (except aborted)")
+
+                if 'position' in pres_valid.columns and not pres_valid.empty:
+                    for pos, grp in pres_valid.groupby('position'):
+                        _stats_line(grp['poke_time_ms'], f"  - Position {int(pos)}")
+
+                if 'odor_name' in pres_valid.columns and not pres_valid.empty:
+                    for odor, grp in pres_valid.groupby('odor_name'):
+                        _stats_line(grp['poke_time_ms'], f"  - Odor {odor}")
+            else:
+                print("\nPoke Times for all Odors except aborted: n=0 (no presentations info)")
+        else:
+            print("\n Poke Times for all Odors except aborted: presentations not attached in aborted_sequences_detailed")
+
+        # Last Odor Poke Times by abortion type
+        if 'last_odor_poke_time_ms' in ab_det.columns and 'abortion_type' in ab_det.columns:
+            print("\nAborted Odor Poke Times:")
+            _stats_line(ab_det.loc[ab_det['abortion_type'] == 'reinitiation_abortion', 'last_odor_poke_time_ms'],
+                        "  - Re-Initiation Abortions")
+            _stats_line(ab_det.loc[ab_det['abortion_type'] == 'initiation_abortion', 'last_odor_poke_time_ms'],
+                        "  - Initiation Abortions")
+
+        # Counts by last odor
+        if 'last_odor_name' in ab_det.columns and 'abortion_type' in ab_det.columns:
+            print("\nCounts by last odor:")
+            by_odor = (
+                ab_det
+                .groupby(['last_odor_name', 'abortion_type'])
+                .size()
+                .unstack(fill_value=0)
+                .rename(columns={'reinitiation_abortion': 'Re-initiation', 'initiation_abortion': 'Initiation'})
+            )
+            totals = ab_det.groupby('last_odor_name').size()
+            for odor in totals.index:
+                rei_c = int(by_odor.loc[odor].get('Re-initiation', 0))
+                ini_c = int(by_odor.loc[odor].get('Initiation', 0))
+                tot = int(totals.loc[odor])
+                print(f"  - {odor}: {tot} abortions, Re-initiation {rei_c}, Initiation {ini_c}")
+
+        # Counts by last position
+        if 'last_odor_position' in ab_det.columns and 'abortion_type' in ab_det.columns:
+            print("\nCounts by last position:")
+            by_pos = (
+                ab_det
+                .groupby(['last_odor_position', 'abortion_type'])
+                .size()
+                .unstack(fill_value=0)
+                .rename(columns={'reinitiation_abortion': 'Re-initiation', 'initiation_abortion': 'Initiation'})
+            )
+            totals_pos = ab_det.groupby('last_odor_position').size()
+            for pos in sorted(totals_pos.index):
+                rei_c = int(by_pos.loc[pos].get('Re-initiation', 0))
+                ini_c = int(by_pos.loc[pos].get('Initiation', 0))
+                tot = int(totals_pos.loc[pos])
+                print(f"  - Position {int(pos)}: {tot} abortions, Re-initiation {rei_c}, Initiation {ini_c}")
+    
 
 def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verbose: bool = True, max_runs: int = 32, save: bool = True, print_summary: bool = True):
     """
     Analyze all experiment files for a subject on a given date, then merge and (optionally) save.
     Now builds data/events/odor_map/trial_counts/stage from the root returned by load_experiment().
     """
+
+    subject_id = str(subject_id)
+    date_str = str(date_str)
+
+    def _maybe_silent(callable_, *args, **kwargs):
+        if verbose:
+            return callable_(*args, **kwargs)
+        import io, contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            return callable_(*args, **kwargs)
+    
+    # Discover unique experiment files for this subject/date
+    session_roots: list[Path] = []
+    visited: set[Path] = set()
+    le = globals().get("load_experiment")
+    if callable(le):
+        for i in range(max_runs):
+            root_i = _maybe_silent(le, subject_id, date_str, index=i)
+            if not root_i:
+                break
+            p = Path(root_i).resolve()
+            if p in visited:
+                vprint(verbose, f"[analyze_session_multi_run] Duplicate experiment root at index {i}: {p}. Stopping discovery.")
+                break
+            visited.add(p)
+            session_roots.append(p)
+    if not session_roots:
+        raise RuntimeError(f"No experiment runs found for subject={subject_id} date={date_str}")
+
+    # Sort oldest -> newest (or reverse=True for newest first)
+    def _parse_ts(p: Path):
+        from datetime import datetime
+        try:
+            return datetime.strptime(p.name, "%Y-%m-%dT%H-%M-%S")
+        except Exception:
+            return datetime.min
+    try:
+        session_roots.sort(key=_parse_ts)
+    except Exception:
+        session_roots.sort(key=lambda p: str(p))
     per_run = []
+    merge_inputs = []
     roots: list[Optional[Path]] = []
     stages = []
 
-    for i in range(max_runs):
+    for i, root in enumerate(session_roots[:max_runs]):
         try:
-            root = load_experiment(subject_id, date_str, index=i)
-            if root is None:
-                if verbose:
-                    print(f"[analyze_session_multi_run] No root for run index {i}; stopping.")
-                break
-
-            if verbose:
-                print(f"[analyze_session_multi_run] Loaded run index {i}: root={root}")
+            vprint(verbose, f"[analyze_session_multi_run] Loaded run index {i}: root={root}")
 
             # Detect stage (best-effort)
             try:
@@ -3801,34 +4021,47 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
             except Exception:
                 stage = {'stage_name': str(root)}
 
-            data = load_all_streams(root)
-            events = load_experiment_events(root)
-            odor_map = load_odor_mapping(root, data)
+            # Run pipeline
+            data = _maybe_silent(load_all_streams, root, verbose=verbose)
+            events = _maybe_silent(load_experiment_events, root, verbose=verbose)
+            odor_map = _maybe_silent(load_odor_mapping, root, data=data, verbose=verbose)
             trial_counts = detect_trials(data, events, root, verbose=verbose)
 
-            out = classify_and_analyze_with_response_times(
+            out = _maybe_silent(
+                classify_and_analyze_with_response_times,
                 data, events, trial_counts, odor_map, stage, root, verbose=verbose
             )
-            cls = out['classification'] if isinstance(out, dict) and 'classification' in out else out
+
+            # Normalize outputs for merging
+            if isinstance(out, dict) and 'classification' in out:
+                cls = out['classification'] or {}
+                merge_inputs.append(out)  # keep full dict so RT tables survive merge
+            elif isinstance(out, dict):
+                cls = out or {}
+                merge_inputs.append(cls)
+            else:
+                cls = out or {}
+                merge_inputs.append({'classification': cls})
+
+            if not isinstance(cls, dict) or not cls:
+                raise RuntimeError("Empty classification output")
+
             per_run.append(cls)
             roots.append(root)
             stages.append(stage)
 
-        except (FileNotFoundError, IndexError, ValueError) as e:
-            if i == 0:
-                print(f"[analyze_session_multi_run] No runs found for {subject_id} on {date_str}: {e}")
-            break
         except Exception as e:
-            if verbose:
-                print(f"[analyze_session_multi_run] Skipping run index {i} due to error: {e}")
+            vprint(verbose, f"[analyze_session_multi_run] Skipping run index {i} due to error: {e}")
             continue
 
     if not per_run:
         raise RuntimeError(f"No runs analyzed for subject={subject_id} date={date_str}")
 
-    merged = merge_classifications(per_run, verbose=verbose)
+    merged = merge_classifications(merge_inputs, verbose=verbose)
+    merged['aborted_index'] = merged.get('index', {}).get('aborted', {})
 
     save_dir = None
+    save_err: Exception | None = None
     if save:
         first_root = roots[0] if roots and roots[0] is not None else None
         session_meta = {
@@ -3836,27 +4069,36 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
             'subject_id': subject_id,
             'date': date_str,
             'runs': [
-                {'run_id': ridx+1, 'root': str(r) if r is not None else None, 'stage': stages[ridx] if ridx < len(stages) else None}
+                {
+                    'run_id': ridx + 1,
+                    'root': str(r) if r is not None else None,
+                    'stage': stages[ridx] if ridx < len(stages) else None
+                }
                 for ridx, r in enumerate(roots)
             ]
         }
-        if first_root is None:
-            print("[analyze_session_multi_run] Warning: first run root is None; skipping save.")
-        else:
-            save_dir = save_session_analysis_results(merged, first_root, session_metadata=session_meta, verbose=True)
+        try:
+            save_dir = save_session_analysis_results(merged, first_root, session_meta, verbose=verbose)
+        except Exception as e:
+            save_err = e
+            vprint(verbose, f"[save] WARNING: {e}")
 
     if print_summary:
-        try:
-            print_merged_session_summary(merged)
-        except Exception as e:
-            print(f"[analyze_session_multi_run] Failed to print merged summary: {e}")
+        print_merged_session_summary(merged)
+    
+    if save:
+        if save_dir:
+            print(f"[save] Success: results saved to: {save_dir}")
+        else:
+            msg = f"[save] FAILED {save_err}" if save_err else "[save] FAILED: no output directory returned"
+            print(msg)
+    else:
+        print(f"[save] Skipped: save=False")
 
     return {
-        'runs': [
-            {'classification': per_run[i], 'root': roots[i], 'stage': stages[i], 'index': i}
-            for i in range(len(per_run))
-        ],
         'merged_classification': merged,
+        'per_run_classifications': per_run,
+        'roots': roots,
+        'stages': stages,
         'save_dir': save_dir,
     }
-
