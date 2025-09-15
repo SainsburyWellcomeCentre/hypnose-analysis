@@ -926,12 +926,12 @@ def detect_trials(data, events, root, verbose=True):
     }
     
     # ALWAYS display summary
-    print("\n" + "="*50)
-    print("DETECTION SUMMARY:")
-    print(f"Trials: {len(results['trials'])}")
-    print(f"Initiated sequences: {len(results['initiated_sequences'])}")
-    print(f"Non-initiated sequences: {len(results['non_initiated_sequences'])}")
-    print("="*50)
+    vprint(verbose, "\n" + "="*50)
+    vprint(verbose, "DETECTION SUMMARY:")
+    vprint(verbose, f"Trials: {len(results['trials'])}")
+    vprint(verbose, f"Initiated sequences: {len(results['initiated_sequences'])}")
+    vprint(verbose, f"Non-initiated sequences: {len(results['non_initiated_sequences'])}")
+    vprint(verbose, "="*50)
     
     return results
 
@@ -3621,7 +3621,7 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
     return merged
 
 
-def print_merged_session_summary(merged_classification: dict) -> None:
+def print_merged_session_summary(merged_classification: dict, subjid=None, date=None) -> None:
     """
     Summary for merged multi-run results.
     Uses completed_sequences_with_response_times as the authoritative completed table,
@@ -3672,7 +3672,7 @@ def print_merged_session_summary(merged_classification: dict) -> None:
 
     print("=" * 80, "\n")
     print("=" * 80)
-    print("SUMMARY: TRIAL CLASSIFICATION AND POKE TIME ANALYSIS (MERGED SESSIONS)")
+    print(f"SUMMARY: TRIAL CLASSIFICATION AND POKE TIME ANALYSIS FOR SUBJECT [{subjid}] DATE [{date}]")
     print("=" * 80, "\n")
     print("=" * 80)
     if sample_offset_time_ms is not None:
@@ -4062,15 +4062,19 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
     le = globals().get("load_experiment")
     if callable(le):
         for i in range(max_runs):
-            root_i = _maybe_silent(le, subject_id, date_str, index=i)
-            if not root_i:
+            try:
+                root_i = _maybe_silent(le, subject_id, date_str, index=i)
+                if not root_i:
+                    break
+                p = Path(root_i).resolve()
+                if p in visited:
+                    vprint(verbose, f"[analyze_session_multi_run] Duplicate experiment root at index {i}: {p}. Stopping discovery.")
+                    break
+                visited.add(p)
+                session_roots.append(p)
+            except (IndexError, FileNotFoundError) as e:
+                vprint(verbose, f"[analyze_session_multi_run] Stopping at index {i}: {e}")
                 break
-            p = Path(root_i).resolve()
-            if p in visited:
-                vprint(verbose, f"[analyze_session_multi_run] Duplicate experiment root at index {i}: {p}. Stopping discovery.")
-                break
-            visited.add(p)
-            session_roots.append(p)
     if not session_roots:
         raise RuntimeError(f"No experiment runs found for subject={subject_id} date={date_str}")
 
@@ -4178,7 +4182,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
             vprint(verbose, f"[save] WARNING: {e}")
 
     if print_summary:
-        print_merged_session_summary(merged)
+        print_merged_session_summary(merged, subjid=subject_id, date=date_str)
     
     if save:
         if save_dir:
@@ -4319,6 +4323,66 @@ def build_position_pokes_table(classification: dict, *, threshold_ms: float | No
         out = out.sort_values(["run_id","trial_id","position","valve_open_ts"], kind="stable", na_position="last").reset_index(drop=True)
     return out
 
+
+def batch_analyze_sessions(
+    subjids=None,
+    dates=None,
+    *,
+    save=True,
+    verbose=False,
+    print_summary=True,
+    max_runs=32
+):
+    """
+    Analyze all sessions for given subject(s) and/or date(s).
+    - If subjids is None: analyze all subjects found in rawdata.
+    - If dates is None: analyze all dates found for each subject.
+    - If both are lists: analyze all combinations.
+    - Handles missing subjects/dates gracefully.
+    Returns a dict: {(subjid, date): result_dict}
+    """
+    base_path = Path('/Volumes/harris/hypnose/rawdata')
+    results = {}
+
+    # Discover subjects
+    if subjids is None:
+        subj_dirs = sorted(base_path.glob("sub-*_id-*"))
+        subjids = [int(str(d.name).split('_')[0].replace('sub-', '')) for d in subj_dirs]
+    else:
+        subjids = [int(s) for s in subjids]
+
+    for subjid in subjids:
+        subj_str = f"sub-{str(subjid).zfill(3)}"
+        subj_dirs = list(base_path.glob(f"{subj_str}_id-*"))
+        if not subj_dirs:
+            print(f"[batch_analyze_sessions] WARNING: Subject {subjid} not found.")
+            continue
+        subj_dir = subj_dirs[0]
+        # Discover dates
+        session_dirs = sorted(subj_dir.glob("ses-*_date-*"))
+        available_dates = [int(d.name.split('date-')[-1]) for d in session_dirs]
+        if dates is None:
+            dates_to_run = available_dates
+        else:
+            dates_to_run = [int(dt) for dt in dates if int(dt) in available_dates]
+            missing = [dt for dt in dates if int(dt) not in available_dates]
+            for dt in missing:
+                print(f"[batch_analyze_sessions] WARNING: Date {dt} not found for subject {subjid}.")
+        for date in dates_to_run:
+            try:
+                print(f"\n[batch_analyze_sessions] Analyzing subject {subjid}, date {date}...")
+                res = analyze_session_multi_run_by_id_date(
+                    subjid, date,
+                    save=save,
+                    verbose=verbose,
+                    print_summary=print_summary,
+                    max_runs=max_runs
+                )
+                results[(subjid, date)] = res
+            except Exception as e:
+                print(f"[batch_analyze_sessions] WARNING: Failed to analyze subject {subjid}, date {date}: {e}")
+                continue
+    return results
 
 # ========================= Further functions / miscillaneous =========================
 
