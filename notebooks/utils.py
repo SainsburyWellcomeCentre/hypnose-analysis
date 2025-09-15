@@ -26,6 +26,10 @@ from bisect import bisect_left, bisect_right
 from typing import Iterable, Optional
 import io
 import contextlib
+from collections.abc import Mapping
+from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
+import cv2 
+
 
 
 # ============== General Utility Functions and Class Definitions =======================================
@@ -1456,7 +1460,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         if pos1_poke:
             corrected_start = pos1_poke.get('poke_first_in') or pos1_poke.get('poke_odor_start')
 
-
+        
         trial_await_rewards = [t for t in await_reward_times if trial_start <= t <= trial_end]
 
         trial_dict = trial.to_dict()
@@ -2875,6 +2879,61 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
 
     return aborted_detailed
 
+def classify_noninitiated_FA(noninit_df, DIP0, DIP1, DIP2, response_time, hr_odors=None):
+    """
+    For each non-initiated sequence, check for FA events after poke-out until next cue port poke-in.
+    Returns a DataFrame with FA classification and HR status.
+    """
+    results = []
+    reward_rises = sorted(
+        list(DIP1[DIP1 & ~DIP1.shift(1, fill_value=False)].index) +
+        list(DIP2[DIP2 & ~DIP2.shift(1, fill_value=False)].index)
+    )
+    cue_rises = list(DIP0[DIP0 & ~DIP0.shift(1, fill_value=False)].index)
+    response_time_ms = float(response_time) * 1000.0
+
+    for _, row in noninit_df.iterrows():
+        attempt_end = row.get('attempt_end')
+        if pd.isna(attempt_end):
+            continue
+        # Find next cue port poke-in after attempt_end
+        next_cue_in = None
+        cue_after = [t for t in cue_rises if t > attempt_end]
+        if cue_after:
+            next_cue_in = cue_after[0]
+        else:
+            next_cue_in = max(DIP0.index) if not DIP0.empty else attempt_end
+
+        # Scan for first reward-port poke in (attempt_end, next_cue_in]
+        fa_label = 'nFA'
+        fa_time = pd.NaT
+        fa_latency_ms = np.nan
+        reward_after = [t for t in reward_rises if attempt_end < t <= next_cue_in]
+        if reward_after:
+            fa_time = reward_after[0]
+            fa_latency_ms = (fa_time - attempt_end).total_seconds() * 1000.0
+            if fa_latency_ms <= response_time_ms:
+                fa_label = 'FA_time_in'
+            elif fa_latency_ms <= 3.0 * response_time_ms:
+                fa_label = 'FA_time_out'
+            else:
+                fa_label = 'FA_late'
+
+        # HR status for position 1
+        is_hr = False
+        if hr_odors is not None:
+            odor_name = row.get('odor_name')
+            is_hr = odor_name in hr_odors
+
+        results.append({
+            **row,
+            'fa_label': fa_label,
+            'fa_time': fa_time,
+            'fa_latency_ms': fa_latency_ms,
+            'is_hr': is_hr
+        })
+    return pd.DataFrame(results)
+
 def build_classification_index(classification: dict) -> dict: # Classification function for easier dictionary access later on
     """
     Build convenient lookup indices over classification outputs.
@@ -3238,7 +3297,7 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         "completed_sequence_rewarded","completed_sequence_unrewarded","completed_sequence_reward_timeout",
         "completed_sequences_HR","completed_sequence_HR_rewarded","completed_sequence_HR_unrewarded","completed_sequence_HR_reward_timeout",
         "completed_sequences_HR_missed","completed_sequence_HR_missed_rewarded","completed_sequence_HR_missed_unrewarded","completed_sequence_HR_missed_reward_timeout",
-        "aborted_sequences","aborted_sequences_HR","aborted_sequences_detailed",
+        "aborted_sequences","aborted_sequences_HR","aborted_sequences_detailed", "non_initiated_FA",
     ]:
         df = classification.get(k) if isinstance(classification, dict) else None
         if _save_df(k, df):
@@ -3436,7 +3495,8 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
         'completed_sequence_HR_missed_reward_timeout',
         'aborted_sequences',
         'aborted_sequences_HR',
-        'aborted_sequences_detailed'
+        'aborted_sequences_detailed',
+        'non_initiated_FA',
     ]
 
     merged: dict = {}
@@ -3868,20 +3928,40 @@ def print_merged_session_summary(merged_classification: dict) -> None:
 
             def _print_fa_counts(df, indent="        "):
                 order = ['nFA', 'FA_time_in', 'FA_time_out', 'FA_late']
+                labels = [
+                    "Non-False Alarm",
+                    "FA Time In (Within Response Time)",
+                    "FA Time Out (Up to 3x Response Time)",
+                    "FA Late (> 3x Response Time)"
+                ]
                 if df is None or df.empty or 'fa_label' not in df.columns:
                     return
                 cnt = df['fa_label'].value_counts().reindex(order, fill_value=0)
                 total_n = int(len(df))
-                for lbl in order:
-                    v = int(cnt.get(lbl, 0))
+                for lbl, key in zip(labels, order):
+                    v = int(cnt.get(key, 0))
                     p = (v / total_n * 100.0) if total_n else 0.0
-                    print(f"{indent}{lbl}: {v} ({p:.1f}%)")
+                    print(f"{indent}- {lbl}: {v} ({p:.1f}%)")
 
             total_at_hr = int(len(abortions_at_hr_pos))
             print(f"\n  Abortions at Hidden Rule Position {hr_pos}: n={total_at_hr}")
             print(f"    Of which in Hidden Rule Trials: n={int(len(in_hr_trials))}")
+            _print_fa_counts(in_hr_trials)
             print(f"    Non-Hidden Rule Abortions at HR Location: n={int(len(non_hr_trials))}")
             _print_fa_counts(non_hr_trials)
+
+        # False Alarm classification for non-initiated trials (if present)
+        fa_noninit_df = merged_classification.get('non_initiated_FA', pd.DataFrame())
+        if isinstance(fa_noninit_df, pd.DataFrame) and not fa_noninit_df.empty: 
+            print("\nFalse Alarm Classification for Non-Initiated Trials:")
+            print(f"  Total Non-Initiated FA Trials: {int(len(fa_noninit_df))}")
+            counts = fa_noninit_df['fa_label'].value_counts().reindex(['nFA','FA_time_in','FA_time_out','FA_late'], fill_value=0)
+            total = int(len(fa_noninit_df))
+            print(f"   - Non-False Alarm: {counts['nFA']} ({(counts['nFA']/total*100.0):.1f}%)")
+            print(f"   - FA Time In (Within Response Time): {counts['FA_time_in']} ({(counts['FA_time_in']/total*100.0):.1f}%)")
+            print(f"   - FA Time Out (Up to 3x Response Time): {counts['FA_time_out']} ({(counts['FA_time_out']/total*100.0):.1f}%)")
+            print(f"   - FA Late (> 3x Response Time): {counts['FA_late']} ({(counts['FA_late']/total*100.0):.1f}%)")   
+
 
         # Helper for stats lines
         def _stats_line(series, label):
@@ -4032,6 +4112,19 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
                 data, events, trial_counts, odor_map, stage, root, verbose=verbose
             )
 
+            cls = out['classification'] if isinstance(out, dict) and 'classification' in out else out
+            DIP0 = data['digital_input_data'].get('DIPort0', pd.Series(dtype=bool))
+            DIP1 = data['digital_input_data'].get('DIPort1', pd.Series(dtype=bool))
+            DIP2 = data['digital_input_data'].get('DIPort2', pd.Series(dtype=bool))
+            hr_odors = cls.get('hidden_rule_odors', [])
+            non_init = cls.get('non_initiated_sequences', pd.DataFrame())
+            pos_1_attempt = cls.get('non_initiated_odor1_attempts', pd.DataFrame())
+            fa_input_data = pd.concat([non_init, pos_1_attempt], ignore_index=True)
+            response_time = cls.get('response_time_window_sec') 
+            fa_noninit_df = classify_noninitiated_FA(fa_input_data, DIP0, DIP1, DIP2, response_time, hr_odors=hr_odors)
+            cls['non_initiated_FA'] = fa_noninit_df
+            out['classification'] = cls
+
             # Normalize outputs for merging
             if isinstance(out, dict) and 'classification' in out:
                 cls = out['classification'] or {}
@@ -4059,6 +4152,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
 
     merged = merge_classifications(merge_inputs, verbose=verbose)
     merged['aborted_index'] = merged.get('index', {}).get('aborted', {})
+    merged['non_initiated_FA'] = merged.get('non_initiated_FA', pd.DataFrame())
 
     save_dir = None
     save_err: Exception | None = None
@@ -4095,10 +4189,213 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
     else:
         print(f"[save] Skipped: save=False")
 
+    cls = merged
     return {
-        'merged_classification': merged,
-        'per_run_classifications': per_run,
-        'roots': roots,
-        'stages': stages,
-        'save_dir': save_dir,
+        "classification": cls,                      
+        "merged_classification": cls,              
+        "per_run_classifications": per_run,
+        "roots": roots,
+        "stages": stages,
+        "save_dir": save_dir,
+
+        # convenience shortcuts to common tables
+        "completed_sequences_with_response_times": cls.get("completed_sequences_with_response_times", pd.DataFrame()),
+        "completed_sequences": cls.get("completed_sequences", pd.DataFrame()),
+        "completed_sequence_rewarded": cls.get("completed_sequence_rewarded", pd.DataFrame()),
+        "completed_sequence_unrewarded": cls.get("completed_sequence_unrewarded", pd.DataFrame()),
+        "completed_sequence_reward_timeout": cls.get("completed_sequence_reward_timeout", pd.DataFrame()),
+        "aborted_sequences": cls.get("aborted_sequences", pd.DataFrame()),
     }
+
+
+def build_position_pokes_table(classification: dict, *, threshold_ms: float | None = None) -> pd.DataFrame:
+    """
+    Flatten per-position poke info from completed_sequences into a tidy DataFrame.
+    Columns: run_id, trial_id, position, odor, poke_time_ms, poke_first_in, valve_open_ts, valve_close_ts.
+    If threshold_ms is provided, rows with poke_time_ms >= threshold_ms are dropped.
+    """
+
+    comp = classification.get("completed_sequences", pd.DataFrame())
+    if not isinstance(comp, pd.DataFrame) or comp.empty:
+        return pd.DataFrame(columns=[
+            "run_id","trial_id","position","odor","poke_time_ms","poke_first_in","valve_open_ts","valve_close_ts"
+        ])
+
+    def _iter_items(ppt):
+        if isinstance(ppt, Mapping):
+            for k, v in ppt.items():
+                if not isinstance(v, Mapping):
+                    try:
+                        v = dict(v)
+                    except Exception:
+                        continue
+                pos = v.get("position")
+                if pos is None:
+                    try:
+                        pos = int(k)
+                    except Exception:
+                        pos = k
+                yield pos, v
+        elif isinstance(ppt, (list, tuple)):
+            for v in ppt:
+                if isinstance(v, Mapping):
+                    yield v.get("position"), v
+
+    def _norm_valves(pvt):
+        out = {}
+        if isinstance(pvt, Mapping):
+            items = list(pvt.items())
+        elif isinstance(pvt, (list, tuple)):
+            items = [(v.get("position"), v) for v in pvt if isinstance(v, Mapping)]
+        else:
+            items = []
+        for k, v in items:
+            if not isinstance(v, Mapping):
+                try:
+                    v = dict(v)
+                except Exception:
+                    v = {}
+            pos = v.get("position")
+            if pos is None:
+                try:
+                    pos = int(k)
+                except Exception:
+                    pos = k
+            out[pos] = v
+        return out
+
+    rows = []
+    for _, row in comp.iterrows():
+        ppt = row.get("position_poke_times")
+        if not isinstance(ppt, (dict, list, tuple)):
+            continue
+        pvt = row.get("position_valve_times") or {}
+        valve_map = _norm_valves(pvt)
+
+        run_id = row.get("run_id")
+        trial_id = row.get("trial_id")
+        try:
+            run_id = int(run_id) if pd.notna(run_id) else None
+        except Exception:
+            pass
+        try:
+            trial_id = int(trial_id) if pd.notna(trial_id) else trial_id
+        except Exception:
+            pass
+
+        for pos, info in _iter_items(ppt):
+            if not isinstance(info, Mapping):
+                try:
+                    info = dict(info)
+                except Exception:
+                    continue
+            poke_ms = pd.to_numeric(info.get("poke_time_ms"), errors="coerce")
+            if pd.isna(poke_ms) or poke_ms <= 0:
+                continue
+            if threshold_ms is not None and float(poke_ms) >= float(threshold_ms):
+                continue
+            try:
+                pos_norm = int(pos) if pos is not None else None
+            except Exception:
+                pos_norm = pos
+            vt = valve_map.get(pos_norm, {})
+            rows.append({
+                "run_id": run_id,
+                "trial_id": trial_id,
+                "position": pos_norm,
+                "odor": info.get("odor_name") or (vt or {}).get("odor_name"),
+                "poke_time_ms": float(poke_ms),
+                "poke_first_in": info.get("poke_first_in"),
+                "valve_open_ts": (vt or {}).get("valve_open_ts"),
+                "valve_close_ts": (vt or {}).get("valve_close_ts"),
+            })
+
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        if "valve_open_ts" in out.columns:
+            out["valve_open_ts"] = pd.to_datetime(out["valve_open_ts"], errors="coerce")
+        if "poke_first_in" in out.columns:
+            out["poke_first_in"] = pd.to_datetime(out["poke_first_in"], errors="coerce")
+        out = out.sort_values(["run_id","trial_id","position","valve_open_ts"], kind="stable", na_position="last").reset_index(drop=True)
+    return out
+
+
+# ========================= Further functions / miscillaneous =========================
+
+
+def cut_video(subjid, date, start_time, end_time, index=None, base_dir="/Volumes/harris/hypnose"):
+    """
+    Cut a video snippet for a subject and date, given start and end time (HH:MM:SS.s).
+    Automatically finds the correct rawdata and derivatives folders, loads metadata, and saves the cut video.
+    """
+    # Use load_experiment logic to find experiment root
+    base_path = Path(base_dir) / "rawdata"
+    subjid_str = f"sub-{str(subjid).zfill(3)}"
+    date_str = str(date)
+    subject_dirs = list(base_path.glob(f"{subjid_str}_id-*"))
+    if not subject_dirs:
+        raise FileNotFoundError(f"No subject directory found for {subjid_str}")
+    subject_dir = subject_dirs[0]
+    session_dirs = list(subject_dir.glob(f"ses-*_date-{date_str}"))
+    if not session_dirs:
+        all_sessions = list(subject_dir.glob("ses-*"))
+        session_names = [d.name for d in all_sessions]
+        raise FileNotFoundError(f"No session found for date {date_str} in {subject_dir}.\nAvailable sessions: {session_names}")
+    session_dir = session_dirs[0]
+    behav_dir = session_dir / "behav"
+    if not behav_dir.exists():
+        raise FileNotFoundError(f"No behav directory found in {session_dir}")
+    experiment_dirs = [d for d in behav_dir.iterdir() if d.is_dir() and re.match(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', d.name)]
+    if not experiment_dirs:
+        all_dirs = [d.name for d in behav_dir.iterdir() if d.is_dir()]
+        raise FileNotFoundError(f"No experiment directories found in {behav_dir}.\nAvailable directories: {all_dirs}")
+    experiment_dirs.sort(key=lambda x: x.name)
+    # Use index if multiple experiments
+    if index is not None:
+        if index >= len(experiment_dirs) or index < 0:
+            raise IndexError(f"Index {index} out of range. Available indices: 0-{len(experiment_dirs)-1}")
+        root = experiment_dirs[index]
+    else:
+        root = experiment_dirs[0]
+    video_dir = root / "VideoData"
+    # Load video metadata
+    from utils import load_all_streams
+    streams = load_all_streams(root, verbose=False)
+    video_meta = streams['video_data']
+    # Parse times
+    start_dt = pd.to_datetime(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]} {start_time}")
+    end_dt = pd.to_datetime(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]} {end_time}")
+    frames_in_window = video_meta[(video_meta.index >= start_dt) & (video_meta.index <= end_dt)]
+    if frames_in_window.empty:
+        print("No frames found in the requested time window.")
+        return None
+    # Detect frame column
+    frame_col = [c for c in frames_in_window.columns if 'frame' in c.lower()][0]
+    frame_indices = frames_in_window[frame_col].tolist()
+    # Try each video file until frames can be read
+    avi_files = sorted(video_dir.glob("*.avi"))
+    images = []
+    for video_file in avi_files:
+        cap = cv2.VideoCapture(str(video_file))
+        images = []
+        for idx in frame_indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if ret:
+                images.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        cap.release()
+        if images:
+            print(f"Successfully read {len(images)} frames from {video_file}")
+            break
+    if not images:
+        print("No frames extracted from any video file.")
+        return None
+    # Output folder (derivatives/video_analysis)
+    derivatives_dir = Path(base_dir) / "derivatives" / subject_dir.name / session_dir.name / "video_analysis"
+    derivatives_dir.mkdir(parents=True, exist_ok=True)
+    out_mp4 = derivatives_dir / f"video_cut_{start_dt.strftime('%H-%M-%S-%f')}_{end_dt.strftime('%H-%M-%S-%f')}.mp4"
+    clip = ImageSequenceClip(images, fps=30)
+    clip.write_videofile(str(out_mp4), codec="libx264", audio=False)
+    print(f"Saved cut video to: {out_mp4}")
+    return out_mp4
+
