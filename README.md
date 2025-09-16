@@ -1,6 +1,6 @@
-# Hypnose Processing
+# Hypnose Analysis
 
-This repository is utilised for processing and visualising data acquired from Hypnose Harris lab  project.
+This repository is utilised for processing, analysing and visualising data acquired from Hypnose Harris lab  project.
 
 ## Features
 
