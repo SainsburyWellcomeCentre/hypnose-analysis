@@ -1097,6 +1097,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     completed_hr_missed_unrewarded = []
     completed_hr_missed_timeout = []
     non_initiated_odor1_attempts = []
+    initiated_trials = trial_counts['initiated_sequences'].copy()
+    initiated_trials_list = []
 
     # Aggregators for summary prints (completed trials only)
     agg_position_poke_times = {pos: [] for pos in range(1, 6)}
@@ -1480,6 +1482,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_dict['enough_odors_for_hr'] = enough_odors
         trial_dict['hit_hidden_rule'] = hit_hidden_rule
 
+        initiated_trials_list.append(trial_dict)
         if trial_await_rewards:
             # Aggregate ranges for completed trials
             # Valve times
@@ -1583,6 +1586,47 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             if hit_hidden_rule:
                 aborted_sequences_hr.append(trial_dict.copy())
 
+
+    if isinstance(non_initiated_trials, pd.DataFrame) and not non_initiated_trials.empty:
+        odor_names = []
+        for _, row in non_initiated_trials.iterrows():
+            min_time_diff = float('inf')
+            closest_odor = None
+            attempt_start = row.get('attempt_start') or row.get('sequence_start')
+            attempt_end = row.get('attempt_end') or row.get('sequence_end')
+            found_odor = None
+            for olf_id, valve_data in odor_map['olfactometer_valves'].items():
+                if valve_data.empty:
+                    continue
+                for i, valve_col in enumerate(valve_data.columns):
+                    valve_key = f"{olf_id}{i}"
+                    odor_name = odor_map['valve_to_odor'].get(valve_key)
+                    if not odor_name or odor_name.lower() == 'purge':
+                        continue
+                    s = valve_data[valve_col]
+                    rises = s & ~s.shift(1, fill_value=False)
+                    starts = list(s.index[rises])
+                    falls = ~s & s.shift(1, fill_value=False)
+                    ends = list(s.index[falls])
+                    for st, en in zip(starts, ends):
+                        if st <= attempt_end and en >= attempt_start:
+                            found_odor = odor_name
+                            break
+                        time_diff = min(abs((st - attempt_start).total_seconds()),
+                                        abs((en - attempt_end).total_seconds()))
+                        if time_diff < min_time_diff:
+                            min_time_diff = time_diff
+                            closest_odor = odor_name
+                    if found_odor:
+                        break
+                if found_odor:
+                    break
+            if found_odor is None:
+                found_odor = closest_odor  # fallback to closest
+            odor_names.append(found_odor)
+        non_initiated_trials = non_initiated_trials.copy()
+        non_initiated_trials['odor_name'] = odor_names
+    initiated_trials = pd.DataFrame(initiated_trials_list)
     # Build result with both singular and plural aliases for HR categories
     result = {
         'non_initiated_sequences': non_initiated_trials,
