@@ -13,6 +13,8 @@ from pathlib import Path
 from glob import glob
 import ast
 from IPython.display import display
+import io
+import contextlib
 
 
 
@@ -87,6 +89,219 @@ def parse_json_column(val):
         except Exception:
             return {} if val.strip().startswith("{") else []
     return val
+
+def run_all_metrics(results, save_txt=True, save_json=True):
+    """
+    Run all metrics, print results, and save to txt and json in the session's results directory.
+    Returns a dict of all metric values.
+    """
+    # --- Derive subjid, date, and output_dir from results ---
+    manifest = results.get("manifest", {})
+    summary = results.get("summary", {})
+    # Try to get subjid and date from manifest or summary
+    subjid = (
+        manifest.get("session", {}).get("subject_id")
+        or summary.get("session", {}).get("subject_id")
+        or manifest.get("session", {}).get("subjid")
+        or summary.get("session", {}).get("subjid")
+        or None
+    )
+    date = (
+        manifest.get("session", {}).get("date")
+        or summary.get("session", {}).get("date")
+        or manifest.get("session", {}).get("session_date")
+        or summary.get("session", {}).get("session_date")
+        or None
+    )
+    # Try to get output_dir from manifest paths
+    paths = manifest.get("paths", {})
+    out_dir = None
+    if "rawdata_dir" in paths:
+        out_dir = Path(paths["rawdata_dir"]).parent / "derivatives" / paths.get("sub_folder", "") / paths.get("ses_folder", "") / "saved_analysis_results"
+    elif "results_dir" in manifest:
+        out_dir = Path(manifest["results_dir"])
+    else:
+        # fallback: use current working directory
+        out_dir = Path.cwd()
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # --- Run metrics and capture output ---
+    metrics = {}
+    buffer = io.StringIO()
+    with contextlib.redirect_stdout(buffer):
+        print("\n--- Decision Accuracy ---")
+        metrics['decision_accuracy'] = decision_accuracy(results)
+        print("\n--- Premature Response Rate ---")
+        metrics['premature_response_rate'] = premature_response_rate(results)
+        print("\n--- Response-Contingent False Alarm Rate ---")
+        metrics['response_contingent_FA_rate'] = response_contingent_FA_rate(results)
+        print("\n--- Global False Alarm Rate ---")
+        metrics['global_FA_rate'] = global_FA_rate(results)
+        print("\n--- FA Odor Bias ---")
+        fa_odor = FA_odor_bias(results)
+        metrics['FA_odor_bias'] = fa_odor.to_dict() if hasattr(fa_odor, 'to_dict') else fa_odor
+        print("\n--- FA Position Bias ---")
+        fa_pos = FA_position_bias(results)
+        metrics['FA_position_bias'] = fa_pos.to_dict() if hasattr(fa_pos, 'to_dict') else fa_pos
+        print("\n--- Sequence Completion Rate ---")
+        metrics['sequence_completion_rate'] = sequence_completion_rate(results)
+        print("\n--- Odor Abortion Rate ---")
+        odor_ab = odorx_abortion_rate(results)
+        metrics['odorx_abortion_rate'] = odor_ab.to_dict() if hasattr(odor_ab, 'to_dict') else odor_ab
+        print("\n--- Hidden Rule Performance ---")
+        metrics['hidden_rule_performance'] = hidden_rule_performance(results)
+        print("\n--- Hidden Rule Detection Rate ---")
+        metrics['hidden_rule_detection_rate'] = hidden_rule_detection_rate(results)
+        print("\n--- Choice Timeout Rate ---")
+        metrics['choice_timeout_rate'] = choice_timeout_rate(results)
+        print("\n--- Average Sampling Time per Odor (Completed) ---")
+        avg_samp_odor = avg_sampling_time_odor_x(results)
+        metrics['avg_sampling_time_odor_x'] = avg_samp_odor.to_dict() if hasattr(avg_samp_odor, 'to_dict') else avg_samp_odor
+        print("\n--- Average Sampling Time (Completed Sequences) ---")
+        metrics['avg_sampling_time_completed_sequence'] = avg_sampling_time_completed_sequence(results)
+        print("\n--- Average Sampling Time (Aborted Sequences) ---")
+        metrics['avg_sampling_time_aborted_sequence'] = avg_sampling_time_aborted_sequence(results)
+        print("\n--- Average Sampling Time (Initiation Abortions) ---")
+        metrics['avg_sampling_time_initiation_abortion'] = avg_sampling_time_initiation_abortion(results)
+        print("\n--- Abortion Rate by Position ---")
+        abrt_pos = abortion_rate_positionX(results)
+        metrics['abortion_rate_positionX'] = abrt_pos.to_dict() if hasattr(abrt_pos, 'to_dict') else abrt_pos
+        print("\n--- Average Response Time ---")
+        metrics['avg_response_time'] = avg_response_time(results)
+        print("\n--- FA Average Response Times ---")
+        metrics['FA_avg_response_times'] = FA_avg_response_times(results)
+        print("\n--- Response Rate ---")
+        metrics['response_rate'] = response_rate(results)
+        print("\n--- Manual vs Auto Stop Preference ---")
+        metrics['manual_vs_auto_stop_preference'] = manual_vs_auto_stop_preference(results)
+        print("\n--- Non-Initiated FA Rate ---")
+        metrics['non_initiated_FA_rate'] = non_initiated_FA_rate(results)
+        print("\n--- Non-Initiation Odor Bias ---")
+        noninit_odor = non_initiation_odor_bias(results)
+        metrics['non_initiation_odor_bias'] = noninit_odor.to_dict() if hasattr(noninit_odor, 'to_dict') else noninit_odor
+        print("\n--- Odor Initiation Bias ---")
+        odor_init = odor_initiation_bias(results)
+        metrics['odor_initiation_bias'] = odor_init.to_dict() if hasattr(odor_init, 'to_dict') else odor_init
+        print("\n--- FA Abortion Stats ---")
+        fa_ab_stats = fa_abortion_stats(results, return_df=True)
+        if fa_ab_stats is not None:
+            metrics['fa_abortion_stats'] = {
+                'by_odor': fa_ab_stats[0].to_dict(orient='records') if hasattr(fa_ab_stats[0], 'to_dict') else None,
+                'by_position': fa_ab_stats[1].to_dict(orient='records') if hasattr(fa_ab_stats[1], 'to_dict') else None,
+                'by_odor_position': fa_ab_stats[2].to_dict(orient='records') if hasattr(fa_ab_stats[2], 'to_dict') else None,
+            }
+            print("\nFA Abortion Stats by Odor:")
+            print(fa_ab_stats[0].to_string(index=False) if hasattr(fa_ab_stats[0], 'to_string') else fa_ab_stats[0])
+            print("\nFA Abortion Stats by Position:")
+            print(fa_ab_stats[1].to_string(index=False) if hasattr(fa_ab_stats[1], 'to_string') else fa_ab_stats[1])
+            print("\nFA Abortion Stats by Odor and Position:")
+            print(fa_ab_stats[2].to_string(index=False) if hasattr(fa_ab_stats[2], 'to_string') else fa_ab_stats[2])
+        else:
+            metrics['fa_abortion_stats'] = None
+
+    # Print to screen
+    print(buffer.getvalue())
+
+    # --- Save TXT and JSON ---
+    if save_txt:
+        txt_path = out_dir / f"metrics_{subjid}_{date}.txt"
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(buffer.getvalue())
+        print(f"Saved metrics summary to {txt_path}")
+    if save_json:
+        json_path = out_dir / f"metrics_{subjid}_{date}.json"
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(metrics, f, indent=2, default=str)
+        print(f"Saved metrics values to {json_path}")
+
+    return metrics
+
+def batch_run_all_metrics(
+    subjids=None,
+    dates=None,
+    protocol=None,
+    save_txt=True,
+    save_json=True,
+    verbose=True
+):
+    """
+    Batch run metrics for combinations of subjids and dates, with optional protocol filter.
+    """
+    derivatives_dir = Path("/Volumes/harris/hypnose/derivatives")
+    results = []
+
+    # Find all subject directories
+    subj_dirs = list(derivatives_dir.glob("sub-*_id-*")) if subjids is None else [
+        d for subjid in subjids
+        for d in derivatives_dir.glob(f"sub-{str(subjid).zfill(3)}_id-*")
+    ]
+    if verbose:
+        print(f"Found {len(subj_dirs)} subject directories.")
+
+    for subj_dir in subj_dirs:
+        # Find all session directories for this subject
+        ses_dirs = list(subj_dir.glob("ses-*_date-*")) if dates is None else [
+            d for date in dates for d in subj_dir.glob(f"ses-*_date-{date}")
+        ]
+        if not ses_dirs:
+            continue
+        for ses_dir in ses_dirs:
+            results_dir = ses_dir / "saved_analysis_results"
+            summary_path = results_dir / "summary.json"
+            if not summary_path.exists():
+                continue
+            # Protocol filter
+            if protocol is not None:
+                try:
+                    with open(summary_path, "r") as f:
+                        summary = json.load(f)
+                    runs = summary.get("session", {}).get("runs", [])
+                    if not runs or "stage" not in runs[0]:
+                        continue
+                    stage_name = runs[0]["stage"].get("stage_name", "")
+                    if protocol not in stage_name:
+                        continue
+                except Exception as e:
+                    if verbose:
+                        print(f"Skipping {summary_path}: {e}")
+                    continue
+            # Extract subjid and date from path or summary
+            subjid = summary.get("session", {}).get("subject_id") if 'summary' in locals() else subj_dir.name.split("_")[0].replace("sub-", "")
+            date = summary.get("session", {}).get("date") if 'summary' in locals() else ses_dir.name.split("_date-")[-1]
+            # Run metrics
+            try:
+                session_results = load_session_results(subjid, date)
+                metrics = run_all_metrics(
+                    session_results,
+                    save_txt=save_txt,
+                    save_json=save_json
+                )
+                results.append({
+                    "subjid": subjid,
+                    "date": date,
+                    "metrics": metrics
+                })
+                if verbose:
+                    print(f"Processed subjid={subjid}, date={date}")
+            except Exception as e:
+                if verbose:
+                    print(f"Failed for subjid={subjid}, date={date}: {e}")
+    subj_dates = {}
+    if results is not None:
+        print("========== Processed Sessions Summary ==========")
+    for entry in results:
+        subj = entry["subjid"]
+        date = entry["date"]
+        subj_dates.setdefault(subj, set()).add(date)
+    for subj, dates_set in subj_dates.items():
+        dates_list = sorted(dates_set)
+        if protocol:
+            print(f'Subject {subj}, Protocol "{protocol}", processed dates: {", ".join(dates_list)}')
+        else:
+            print(f'Subject {subj}, processed dates: {", ".join(dates_list)}')
+    return results
+
 # ================== Behavioral Metrics Functions =================
 
 def decision_accuracy(results):
