@@ -15,6 +15,8 @@ import ast
 from IPython.display import display
 import io
 import contextlib
+from collections import defaultdict
+
 
 
 
@@ -217,7 +219,132 @@ def run_all_metrics(results, save_txt=True, save_json=True):
 
     return metrics
 
-def batch_run_all_metrics(
+def pool_results_dicts(results_dicts):
+    """
+    Given a list of results dicts (from load_session_results), pool all DataFrames by key.
+    Returns a single results dict with concatenated DataFrames and merged manifest/summary.
+    """
+    pooled = {}
+    # Pool DataFrames
+    all_keys = set()
+    for r in results_dicts:
+        all_keys.update(r.keys())
+    for key in all_keys:
+        dfs = [r[key] for r in results_dicts if key in r and isinstance(r[key], pd.DataFrame)]
+        if dfs:
+            pooled[key] = pd.concat(dfs, ignore_index=True)
+        else:
+            pooled[key] = results_dicts[0].get(key, None)
+    # Merge manifest/summary for merged info
+
+    def get_subjid(r):
+        sess = r.get("manifest", {}).get("session", {})
+        return str(sess.get("subject_id") or sess.get("subjid") or "")
+
+    def get_date(r):
+        sess = r.get("manifest", {}).get("session", {})
+        return str(sess.get("date") or sess.get("session_date") or "")
+
+    subjids = sorted({get_subjid(r) for r in results_dicts if get_subjid(r)})
+    dates = sorted({get_date(r) for r in results_dicts if get_date(r)})
+
+    protocol = None
+    for r in results_dicts:
+        runs = r.get("summary", {}).get("session", {}).get("runs", [])
+        if runs and "stage" in runs[0]:
+            protocol = runs[0]["stage"].get("stage_name", None)
+            if protocol:
+                break
+    pooled["manifest"] = {
+        "merged_subjects": subjids,
+        "merged_dates": dates,
+        "protocol": protocol
+    }
+    pooled["summary"] = {
+        "merged_subjects": subjids,
+        "merged_dates": dates,
+        "protocol": protocol
+    }
+    return pooled
+
+def save_merged_metrics_txt(metrics, header, txt_path, pretty_print_str=None):
+    """
+    Save merged metrics to a txt file with a header and formatted output.
+    """
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(header + "\n\n")
+        if pretty_print_str is not None:
+            f.write(pretty_print_str)
+        else: 
+            for k, v in metrics.items():
+                if isinstance(v, (tuple, list)) and len(v) == 3 and isinstance(v[0], (int, float)):
+                    # Standard metric: numerator, denominator, value
+                    num, denom, val = v
+                    f.write(f"{k.replace('_',' ').title()}: {num}/{denom} = {val:.3f}\n")
+                elif isinstance(v, dict) and "bias" in v and "n_fa" in v and "n_ab" in v:
+                    # FA Odor Bias
+                    f.write(f"{k.replace('_',' ').title()}:\n")
+                    for od in v["bias"]:
+                        bias = v["bias"][od]
+                        n_fa = v["n_fa"].get(od, 0)
+                        n_ab = v["n_ab"].get(od, 0)
+                        f.write(f"  {od}: {n_fa}/{n_ab} FA, Bias: {bias:.3f}\n")
+                elif isinstance(v, dict):
+                    f.write(f"{k.replace('_',' ').title()}:\n")
+                    for subk, subv in v.items():
+                        if isinstance(subv, float):
+                            f.write(f"  {subk}: {subv:.3f}\n")
+                        else:
+                            f.write(f"  {subk}: {subv}\n")
+                elif isinstance(v, pd.Series):
+                    f.write(f"{k.replace('_',' ').title()}:\n")
+                    for idx, val in v.items():
+                        f.write(f"  {idx}: {val:.3f}\n")
+                elif isinstance(v, float):
+                    f.write(f"{k.replace('_',' ').title()}: {v:.3f}\n")
+                else:
+                    f.write(f"{k.replace('_',' ').title()}: {v}\n")
+
+def merged_results_output_dir(subjids, dates, protocol, derivatives_dir=Path("/Volumes/harris/hypnose/derivatives")):
+    """
+    Determine the output directory for merged results based on subjids, dates, and protocol.
+    """
+    subjids = sorted(set(str(s) for s in subjids))
+    dates = sorted(set(str(d) for d in dates))
+    if len(subjids) == 1:
+        # Single subject: save in that subject's folder under merged_results
+        sub_str = f"sub-{str(subjids[0]).zfill(3)}"
+        subj_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
+        if not subj_dirs:
+            raise FileNotFoundError(f"No subject directory found for {sub_str}")
+        subj_dir = subj_dirs[0]
+        merged_dir = subj_dir / "merged_results"
+    else:
+        # Multiple subjects: save in derivatives/merged/(protocol_merged|merged)
+        merged_dir = derivatives_dir / "merged"
+        if protocol:
+            merged_dir = merged_dir / "protocol_merged"
+        else:
+            merged_dir = merged_dir / "merged"
+    merged_dir.mkdir(parents=True, exist_ok=True)
+    return merged_dir
+
+def merged_metrics_filename(subjids, dates, protocol):
+    """
+    Construct merged metrics filename based on subjids, dates, and protocol.
+    """
+    subjids = sorted(set(str(s) for s in subjids))
+    dates = sorted(set(str(d) for d in dates))
+    n_dates = len(dates)
+    if len(subjids) == 1:
+        proto = protocol if protocol else "all"
+        fname = f"merged_{proto}_{n_dates}_dates"
+    else:
+        subj_str = "_".join(subjids)
+        fname = f"merged_subjids_{subj_str}_{n_dates}_dates"
+    return fname
+
+def batch_run_all_metrics_with_merge(
     subjids=None,
     dates=None,
     protocol=None,
@@ -227,9 +354,12 @@ def batch_run_all_metrics(
 ):
     """
     Batch run metrics for combinations of subjids and dates, with optional protocol filter.
+    Also computes and saves merged metrics across all sessions.
     """
     derivatives_dir = Path("/Volumes/harris/hypnose/derivatives")
     results = []
+    results_dicts = []
+    subj_dates = {}
 
     # Find all subject directories
     subj_dirs = list(derivatives_dir.glob("sub-*_id-*")) if subjids is None else [
@@ -282,13 +412,16 @@ def batch_run_all_metrics(
                     "date": date,
                     "metrics": metrics
                 })
+                results_dicts.append(session_results)
+                subj_dates.setdefault(subjid, set()).add(date)
                 if verbose:
                     print(f"Processed subjid={subjid}, date={date}")
             except Exception as e:
                 if verbose:
                     print(f"Failed for subjid={subjid}, date={date}: {e}")
-    subj_dates = {}
-    if results is not None:
+
+    # Print summary
+    if results:
         print("========== Processed Sessions Summary ==========")
     for entry in results:
         subj = entry["subjid"]
@@ -300,6 +433,41 @@ def batch_run_all_metrics(
             print(f'Subject {subj}, Protocol "{protocol}", processed dates: {", ".join(dates_list)}')
         else:
             print(f'Subject {subj}, processed dates: {", ".join(dates_list)}')
+
+    # --- Merged metrics ---
+    if results_dicts:
+        pooled_results = pool_results_dicts(results_dicts)
+        # --- Capture pretty print output ---
+        buffer = io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            merged_metrics = run_all_metrics(pooled_results, save_txt=False, save_json=False)
+        pretty_print_str = buffer.getvalue()
+        print(pretty_print_str)
+        # Prepare header
+        subjids_merged = pooled_results["manifest"]["merged_subjects"]
+        dates_merged = pooled_results["manifest"]["merged_dates"]
+        protocol_merged = pooled_results["manifest"]["protocol"]
+        header = (
+            "Merged Results for:\n"
+            f"Subjid(s): {', '.join(subjids_merged)}\n"
+            f"Date(s): {', '.join(dates_merged)}\n"
+            f"Protocol: {protocol_merged if protocol_merged else 'all'}"
+        )
+        # Output directory and filenames
+        merged_dir = merged_results_output_dir(subjids_merged, dates_merged, protocol_merged)
+        fname = merged_metrics_filename(subjids_merged, dates_merged, protocol_merged)
+        txt_path = merged_dir / f"{fname}.txt"
+        json_path = merged_dir / f"{fname}.json"
+        # Save txt using the pretty print string
+        save_merged_metrics_txt(merged_metrics, header, txt_path, pretty_print_str=pretty_print_str)
+        if verbose:
+            print(f"Saved merged metrics summary to {txt_path}")
+        # Save json
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(merged_metrics, f, indent=2, default=str)
+        if verbose:
+            print(f"Saved merged metrics values to {json_path}")
+
     return results
 
 # ================== Behavioral Metrics Functions =================
@@ -311,14 +479,14 @@ def decision_accuracy(results):
     n_unr = len(comp_unr)
     denom = n_rew + n_unr
     print(f"Decision Accuracy: {n_rew}/{denom} = {n_rew/denom if denom>0 else np.nan:.3f}")
-    return n_rew / denom if denom > 0 else np.nan
+    return n_rew, denom, n_rew / denom if denom > 0 else np.nan
 
 def premature_response_rate(results):
     ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
     n_fa = (ab_det["fa_label"] != "nFA").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
     n_total = len(ab_det)
     print(f"Premature Response Rate: {n_fa}/{n_total} = {n_fa/n_total if n_total>0 else np.nan:.3f}")
-    return n_fa / n_total if n_total > 0 else np.nan
+    return n_fa, n_total, n_fa / n_total if n_total > 0 else np.nan
 
 def response_contingent_FA_rate(results):
     ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
@@ -327,7 +495,7 @@ def response_contingent_FA_rate(results):
     n_fa = (ab_det["fa_label"] != "nFA").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
     denom = n_fa + len(comp_rew) + len(comp_unr)
     print(f"Response-Contingent False Alarm Rate: {n_fa}/{denom} = {n_fa/denom if denom>0 else np.nan:.3f}")
-    return n_fa / denom if denom > 0 else np.nan
+    return n_fa, denom, n_fa / denom if denom > 0 else np.nan
 
 def global_FA_rate(results):
     ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
@@ -335,25 +503,29 @@ def global_FA_rate(results):
     n_fa = (ab_det["fa_label"] != "nFA").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
     n_ini = len(ini)
     print(f"Global False Alarm Rate: {n_fa}/{n_ini} = {n_fa/n_ini if n_ini>0 else np.nan:.3f}")
-    return n_fa / n_ini if n_ini > 0 else np.nan
+    return n_fa, n_ini, n_fa / n_ini if n_ini > 0 else np.nan
 
 def FA_odor_bias(results):
     print("FA Odor Bias for FA Time In:")
     ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
     if ab_det.empty or "fa_label" not in ab_det.columns or "last_odor_name" not in ab_det.columns:
-        return pd.Series(dtype=float)
-    fa_mask = ab_det["fa_label"] == "FA_time_in" # use != "nFA" for all FA types
+        return {'bias': {}, 'n_fa': {}, 'n_ab': {}, 'total_fa': 0, 'total_ab': 0}
+    fa_mask = ab_det["fa_label"] == "FA_time_in"
     odors = sorted(ab_det["last_odor_name"].dropna().unique())
     bias = {}
+    n_fa = {}
+    n_ab = {}
     total_fa = fa_mask.sum()
     total_ab = len(ab_det)
     for od in odors:
         fa_at_od = fa_mask & (ab_det["last_odor_name"] == od)
         n_fa_od = fa_at_od.sum()
         n_ab_od = (ab_det["last_odor_name"] == od).sum()
+        n_fa[od] = n_fa_od
+        n_ab[od] = n_ab_od
         bias[od] = (n_fa_od / n_ab_od) / (total_fa / total_ab) if n_ab_od > 0 and total_ab > 0 and total_fa > 0 else np.nan
         print(f"{od}: {n_fa_od}/{n_ab_od} FA, Bias: {bias[od]:.3f}")
-    return pd.Series(bias).sort_index()
+    return {'bias': bias, 'n_fa': n_fa, 'n_ab': n_ab, 'total_fa': total_fa, 'total_ab': total_ab}
 
 def FA_position_bias(results):
     print("FA Position Bias for FA Time In:")
@@ -377,7 +549,7 @@ def sequence_completion_rate(results):
     comp = results.get("completed_sequences", pd.DataFrame())
     ini = results.get("initiated_sequences", pd.DataFrame())
     print(f"Sequence Completion Rate: {len(comp)}/{len(ini)} = {len(comp)/len(ini) if len(ini)>0 else np.nan:.3f}")
-    return len(comp) / len(ini) if len(ini) > 0 else np.nan
+    return len(comp), len(ini), len(comp) / len(ini) if len(ini) > 0 else np.nan
 
 def odorx_abortion_rate(results):
     ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
@@ -428,7 +600,7 @@ def hidden_rule_performance(results):
         len(results.get("aborted_sequences_HR", pd.DataFrame()))
     )
     print(f"Hidden Rule Performance: {n_hr_rewarded}/{denom} = {n_hr_rewarded/denom if denom>0 else np.nan:.3f}")
-    return n_hr_rewarded / denom if denom > 0 else np.nan
+    return n_hr_rewarded, denom, n_hr_rewarded / denom if denom > 0 else np.nan
 
 def hidden_rule_detection_rate(results):
     # Numerator: completed HR trials (rewarded, unrewarded, timeout) at HR position
@@ -446,13 +618,13 @@ def hidden_rule_detection_rate(results):
         len(results.get("aborted_sequences_HR", pd.DataFrame()))
     )
     print(f"Hidden Rule Detection Rate: {n_hr_completed}/{denom} = {n_hr_completed/denom if denom>0 else np.nan:.3f}")
-    return n_hr_completed / denom if denom > 0 else np.nan
+    return n_hr_completed, denom, n_hr_completed / denom if denom > 0 else np.nan
 
 def choice_timeout_rate(results):
     comp_tmo = results.get("completed_sequence_reward_timeout", pd.DataFrame())
     comp = results.get("completed_sequences", pd.DataFrame())
     print(f"Choice Timeout Rate: {len(comp_tmo)}/{len(comp)} = {len(comp_tmo)/len(comp) if len(comp)>0 else np.nan:.3f}")
-    return len(comp_tmo) / len(comp) if len(comp) > 0 else np.nan
+    return len(comp_tmo), len(comp), len(comp_tmo) / len(comp) if len(comp) > 0 else np.nan
 
 def avg_sampling_time_odor_x(results):
     comp = results.get("completed_sequences", pd.DataFrame())
@@ -567,30 +739,35 @@ def avg_response_time(results):
     comp_rt = results.get("completed_sequences_with_response_times", pd.DataFrame())
     if comp_rt.empty or "response_time_ms" not in comp_rt.columns or "response_time_category" not in comp_rt.columns:
         print("No response time data available.")
-        return
+        return {}
 
+    out = {}
     def print_avg(df, label):
         s = pd.to_numeric(df["response_time_ms"], errors="coerce").dropna()
         avg = s.mean() if not s.empty else np.nan
         print(f"{label}: {avg:.1f} ms (n={len(s)})")
+        return float(avg) if not np.isnan(avg) else np.nan
 
     # Rewarded
     rew = comp_rt[comp_rt["response_time_category"] == "rewarded"]
-    print_avg(rew, "Rewarded")
+    out["Rewarded"] = print_avg(rew, "Rewarded")
 
     # Unrewarded
     unr = comp_rt[comp_rt["response_time_category"] == "unrewarded"]
-    print_avg(unr, "Unrewarded")
+    out["Unrewarded"] = print_avg(unr, "Unrewarded")
 
     # Reward Timeout
     tmo = comp_rt[comp_rt["response_time_category"] == "timeout_delayed"]
-    print_avg(tmo, "Reward Timeout")
+    out["Reward Timeout"] = print_avg(tmo, "Reward Timeout")
 
     # Rewarded + Unrewarded (excluding timeouts)
     both = comp_rt[comp_rt["response_time_category"].isin(["rewarded", "unrewarded"])]
-    print_avg(both, "Average Response Time (Rewarded + Unrewarded)")
+    out["Average Response Time (Rewarded + Unrewarded)"] = print_avg(both, "Average Response Time (Rewarded + Unrewarded)")
+
+    return out
 
 def FA_avg_response_times(results):
+    out = {}
     # Non-initiated FA
     fa_noninit_df = results.get("non_initiated_FA", pd.DataFrame())
     if not fa_noninit_df.empty and "fa_label" in fa_noninit_df.columns and "fa_latency_ms" in fa_noninit_df.columns:
@@ -601,8 +778,9 @@ def FA_avg_response_times(results):
             ("FA_late", "FA Late"),
         ]:
             s = pd.to_numeric(fa_noninit_df.loc[fa_noninit_df["fa_label"] == label, "fa_latency_ms"], errors="coerce").dropna()
-            if not s.empty:
-                print(f"  - {pretty}: avg={s.mean():.1f} ms, median={s.median():.1f} ms, n={len(s)}")
+            avg = s.mean() if not s.empty else np.nan
+            print(f"  - {pretty}: avg={avg:.1f} ms, median={s.median():.1f} ms, n={len(s)}" if not s.empty else f"  - {pretty}: n=0")
+            out[f"Non-Initiated {pretty}"] = float(avg) if not np.isnan(avg) else np.nan
         print()
 
     # Aborted trials FA
@@ -615,16 +793,18 @@ def FA_avg_response_times(results):
             ("FA_late", "FA Late"),
         ]:
             s = pd.to_numeric(ab_det.loc[ab_det["fa_label"] == label, "fa_latency_ms"], errors="coerce").dropna()
-            if not s.empty:
-                print(f"  - {pretty}: avg={s.mean():.1f} ms, median={s.median():.1f} ms, n={len(s)}")
+            avg = s.mean() if not s.empty else np.nan
+            print(f"  - {pretty}: avg={avg:.1f} ms, median={s.median():.1f} ms, n={len(s)}" if not s.empty else f"  - {pretty}: n=0")
+            out[f"Aborted {pretty}"] = float(avg) if not np.isnan(avg) else np.nan
         print()
+    return out
 
 def response_rate(results):
     comp = results.get("completed_sequences", pd.DataFrame())
     comp_tmo = results.get("completed_sequence_reward_timeout", pd.DataFrame())
     n_resp = len(comp) - len(comp_tmo)
     print(f"Response Rate: {n_resp}/{len(comp)} = {n_resp/len(comp) if len(comp)>0 else np.nan:.3f}")
-    return n_resp / len(comp) if len(comp) > 0 else np.nan
+    return n_resp, len(comp), n_resp / len(comp) if len(comp) > 0 else np.nan
 
 def manual_vs_auto_stop_preference(results):
     comp = results.get("completed_sequences", pd.DataFrame())
@@ -651,7 +831,7 @@ def non_initiated_FA_rate(results):
         return np.nan
     n_fa = (fa_noninit_df["fa_label"] != "nFA").sum()
     print(f"Non-Initiated FA Rate: {n_fa}/{len(fa_noninit_df)} = {n_fa/len(fa_noninit_df) if len(fa_noninit_df)>0 else np.nan:.3f}")
-    return n_fa / len(fa_noninit_df) if len(fa_noninit_df) > 0 else np.nan
+    return n_fa, len(fa_noninit_df), n_fa / len(fa_noninit_df) if len(fa_noninit_df) > 0 else np.nan
 
 def non_initiation_odor_bias(results):
     non_ini = results.get("non_initiated_sequences", pd.DataFrame())
