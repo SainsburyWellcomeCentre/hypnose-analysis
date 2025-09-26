@@ -29,6 +29,11 @@ import contextlib
 from collections.abc import Mapping
 from moviepy.video.io.ImageSequenceClip import ImageSequenceClip
 import cv2 
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import matplotlib.ticker as ticker
+from IPython import get_ipython
+
 
 
 
@@ -4529,3 +4534,296 @@ def cut_video(subjid, date, start_time, end_time, index=None, base_dir="/Volumes
     print(f"Saved cut video to: {out_mp4}")
     return out_mp4
 
+
+def plot_valve_and_poke_events(
+    root,
+    time_window=None,
+    interactive=True,
+    show=True,
+    verbose=True,
+):
+
+    import matplotlib as mpl
+    mpl.rcParams['timezone'] = 'Europe/London'
+    # --- Discover all experiment folders ---
+    behav_dir = Path(root)
+    if behav_dir.name != "behav":
+        behav_dir = behav_dir.parent if behav_dir.parent.name == "behav" else behav_dir
+    exp_dirs = [d for d in behav_dir.iterdir() if d.is_dir() and d.name.startswith("20") and "T" in d.name]
+    exp_dirs.sort(key=lambda x: x.name)
+    if verbose:
+        print(f"Found {len(exp_dirs)} experiment files in {behav_dir}")
+
+    # --- Load and align all streams for each experiment ---
+    all_valves_0, all_valves_1, all_digital, all_pulse1, all_pulse2, all_led, all_endinit = [], [], [], [], [], [], []
+    all_times = []
+    for exp_dir in exp_dirs:
+        data = load_all_streams(exp_dir, verbose=False)
+        events = load_experiment_events(exp_dir, verbose=False)
+        odor_map = load_odor_mapping(exp_dir, data=data, verbose=False)
+
+        all_valves_0.append(data.get('olfactometer_valves_0', pd.DataFrame()))
+        all_valves_1.append(data.get('olfactometer_valves_1', pd.DataFrame()))
+        all_digital.append(data.get('digital_input_data', pd.DataFrame()))
+        all_pulse1.append(data.get('pulse_supply_1', pd.DataFrame()))
+        all_pulse2.append(data.get('pulse_supply_2', pd.DataFrame()))
+        all_led.append(data.get('odour_led', pd.Series()))
+        endinit_df = events.get('combined_end_initiation_df', pd.DataFrame())
+        if not endinit_df.empty and endinit_df.index.name != "Time" and "Time" in endinit_df.columns:
+            endinit_df = endinit_df.set_index("Time")
+        all_endinit.append(endinit_df)
+        # For session cut detection
+        if not all_valves_0[-1].empty:
+            all_times.append(all_valves_0[-1].index[0])
+        elif not all_valves_1[-1].empty:
+            all_times.append(all_valves_1[-1].index[0])
+        else:
+            all_times.append(None)
+    # --- Concatenate all sessions ---
+    valves_0 = pd.concat(all_valves_0)
+    valves_1 = pd.concat(all_valves_1)
+    digital_input_data = pd.concat(all_digital)
+    pulse_supply_1 = pd.concat(all_pulse1)
+    pulse_supply_2 = pd.concat(all_pulse2)
+    odour_led = pd.concat(all_led)
+    endinit_df = pd.concat(all_endinit)
+    # Sort by time
+    for df in [valves_0, valves_1, digital_input_data, pulse_supply_1, pulse_supply_2, odour_led, endinit_df]:
+        if not df.empty:
+            df.sort_index(inplace=True)
+
+    # Localize all indices if needed
+    for df in [valves_0, valves_1, digital_input_data, pulse_supply_1, pulse_supply_2, odour_led, endinit_df]:
+        if not df.empty and df.index.tz is None:
+            df.index = df.index.tz_localize("Europe/London")
+
+    # --- Detect session cuts (>5 min gap) ---
+    session_cuts = []
+    all_start_times = [t for t in all_times if t is not None]
+    for i in range(1, len(all_start_times)):
+        gap = (all_start_times[i] - all_start_times[i-1]).total_seconds()
+        if gap > 300:
+            session_cuts.append(all_start_times[i])
+    if verbose and session_cuts:
+        print(f"Session cuts detected at: {[t.strftime('%H:%M:%S') for t in session_cuts]}")
+
+
+    # --- Restrict to time window if requested ---
+    if time_window is not None:
+        start_str = time_window[0]
+        end_str = time_window[1] if len(time_window) > 1 and time_window[1] else None
+        # Use first available date from index
+        first_time = valves_0.index[0] if not valves_0.empty else valves_1.index[0]
+        date_str = first_time.strftime('%Y-%m-%d')
+        uk_tz = zoneinfo.ZoneInfo("Europe/London")
+        # Try parsing with and without microseconds
+        try:
+            start_dt = pd.to_datetime(f"{date_str} {start_str}", format="%Y-%m-%d %H:%M:%S.%f")
+        except Exception:
+            start_dt = pd.to_datetime(f"{date_str} {start_str}", format="%Y-%m-%d %H:%M:%S")
+        start_dt = start_dt.tz_localize("Europe/London")
+        if end_str:
+            try:
+                end_dt = pd.to_datetime(f"{date_str} {end_str}", format="%Y-%m-%d %H:%M:%S.%f")
+            except Exception:
+                end_dt = pd.to_datetime(f"{date_str} {end_str}", format="%Y-%m-%d %H:%M:%S")
+            end_dt = end_dt.tz_localize("Europe/London")
+        else:
+            end_dt = start_dt + pd.Timedelta(minutes=1)
+
+        # Use indexer_between_time for robust selection
+        def restrict(df):
+            if df.empty:
+                return df
+            # Use boolean mask for between
+            mask = (df.index >= start_dt) & (df.index <= end_dt)
+            return df.loc[mask]
+        valves_0 = restrict(valves_0)
+        valves_1 = restrict(valves_1)
+        digital_input_data = restrict(digital_input_data)
+        pulse_supply_1 = restrict(pulse_supply_1)
+        pulse_supply_2 = restrict(pulse_supply_2)
+        odour_led = restrict(odour_led)
+        endinit_df = restrict(endinit_df)
+
+    # --- Odor mapping ---
+    odor_map = load_odor_mapping(exp_dirs[0], verbose=False)
+    odour_to_olfactometer_map = odor_map.get('odour_to_olfactometer_map', [["A","B","C","D"],["E","F","G","Purge"]])
+
+    # --- Plotting ---
+
+    def extend_to_window_end(df, end_dt):
+        """Extend the last value of a DataFrame or Series to end_dt if needed."""
+        if df.empty or df.index[-1] >= end_dt:
+            return df
+        if isinstance(df, pd.DataFrame):
+            last_row = df.iloc[[-1]].copy()
+            last_row.index = [end_dt]
+            return pd.concat([df, last_row]).sort_index()
+        elif isinstance(df, pd.Series):
+            last_val = df.iloc[-1]
+            extension = pd.Series([last_val], index=[end_dt])
+            return pd.concat([df, extension]).sort_index()
+        return df
+
+    if interactive:
+        try:
+            get_ipython().run_line_magic('matplotlib', 'ipympl')
+        except Exception:
+            plt.ion()
+    fig = plt.figure(figsize=(10, 5))
+    ax = plt.gca()
+
+    # Colors for valves
+    valve_colors = ['red', 'blue', 'green', 'orange', 'purple', 'brown', 'pink', 'gray']
+
+    # --- Extend signals to end_dt if needed ---
+    if time_window is not None:
+        for name in [
+            'odour_led',
+            'digital_input_data',
+            'valves_0',
+            'valves_1',
+            'pulse_supply_1',
+            'pulse_supply_2',
+            'endinit_df',
+        ]:
+            obj = locals()[name]
+            if not obj.empty:
+                obj_extended = extend_to_window_end(obj, end_dt)
+                # Assign the extended object back to the variable
+                if name == 'odour_led':
+                    odour_led = obj_extended
+                elif name == 'digital_input_data':
+                    digital_input_data = obj_extended
+                elif name == 'valves_0':
+                    valves_0 = obj_extended
+                elif name == 'valves_1':
+                    valves_1 = obj_extended
+                elif name == 'pulse_supply_1':
+                    pulse_supply_1 = obj_extended
+                elif name == 'pulse_supply_2':
+                    pulse_supply_2 = obj_extended
+                elif name == 'endinit_df':
+                    endinit_df = obj_extended
+
+    # Plot odour LED and pokes
+    if not odour_led.empty:
+        plt.step(odour_led.index, odour_led * 0.8, where='post', c='black', linewidth=2, label='Odour LED', alpha=0.7)
+    if not digital_input_data.empty and 'DIPort0' in digital_input_data:
+        plt.step(digital_input_data.index, digital_input_data['DIPort0'] * 0.6, where='post', c='darkgray', linewidth=1, label='Odour Pokes')
+
+    # Plot individual valves from olfactometer 0 and EndInitiation events and reward delivery
+    valve_offset = -0.2
+    for i, valve_col in enumerate(valves_0.columns):
+        valve_data = valves_0[valve_col]
+        color = valve_colors[i % len(valve_colors)]
+        plt.step(valve_data.index, valve_data * 0.8 + valve_offset, where='post',
+                c=color, linewidth=1.5, label=f'{odour_to_olfactometer_map[0][i] if i < len(odour_to_olfactometer_map[0]) else valve_col} (Olfac1)', alpha=0.8)
+        if not endinit_df.empty and 'EndInitiation' in endinit_df:
+            plt.scatter(endinit_df.index, endinit_df['EndInitiation'] * 0.5 + valve_offset, s=5, c='k')
+        if not pulse_supply_1.empty:
+            plt.scatter(pulse_supply_1.index, pulse_supply_1 * 0.5 + valve_offset, s=5, c='r')
+        if not pulse_supply_2.empty:
+            plt.scatter(pulse_supply_2.index, pulse_supply_2 * 0.5 + valve_offset, s=5, c='r')
+        valve_offset -= 0.3
+
+    # Plot individual valves from olfactometer 1 and EndInitiation events and reward delivery
+    for i, valve_col in enumerate(valves_1.columns):
+        valve_data = valves_1[valve_col]
+        color = valve_colors[(i + len(valves_0.columns)) % len(valve_colors)]
+        plt.step(valve_data.index, valve_data * 0.8 + valve_offset, where='post',
+                c=color, linewidth=1.5, label=f'{odour_to_olfactometer_map[1][i] if i < len(odour_to_olfactometer_map[1]) else valve_col} (Olfac2)', alpha=0.8, linestyle='--')
+        if not endinit_df.empty and 'EndInitiation' in endinit_df:
+            plt.scatter(endinit_df.index, endinit_df['EndInitiation'] * 0.5 + valve_offset, s=5, c='k')
+        if not pulse_supply_1.empty:
+            plt.scatter(pulse_supply_1.index, pulse_supply_1 * 0.5 + valve_offset, s=5, c='r')
+        if not pulse_supply_2.empty:
+            plt.scatter(pulse_supply_2.index, pulse_supply_2 * 0.5 + valve_offset, s=5, c='r')
+        valve_offset -= 0.3
+
+    # Plot reward pokes and reward delivery
+    for di_col in digital_input_data.columns if not digital_input_data.empty else []:
+        if di_col == 'DIPort1':
+            DIPort_data = digital_input_data[di_col]
+            plt.step(DIPort_data.index, DIPort_data * 0.8 + valve_offset, where='post', c='orange', linewidth=1.5, label='Reward Pokes A')
+            if not pulse_supply_1.empty:
+                plt.scatter(pulse_supply_1.index, pulse_supply_1 * 0.5 + valve_offset, s=5, c='r')
+            if not pulse_supply_2.empty:
+                plt.scatter(pulse_supply_2.index, pulse_supply_2 * 0.5 + valve_offset, s=5, c='r')
+            if not endinit_df.empty and 'EndInitiation' in endinit_df:
+                plt.scatter(endinit_df.index, endinit_df['EndInitiation'] * 0.5 + valve_offset, s=5, c='k')
+            valve_offset -= 0.3
+        elif di_col == 'DIPort2':
+            DIPort_data = digital_input_data[di_col]
+            plt.step(DIPort_data.index, DIPort_data * 0.8 + valve_offset, where='post', c='cyan', linewidth=1.5, label='Reward Pokes B')
+            if not pulse_supply_1.empty:
+                plt.scatter(pulse_supply_1.index, pulse_supply_1 * 0.5 + valve_offset, s=5, c='r')
+            if not pulse_supply_2.empty:
+                plt.scatter(pulse_supply_2.index, pulse_supply_2 * 0.5 + valve_offset, s=5, c='r', label='Reward Delivery')
+            if not endinit_df.empty and 'EndInitiation' in endinit_df:
+                plt.scatter(endinit_df.index, endinit_df['EndInitiation'] * 0.5 + valve_offset, s=5, c='k', label='Trial End')
+            valve_offset -= 0.3
+
+    # --- Indicate session cuts ---
+    for cut_time in session_cuts:
+        plt.axvline(cut_time, color='gray', linestyle=':', linewidth=2, alpha=0.7)
+        plt.text(cut_time, plt.ylim()[1], 'Session Cut', color='gray', rotation=90, va='top', ha='right', fontsize=8)
+
+    # --- Adaptive/fine x-axis scale ---
+    class AdaptiveTimeFormatter(mdates.DateFormatter):
+        def __call__(self, x, pos=0):
+            dt = mdates.num2date(x)
+            return dt.strftime('%H:%M:%S.%f')[:-4]  # Show HH:MM:SS.ms
+
+    def update_ticks(event):
+        ax = event.canvas.figure.axes[0]
+        xlim = ax.get_xlim()
+        dt_start = mdates.num2date(xlim[0])
+        dt_end = mdates.num2date(xlim[1])
+        span = (dt_end - dt_start).total_seconds()
+        # Adaptive major ticks: fewer for large spans, more for small spans
+        if span < 2:
+            ax.xaxis.set_major_locator(mdates.SecondLocator(interval=1))
+            ax.xaxis.set_minor_locator(mdates.MicrosecondLocator(interval=100000))  # 100ms
+        elif span < 10:
+            ax.xaxis.set_major_locator(mdates.SecondLocator(interval=2))
+            ax.xaxis.set_minor_locator(mdates.SecondLocator(interval=1))
+        elif span < 60:
+            ax.xaxis.set_major_locator(mdates.SecondLocator(interval=10))
+            ax.xaxis.set_minor_locator(mdates.SecondLocator(interval=1))
+        elif span < 600:
+            ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=1))
+            ax.xaxis.set_minor_locator(mdates.SecondLocator(interval=10))
+        elif span < 3600:
+            ax.xaxis.set_major_locator(mdates.MinuteLocator(interval=5))
+            ax.xaxis.set_minor_locator(mdates.MinuteLocator(interval=1))
+        elif span < 6*3600:
+            ax.xaxis.set_major_locator(mdates.HourLocator(interval=1))
+            ax.xaxis.set_minor_locator(mdates.MinuteLocator(interval=10))
+        else:
+            ax.xaxis.set_major_locator(mdates.HourLocator(interval=2))
+            ax.xaxis.set_minor_locator(mdates.HourLocator(interval=1))
+        ax.xaxis.set_major_formatter(AdaptiveTimeFormatter('%H:%M:%S.%f'))
+        event.canvas.draw_idle()
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%H:%M:%S', tz=zoneinfo.ZoneInfo("Europe/London")))
+
+    if interactive:
+        plt.gcf().canvas.mpl_connect('draw_event', update_ticks)
+        update_ticks(type('event', (object,), {'canvas': plt.gcf().canvas})())
+
+    plt.xlabel('Time (Europe/London)')
+    if time_window is not None:
+        plt.xlim(start_dt, end_dt)
+    plt.title('Individual Olfactometer Valve States vs Odour Pokes and LED')
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.grid(True, alpha=0.3)
+    plt.ylim(valve_offset - 0.3, 1.2)
+    plt.yticks([])  # Removes y-axis tick marks and labels
+    plt.tight_layout()
+
+    if show:
+        plt.show()
+
+    return fig
