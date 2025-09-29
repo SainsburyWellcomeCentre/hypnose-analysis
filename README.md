@@ -47,14 +47,21 @@ The analysis consists of two parts: **trial classification** and **behavioral me
 1. Trial Classification
 
 The hypnose_testing notebook runs the trial classification. All functions used in this notebook are in the utils.py file. 
+
 batch_analyze_sessions can run on any combination of dates and subjids to run analysis on several subjects or dates at ones. If one parameter is None, it will run on all subjects for date(s) provided or all dates for subject(s) provided. Results are saved as json and csv combination. A summary txt file is saved per session analyzed. 
+
 plot_valve_and_poke_events can be used to visualize all valve states, with option to specify a time window. 
+
 cut_video can be used to cut a short video of the experiment with a defined time window. 
 
 2. Behavioral Metric Calculation
 
 The metrics_analysis notebook runs the behavioral metric calculation. All functions used in this notebook are in the behavioral_metrics.py file. 
+
 To add another metric calculation, add the definition as an independent function, and call it within run_all_metrics. 
+
 batch_run_all_metrics_with_merge can run on any combination of dates and subjids. Further, a protocol filter can be applied to only run on sessions under same protocol (within or across subjects). 
+
 Results are saved per session and merged for all sessions analyzed, either within the subject directory, or in the merged directory at the subject directory level for multi-subject runs.
+
 Results are saved as a json and csv file combination with a summary txt file. 
