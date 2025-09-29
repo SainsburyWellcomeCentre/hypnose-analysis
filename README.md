@@ -28,15 +28,15 @@ Within your working directory use a terminal to clone the repo to your local fol
 
 4. Change path variables to use on your PC
 
-In utils.py: 
+In classification_utils.py: 
 - Change project_root to match your folder (line 3)
 - For windows users: match storage folder path within load_experiment base_path = ... (line 150), batch_analyze_sessions base_path (line 4415), and cut_video base_dir (line 4461)
 
-In behavioral_metrics.py:
+In metrics_utils.py:
 - Change project_root to match your folder (line 3)
 - For windows users: match base directory path within load_session_results base_dir = ... (line 31), merged_results_output_dir derivatives directory path (line 308), batch_run_all_metrics_with_merge directory path (line 359)
 
-In hypnose_testing.ipynb and metrics_analysis.ipynb:
+In trial_classification.ipynb and metrics_analysis.ipynb:
 - Change project root to match your folder (initial import cell)
 
 
@@ -46,7 +46,7 @@ The analysis consists of two parts: **trial classification** and **behavioral me
 
 1. Trial Classification
 
-The hypnose_testing notebook runs the trial classification. All functions used in this notebook are in the utils.py file. 
+The trial_classification notebook runs the trial classification. All functions used in this notebook are in the classification_utils.py file. 
 
 batch_analyze_sessions can run on any combination of dates and subjids to run analysis on several subjects or dates at ones. If one parameter is None, it will run on all subjects for date(s) provided or all dates for subject(s) provided. Results are saved as json and csv combination. A summary txt file is saved per session analyzed. 
 
@@ -56,7 +56,7 @@ cut_video can be used to cut a short video of the experiment with a defined time
 
 2. Behavioral Metric Calculation
 
-The metrics_analysis notebook runs the behavioral metric calculation. All functions used in this notebook are in the behavioral_metrics.py file. 
+The metrics_analysis notebook runs the behavioral metric calculation. All functions used in this notebook are in the metrics_utils.py file. 
 
 To add another metric calculation, add the definition as an independent function, and call it within run_all_metrics. 
 
