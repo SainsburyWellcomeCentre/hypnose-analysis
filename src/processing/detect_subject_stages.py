@@ -5,7 +5,7 @@ import argparse
 import pandas as pd
 from pathlib import Path
 from src.processing.detect_stage import detect_stage
-import src.utils as utils  # Changed from relative to absolute import
+import src.session_utils as utils  # Changed from relative to absolute import
 
 def main(subject_folder, output_file=None):
     """
