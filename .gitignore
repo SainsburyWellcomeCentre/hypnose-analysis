@@ -14,3 +14,4 @@ venv/
 # History files
 .history/
 
+.DS_Store
