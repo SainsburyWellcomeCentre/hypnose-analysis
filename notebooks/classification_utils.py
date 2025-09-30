@@ -4453,6 +4453,16 @@ def batch_analyze_sessions(
             except Exception as e:
                 print(f"[batch_analyze_sessions] WARNING: Failed to analyze subject {subjid}, date {date}: {e}")
                 continue
+    # Return summary of analyzed sessions
+    analyzed = {}
+    for (subjid, date) in results.keys():
+        analyzed.setdefault(subjid, []).append(date)
+    print("\nAnalyzed session(s) for:")
+    for subjid in sorted(analyzed):
+        print(f"Subject {subjid}:")
+        for date in sorted(analyzed[subjid]):
+            print(f"    {date}")
+
     return results
 
 # ========================= Further functions / miscillaneous =========================
