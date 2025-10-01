@@ -1,6 +1,6 @@
 import sys
 import os
-project_root = os.path.abspath("/Users/joschua/repos/harris_lab/hypnose/hypnose-analysis")
+project_root = os.path.abspath("/Users/Volkan/Repos/hypnose-analysis")
 if project_root not in sys.path:
     sys.path.append(project_root)
 import os
@@ -4732,10 +4732,31 @@ def plot_valve_and_poke_events(
                 c=color, linewidth=1.5, label=f'{odour_to_olfactometer_map[0][i] if i < len(odour_to_olfactometer_map[0]) else valve_col} (Olfac1)', alpha=0.8)
         if not endinit_df.empty and 'EndInitiation' in endinit_df:
             plt.scatter(endinit_df.index, endinit_df['EndInitiation'] * 0.5 + valve_offset, s=5, c='k')
+        # Plot reward delivery red dots only when pulse is active
         if not pulse_supply_1.empty:
-            plt.scatter(pulse_supply_1.index, pulse_supply_1 * 0.5 + valve_offset, s=5, c='r')
+            if isinstance(pulse_supply_1, pd.DataFrame):
+                # Handle DataFrame case - look for active pulses across columns
+                for col in pulse_supply_1.columns:
+                    active_pulses = pulse_supply_1[pulse_supply_1[col] > 0]
+                    if not active_pulses.empty:
+                        plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
+            else:
+                # Handle Series case - plot when value > 0
+                active_pulses = pulse_supply_1[pulse_supply_1 > 0]
+                if not active_pulses.empty:
+                    plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
         if not pulse_supply_2.empty:
-            plt.scatter(pulse_supply_2.index, pulse_supply_2 * 0.5 + valve_offset, s=5, c='r')
+            if isinstance(pulse_supply_2, pd.DataFrame):
+                # Handle DataFrame case - look for active pulses across columns
+                for col in pulse_supply_2.columns:
+                    active_pulses = pulse_supply_2[pulse_supply_2[col] > 0]
+                    if not active_pulses.empty:
+                        plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
+            else:
+                # Handle Series case - plot when value > 0
+                active_pulses = pulse_supply_2[pulse_supply_2 > 0]
+                if not active_pulses.empty:
+                    plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
         valve_offset -= 0.3
 
     # Plot individual valves from olfactometer 1 and EndInitiation events and reward delivery
@@ -4746,10 +4767,31 @@ def plot_valve_and_poke_events(
                 c=color, linewidth=1.5, label=f'{odour_to_olfactometer_map[1][i] if i < len(odour_to_olfactometer_map[1]) else valve_col} (Olfac2)', alpha=0.8, linestyle='--')
         if not endinit_df.empty and 'EndInitiation' in endinit_df:
             plt.scatter(endinit_df.index, endinit_df['EndInitiation'] * 0.5 + valve_offset, s=5, c='k')
+        # Plot reward delivery red dots only when pulse is active
         if not pulse_supply_1.empty:
-            plt.scatter(pulse_supply_1.index, pulse_supply_1 * 0.5 + valve_offset, s=5, c='r')
+            if isinstance(pulse_supply_1, pd.DataFrame):
+                # Handle DataFrame case - look for active pulses across columns
+                for col in pulse_supply_1.columns:
+                    active_pulses = pulse_supply_1[pulse_supply_1[col] > 0]
+                    if not active_pulses.empty:
+                        plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
+            else:
+                # Handle Series case - plot when value > 0
+                active_pulses = pulse_supply_1[pulse_supply_1 > 0]
+                if not active_pulses.empty:
+                    plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
         if not pulse_supply_2.empty:
-            plt.scatter(pulse_supply_2.index, pulse_supply_2 * 0.5 + valve_offset, s=5, c='r')
+            if isinstance(pulse_supply_2, pd.DataFrame):
+                # Handle DataFrame case - look for active pulses across columns
+                for col in pulse_supply_2.columns:
+                    active_pulses = pulse_supply_2[pulse_supply_2[col] > 0]
+                    if not active_pulses.empty:
+                        plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
+            else:
+                # Handle Series case - plot when value > 0
+                active_pulses = pulse_supply_2[pulse_supply_2 > 0]
+                if not active_pulses.empty:
+                    plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
         valve_offset -= 0.3
 
     # Plot reward pokes and reward delivery
@@ -4757,20 +4799,62 @@ def plot_valve_and_poke_events(
         if di_col == 'DIPort1':
             DIPort_data = digital_input_data[di_col]
             plt.step(DIPort_data.index, DIPort_data * 0.8 + valve_offset, where='post', c='orange', linewidth=1.5, label='Reward Pokes A')
+            # Plot reward delivery red dots only when pulse is active
             if not pulse_supply_1.empty:
-                plt.scatter(pulse_supply_1.index, pulse_supply_1 * 0.5 + valve_offset, s=5, c='r')
+                if isinstance(pulse_supply_1, pd.DataFrame):
+                    # Handle DataFrame case - look for active pulses across columns
+                    for col in pulse_supply_1.columns:
+                        active_pulses = pulse_supply_1[pulse_supply_1[col] > 0]
+                        if not active_pulses.empty:
+                            plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
+                else:
+                    # Handle Series case - plot when value > 0
+                    active_pulses = pulse_supply_1[pulse_supply_1 > 0]
+                    if not active_pulses.empty:
+                        plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
             if not pulse_supply_2.empty:
-                plt.scatter(pulse_supply_2.index, pulse_supply_2 * 0.5 + valve_offset, s=5, c='r')
+                if isinstance(pulse_supply_2, pd.DataFrame):
+                    # Handle DataFrame case - look for active pulses across columns
+                    for col in pulse_supply_2.columns:
+                        active_pulses = pulse_supply_2[pulse_supply_2[col] > 0]
+                        if not active_pulses.empty:
+                            plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
+                else:
+                    # Handle Series case - plot when value > 0
+                    active_pulses = pulse_supply_2[pulse_supply_2 > 0]
+                    if not active_pulses.empty:
+                        plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
             if not endinit_df.empty and 'EndInitiation' in endinit_df:
                 plt.scatter(endinit_df.index, endinit_df['EndInitiation'] * 0.5 + valve_offset, s=5, c='k')
             valve_offset -= 0.3
         elif di_col == 'DIPort2':
             DIPort_data = digital_input_data[di_col]
             plt.step(DIPort_data.index, DIPort_data * 0.8 + valve_offset, where='post', c='cyan', linewidth=1.5, label='Reward Pokes B')
+            # Plot reward delivery red dots only when pulse is active
             if not pulse_supply_1.empty:
-                plt.scatter(pulse_supply_1.index, pulse_supply_1 * 0.5 + valve_offset, s=5, c='r')
+                if isinstance(pulse_supply_1, pd.DataFrame):
+                    # Handle DataFrame case - look for active pulses across columns
+                    for col in pulse_supply_1.columns:
+                        active_pulses = pulse_supply_1[pulse_supply_1[col] > 0]
+                        if not active_pulses.empty:
+                            plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
+                else:
+                    # Handle Series case - plot when value > 0
+                    active_pulses = pulse_supply_1[pulse_supply_1 > 0]
+                    if not active_pulses.empty:
+                        plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r')
             if not pulse_supply_2.empty:
-                plt.scatter(pulse_supply_2.index, pulse_supply_2 * 0.5 + valve_offset, s=5, c='r', label='Reward Delivery')
+                if isinstance(pulse_supply_2, pd.DataFrame):
+                    # Handle DataFrame case - look for active pulses across columns
+                    for col in pulse_supply_2.columns:
+                        active_pulses = pulse_supply_2[pulse_supply_2[col] > 0]
+                        if not active_pulses.empty:
+                            plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r', label='Reward Delivery')
+                else:
+                    # Handle Series case - plot when value > 0
+                    active_pulses = pulse_supply_2[pulse_supply_2 > 0]
+                    if not active_pulses.empty:
+                        plt.scatter(active_pulses.index, [0.5 + valve_offset] * len(active_pulses), s=5, c='r', label='Reward Delivery')
             if not endinit_df.empty and 'EndInitiation' in endinit_df:
                 plt.scatter(endinit_df.index, endinit_df['EndInitiation'] * 0.5 + valve_offset, s=5, c='k', label='Trial End')
             valve_offset -= 0.3
