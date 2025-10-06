@@ -4468,7 +4468,7 @@ def batch_analyze_sessions(
 # ========================= Further functions / miscillaneous =========================
 
 
-def cut_video(subjid, date, start_time, end_time, index=None, base_dir="/Volumes/harris/hypnose"):
+def cut_video(subjid, date, start_time, end_time, index=None, fps=30, base_dir="/Volumes/harris/hypnose"):
     """
     Cut a video snippet for a subject and date, given start and end time (HH:MM:SS.s).
     Automatically finds the correct rawdata and derivatives folders, loads metadata, and saves the cut video.
@@ -4504,7 +4504,7 @@ def cut_video(subjid, date, start_time, end_time, index=None, base_dir="/Volumes
         root = experiment_dirs[0]
     video_dir = root / "VideoData"
     # Load video metadata
-    from utils import load_all_streams
+    from classification_utils import load_all_streams
     streams = load_all_streams(root, verbose=False)
     video_meta = streams['video_data']
     # Parse times
@@ -4539,7 +4539,7 @@ def cut_video(subjid, date, start_time, end_time, index=None, base_dir="/Volumes
     derivatives_dir = Path(base_dir) / "derivatives" / subject_dir.name / session_dir.name / "video_analysis"
     derivatives_dir.mkdir(parents=True, exist_ok=True)
     out_mp4 = derivatives_dir / f"video_cut_{start_dt.strftime('%H-%M-%S-%f')}_{end_dt.strftime('%H-%M-%S-%f')}.mp4"
-    clip = ImageSequenceClip(images, fps=30)
+    clip = ImageSequenceClip(images, fps=fps)
     clip.write_videofile(str(out_mp4), codec="libx264", audio=False)
     print(f"Saved cut video to: {out_mp4}")
     return out_mp4
@@ -4590,13 +4590,13 @@ def plot_valve_and_poke_events(
         else:
             all_times.append(None)
     # --- Concatenate all sessions ---
-    valves_0 = pd.concat(all_valves_0)
-    valves_1 = pd.concat(all_valves_1)
-    digital_input_data = pd.concat(all_digital)
-    pulse_supply_1 = pd.concat(all_pulse1)
-    pulse_supply_2 = pd.concat(all_pulse2)
-    odour_led = pd.concat(all_led)
-    endinit_df = pd.concat(all_endinit)
+    valves_0 = pd.concat([df for df in all_valves_0 if not df.empty])
+    valves_1 = pd.concat([df for df in all_valves_1 if not df.empty])
+    digital_input_data = pd.concat([df for df in all_digital if not df.empty])
+    pulse_supply_1 = pd.concat([df for df in all_pulse1 if not df.empty])
+    pulse_supply_2 = pd.concat([df for df in all_pulse2 if not df.empty])
+    odour_led = pd.concat([df for df in all_led if not df.empty])
+    endinit_df = pd.concat([df for df in all_endinit if not df.empty])
     # Sort by time
     for df in [valves_0, valves_1, digital_input_data, pulse_supply_1, pulse_supply_2, odour_led, endinit_df]:
         if not df.empty:
