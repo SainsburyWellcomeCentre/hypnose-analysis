@@ -4471,9 +4471,9 @@ def batch_analyze_sessions(
 def cut_video(subjid, date, start_time, end_time, index=None, fps=30, base_dir="/Volumes/harris/hypnose"):
     """
     Cut a video snippet for a subject and date, given start and end time (HH:MM:SS.s).
-    Automatically finds the correct rawdata and derivatives folders, loads metadata, and saves the cut video.
+    Automatically finds the correct experiment folder whose video covers the requested time window.
     """
-    # Use load_experiment logic to find experiment root
+    from classification_utils import load_all_streams
     base_path = Path(base_dir) / "rawdata"
     subjid_str = f"sub-{str(subjid).zfill(3)}"
     date_str = str(date)
@@ -4495,29 +4495,46 @@ def cut_video(subjid, date, start_time, end_time, index=None, fps=30, base_dir="
         all_dirs = [d.name for d in behav_dir.iterdir() if d.is_dir()]
         raise FileNotFoundError(f"No experiment directories found in {behav_dir}.\nAvailable directories: {all_dirs}")
     experiment_dirs.sort(key=lambda x: x.name)
-    # Use index if multiple experiments
+
+    # Parse times
+    start_dt = pd.to_datetime(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]} {start_time}")
+    end_dt = pd.to_datetime(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]} {end_time}")
+
+    # If index is given, use it directly
     if index is not None:
         if index >= len(experiment_dirs) or index < 0:
             raise IndexError(f"Index {index} out of range. Available indices: 0-{len(experiment_dirs)-1}")
         root = experiment_dirs[index]
+        video_dir = root / "VideoData"
+        streams = load_all_streams(root, verbose=False)
+        video_meta = streams['video_data']
+        frames_in_window = video_meta[(video_meta.index >= start_dt) & (video_meta.index <= end_dt)]
+        if frames_in_window.empty:
+            print("No frames found in the requested time window for the specified index.")
+            return None
     else:
-        root = experiment_dirs[0]
-    video_dir = root / "VideoData"
-    # Load video metadata
-    from classification_utils import load_all_streams
-    streams = load_all_streams(root, verbose=False)
-    video_meta = streams['video_data']
-    # Parse times
-    start_dt = pd.to_datetime(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]} {start_time}")
-    end_dt = pd.to_datetime(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]} {end_time}")
-    frames_in_window = video_meta[(video_meta.index >= start_dt) & (video_meta.index <= end_dt)]
-    if frames_in_window.empty:
-        print("No frames found in the requested time window.")
-        return None
+        # Search all experiment folders for matching frames
+        root = None
+        frames_in_window = None
+        video_meta = None
+        video_dir = None
+        for exp_dir in experiment_dirs:
+            streams = load_all_streams(exp_dir, verbose=False)
+            vm = streams['video_data']
+            fiw = vm[(vm.index >= start_dt) & (vm.index <= end_dt)]
+            if not fiw.empty:
+                root = exp_dir
+                video_meta = vm
+                frames_in_window = fiw
+                video_dir = exp_dir / "VideoData"
+                break
+        if frames_in_window is None or frames_in_window.empty:
+            print("No frames found in the requested time window in any experiment folder.")
+            return None
+
     # Detect frame column
     frame_col = [c for c in frames_in_window.columns if 'frame' in c.lower()][0]
     frame_indices = frames_in_window[frame_col].tolist()
-    # Try each video file until frames can be read
     avi_files = sorted(video_dir.glob("*.avi"))
     images = []
     for video_file in avi_files:
