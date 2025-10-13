@@ -3732,7 +3732,7 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
         if minimum_sampling_time_ms is not None:
             print(f"Minimum sampling time: {fmt_ms(minimum_sampling_time_ms)} ms")
         if response_time_window_sec is not None:
-            print(f"Response time window: {float(response_time_window_sec):.0f} s")
+            print(f"Response time window: {float(response_time_window_sec):.2f} s")
 
         # Attempts overview
         baseline_n = int(len(non_ini))
