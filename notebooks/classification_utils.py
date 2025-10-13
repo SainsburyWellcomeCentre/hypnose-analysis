@@ -94,23 +94,73 @@ def vprint(verbose: bool, *args, **kwargs):
 def load_json(reader: SessionData, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(root.name)}_*.{reader.extension}"
-    print(pattern)
-    data = [reader.read(Path(file)) for file in sorted(glob(pattern))]
-    return pd.concat(data)
+    files = sorted(glob(pattern))
+    chunks = []
+    for file in files:
+        try:
+            df = reader.read(Path(file))
+            if df is None or (hasattr(df, "empty") and df.empty):
+                continue
+            chunks.append(df)
+        except Exception:
+            # skip bad file
+            continue
+    if not chunks:
+        return pd.DataFrame()
+    out = pd.concat(chunks, axis=0)
+    try:
+        out = out.sort_index()
+    except Exception:
+        pass
+    return out
 
 
 def load(reader: Reader, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(root.name)}_{reader.register.address}_*.bin"
-    data = [reader.read(file) for file in sorted(glob(pattern))]
-    return pd.concat(data)
+    files = sorted(glob(pattern))
+    chunks = []
+    for file in files:
+        try:
+            df = reader.read(file)
+            if df is None or (hasattr(df, "empty") and df.empty):
+                continue
+            chunks.append(df)
+        except Exception:
+            # skip bad file
+            continue
+    if not chunks:
+        return pd.DataFrame()
+    out = pd.concat(chunks, axis=0)
+    try:
+        out = out.sort_index()
+    except Exception:
+        pass
+    return out
 
 
 def load_video(reader: Video, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(root.name)}_*.csv"
-    data = [reader.read(Path(file)) for file in sorted(glob(pattern))]
-    return pd.concat(data)
+    files = sorted(glob(pattern))
+    chunks = []
+    for file in files:
+        try:
+            df = reader.read(Path(file))
+            if df is None or (hasattr(df, "empty") and df.empty):
+                continue
+            chunks.append(df)
+        except Exception:
+            # skip bad file
+            continue
+    if not chunks:
+        return pd.DataFrame()
+    out = pd.concat(chunks, axis=0)
+    try:
+        out = out.sort_index()
+    except Exception:
+        pass
+    return out
 
 
 def concat_digi_events(series_low: pd.DataFrame, series_high: pd.DataFrame) -> pd.DataFrame:
@@ -123,11 +173,25 @@ def concat_digi_events(series_low: pd.DataFrame, series_high: pd.DataFrame) -> p
 def load_csv(reader: Csv, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(reader.pattern).joinpath(reader.pattern)}_*.{reader.extension}"
-    print(pattern)
-    print([file for file in glob(pattern)])
-    data = pd.concat([reader.read(Path(file)) for file in glob(pattern)])
-    return data
-
+    files = sorted(glob(pattern))
+    chunks = []
+    for file in files:
+        try:
+            df = reader.read(Path(file))
+            if df is None or (hasattr(df, "empty") and df.empty):
+                continue
+            chunks.append(df)
+        except Exception:
+            # skip bad file
+            continue
+    if not chunks:
+        return pd.DataFrame()
+    out = pd.concat(chunks, axis=0)
+    try:
+        out = out.sort_index()
+    except Exception:
+        pass
+    return out
 
 def load_experiment(subjid, date, index=None):
     """
