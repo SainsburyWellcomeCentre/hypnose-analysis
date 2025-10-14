@@ -1,6 +1,6 @@
 import sys
 import os
-project_root = os.path.abspath("/Users/joschua/repos/harris_lab/hypnose/hypnose-analysis")
+project_root = os.path.abspath("/ceph/harris/hypnose/hypnose-analysis")
 if project_root not in sys.path:
     sys.path.append(project_root)
 import os
@@ -211,7 +211,7 @@ def load_experiment(subjid, date, index=None):
     Path object to experiment root, or None if selection needed
     """
     
-    base_path = Path('/Volumes/harris/hypnose/rawdata')
+    base_path = Path('/ceph/harris/hypnose/rawdata')  
     
     # Format inputs
     subjid_str = f"sub-{str(subjid).zfill(3)}"  
@@ -4486,7 +4486,7 @@ def batch_analyze_sessions(
     - Handles missing subjects/dates gracefully.
     Returns a dict: {(subjid, date): result_dict}
     """
-    base_path = Path('/Volumes/harris/hypnose/rawdata')
+    base_path = Path('/ceph/harris/hypnose/rawdata')   
     results = {}
 
     # Discover subjects
