@@ -16,6 +16,10 @@ from IPython.display import display
 import io
 import contextlib
 from collections import defaultdict
+import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib import cm
+from typing import Iterable, Optional, Union
 
 
 
@@ -994,3 +998,277 @@ def fa_abortion_stats(results, return_df=False):
         if df_odor.empty and df_pos.empty and df_out.empty:
             print("No FA abortions found.")
     return (df_odor, df_pos, df_out) if return_df else None
+
+
+# ================== Loading saved metrics and Visualization =================
+
+def _extract_metric_value(metrics: dict, var_path: str):
+    """
+    Extract a numeric value from metrics dict given a dot-path.
+    Examples:
+      - "decision_accuracy" -> uses the 3rd element (value) if tuple/list (num, denom, value)
+      - "avg_response_time.Rewarded" -> nested dict lookup
+    Returns float or np.nan if not found/unsupported.
+    """
+    try:
+        parts = var_path.split(".")
+        cur = metrics.get(parts[0], None)
+        for p in parts[1:]:
+            if isinstance(cur, dict):
+                cur = cur.get(p, None)
+            else:
+                # unsupported path deeper into non-dict
+                return float("nan")
+        # Resolve final value
+        if isinstance(cur, (int, float)) and not isinstance(cur, bool):
+            return float(cur)
+        if isinstance(cur, (list, tuple)) and len(cur) >= 3:
+            # assume (numerator, denominator, value)
+            val = cur[2]
+            return float(val) if val is not None else float("nan")
+        # Some dicts may hold numbers directly keyed by categories (needs explicit subkey in var_path)
+        return float(cur) if isinstance(cur, (int, float)) else float("nan")
+    except Exception:
+        return float("nan")
+    
+def _iter_subject_dirs(derivatives_dir: Path, subjids: Optional[Iterable[int]]):
+    if subjids is None:
+        for d in sorted(derivatives_dir.glob("sub-*_id-*")):
+            name = d.name.split("_")[0].replace("sub-", "")
+            try:
+                yield int(name), d
+            except Exception:
+                continue
+    else:
+        for sid in subjids:
+            sub_str = f"sub-{str(int(sid)).zfill(3)}"
+            dirs = sorted(derivatives_dir.glob(f"{sub_str}_id-*"))
+            if dirs:
+                yield int(sid), dirs[0]
+
+def _filter_session_dirs(subj_dir: Path, dates: Optional[Union[Iterable[Union[int,str]], tuple]]):
+    ses_dirs = sorted(subj_dir.glob("ses-*_date-*"))
+    if dates is None:
+        return ses_dirs
+    # dates can be list/iterable or (start, end) tuple
+    def norm_date(d):
+        s = str(d)
+        return int(s) if s.isdigit() else None
+    if isinstance(dates, tuple) and len(dates) == 2:
+        start = norm_date(dates[0]); end = norm_date(dates[1])
+        out = []
+        for d in ses_dirs:
+            try:
+                ds = int(d.name.split("_date-")[-1])
+                if (start is None or ds >= start) and (end is None or ds <= end):
+                    out.append(d)
+            except Exception:
+                pass
+        return out
+    # iterable of dates
+    wanted = {norm_date(d) for d in dates}
+    out = []
+    for d in ses_dirs:
+        try:
+            ds = int(d.name.split("_date-")[-1])
+            if ds in wanted:
+                out.append(d)
+        except Exception:
+            pass
+    return out
+
+def _load_protocol_from_summary(results_dir: Path) -> str:
+    try:
+        with open(results_dir / "summary.json", "r", encoding="utf-8") as f:
+            summary = json.load(f)
+        runs = summary.get("session", {}).get("runs", [])
+        if runs and isinstance(runs, list):
+            stage = runs[0].get("stage", {}) if isinstance(runs[0], dict) else {}
+            name = stage.get("stage_name") or stage.get("name")
+            return str(name) if name else "Unknown"
+    except Exception:
+        pass
+    return "Unknown"
+
+def _ensure_metrics_json(subjid: int, date: Union[int, str], results_dir: Path, compute_if_missing: bool) -> Optional[dict]:
+    """
+    Return metrics dict by loading metrics_{subjid}_{date}.json if present,
+    else compute via run_all_metrics if compute_if_missing=True.
+    """
+    subjid_i = int(subjid)
+    date_s = str(date)
+    metrics_path = results_dir / f"metrics_{subjid_i}_{date_s}.json"
+    if metrics_path.exists():
+        try:
+            return json.load(open(metrics_path, "r", encoding="utf-8"))
+        except Exception:
+            pass
+    if compute_if_missing:
+        try:
+            session_results = load_session_results(subjid_i, date_s)
+            return run_all_metrics(session_results, save_txt=True, save_json=True)
+        except Exception:
+            return None
+    return None
+
+def plot_behavior_metrics(
+    subjids: Optional[Iterable[int]],
+    dates: Optional[Union[Iterable[Union[int, str]], tuple]] = None,
+    variables: Optional[Iterable[str]] = None,
+    *,
+    protocol_filter: Optional[str] = None,
+    compute_if_missing: bool = False,
+    verbose: bool = True
+):
+    """
+    Plot selected metrics over sessions for one or more subjects.
+
+    - X-axis: union of all available dates across selected subjects (categorical, no time gaps).
+    - Y-axis: metric value.
+    - One figure per variable.
+    - Marker shape encodes subject; dot color encodes protocol; connecting lines are thin black.
+    - Protocol filtering optional (substring match).
+    - Values are read from metrics_{subjid}_{date}.json; if missing and compute_if_missing=True, metrics are computed.
+
+    variables:
+      - Each string is a key in the metrics JSON. For nested keys, use dot-path, e.g.:
+        "avg_response_time.Rewarded"
+      - For tuple metrics like ("num","den","val"), the plotted value is the 3rd element.
+
+    Returns: list of matplotlib Figure objects.
+    """
+    if not variables:
+        raise ValueError("Please provide `variables` (list of metric names or dot-paths).")
+
+    rows = []
+    derivatives_dir = Path("/Volumes/harris/hypnose/derivatives")
+
+    # Gather sessions
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, subjids):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            # Protocol (for coloring)
+            protocol = _load_protocol_from_summary(results_dir)
+            if protocol_filter and (protocol is None or protocol_filter not in str(protocol)):
+                continue
+            # Load metrics (json or compute)
+            metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing)
+            if metrics is None:
+                if verbose:
+                    print(f"[plot_behavior_metrics] Skipping sub-{sid:03d} {date_str}: metrics JSON missing.")
+                continue
+            for var in variables:
+                val = _extract_metric_value(metrics, var)
+                if isinstance(val, (int, float)) and not np.isnan(val):
+                    rows.append({
+                        "subjid": int(sid),
+                        "date": int(date_str) if str(date_str).isdigit() else date_str,
+                        "date_str": str(date_str),
+                        "protocol": str(protocol) if protocol else "Unknown",
+                        "variable": var,
+                        "value": float(val)
+                    })
+
+    if not rows:
+        if verbose:
+            print("[plot_behavior_metrics] No data found for the given filters.")
+        return []
+
+    df = pd.DataFrame(rows)
+    # Union of all dates across all subjects
+    unique_dates = sorted(df["date"].unique())
+    date_to_x = {d: i for i, d in enumerate(unique_dates)}
+    df["x"] = df["date"].map(date_to_x)
+
+    # Subject -> marker mapping
+    markers_cycle = ['o', '^', 's', 'X', 'D', 'P', 'v', '>', '<', '*', 'h', 'H', '8', 'p', 'x']
+    unique_subj = sorted(df["subjid"].unique())
+    subj_to_marker = {sid: markers_cycle[i % len(markers_cycle)] for i, sid in enumerate(unique_subj)}
+
+    # Protocol -> color mapping
+    unique_protocols = [p for p in sorted(df["protocol"].unique()) if p and p != "Unknown"]
+    # Add Unknown at end if present
+    if "Unknown" in df["protocol"].unique():
+        unique_protocols.append("Unknown")
+    cmap = cm.get_cmap("tab10", max(10, len(unique_protocols)))
+    prot_to_color = {p: cmap(i % cmap.N) for i, p in enumerate(unique_protocols)}
+    if "Unknown" in prot_to_color:
+        prot_to_color["Unknown"] = (0.6, 0.6, 0.6, 1.0)
+
+    figs = []
+    # One plot per variable
+    for var in variables:
+        df_var = df[df["variable"] == var]
+        if df_var.empty:
+            if verbose:
+                print(f"[plot_behavior_metrics] No data for variable '{var}'.")
+            continue
+
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        # Plot each subject: black connecting line + colored markers per protocol
+        for sid in unique_subj:
+            dsub = df_var[df_var["subjid"] == sid].sort_values("x")
+            if dsub.empty:
+                continue
+            ax.plot(dsub["x"], dsub["value"], color="black", linewidth=1.0, alpha=0.8, zorder=1)
+            # Scatter with subject marker and protocol color
+            colors = dsub["protocol"].map(lambda p: prot_to_color.get(p, (0.6, 0.6, 0.6, 1.0)))
+            ax.scatter(
+                dsub["x"], dsub["value"],
+                c=list(colors),
+                marker=subj_to_marker[sid],
+                edgecolors="black",
+                linewidths=0.5,
+                s=55,
+                zorder=2,
+                label=f"sub-{sid:03d}"
+            )
+
+        # X axis: categorical dates
+        ax.set_xticks(range(len(unique_dates)))
+        ax.set_xticklabels([str(d) for d in unique_dates], rotation=45, ha="right")
+        ax.set_xlim(-0.5, len(unique_dates) - 0.5)
+        ax.set_xlabel("Date")
+        ax.set_ylabel(var.replace("_", " ").title())
+        ax.set_title(f"{var}")
+
+        # Grid
+        ax.grid(True, which="both", axis="both", alpha=0.25)
+
+        # Build separate legends: subjects (markers) and protocols (colors)
+        subject_handles = [
+            Line2D([0], [0],
+                   marker=subj_to_marker[sid],
+                   color="black", linestyle="",
+                   markerfacecolor="white",
+                   markeredgecolor="black",
+                   markersize=7,
+                   label=f"sub-{sid:03d}")
+            for sid in unique_subj
+        ]
+        protocol_handles = [
+            Line2D([0], [0],
+                   marker='o',
+                   color='none', linestyle="",
+                   markerfacecolor=prot_to_color[p],
+                   markeredgecolor="black",
+                   markersize=7,
+                   label=p)
+            for p in unique_protocols
+        ]
+
+        # Place legends
+        if subject_handles:
+            leg1 = ax.legend(handles=subject_handles, title="Subjects", loc="upper left", bbox_to_anchor=(1.02, 1.0))
+            ax.add_artist(leg1)
+        if protocol_handles:
+            ax.legend(handles=protocol_handles, title="Protocols", loc="lower left", bbox_to_anchor=(1.02, 0.0))
+
+        plt.tight_layout()
+        figs.append(fig)
+
+    return figs
