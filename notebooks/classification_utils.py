@@ -1742,6 +1742,13 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         print(f"Hidden Rule Location: Position {hidden_rule_position} (index {hidden_rule_location})\n")
         print(f"Hidden Rule Odors: {', '.join(result['hidden_rule_odors']) if result['hidden_rule_odors'] else 'None'}\n")
 
+        # safe percent helper
+        def _pct(n, d):
+            try:
+                d = float(d)
+                return 0.0 if d == 0 else (float(n) / d * 100.0)
+            except Exception:
+                return 0.0
 
         base_non_init_df = result.get('non_initiated_sequences', pd.DataFrame())
         pos1_attempts_df = result.get('non_initiated_odor1_attempts', pd.DataFrame())
@@ -1750,34 +1757,37 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         pos1_attempts_count = 0 if pos1_attempts_df is None or pos1_attempts_df.empty else len(pos1_attempts_df)
 
         total_non_init = base_non_init_count + pos1_attempts_count
-        total_attempts = len(initiated_trials) + total_non_init
+        ini_n = len(initiated_trials)
+        total_attempts = ini_n + total_non_init
+
         print(f"Total attempts: {total_attempts}")
-        print(f"-- Non-initiated sequences (total): {total_non_init} ({total_non_init/total_attempts*100:.1f}%)")
+        print(f"-- Non-initiated sequences (total): {total_non_init} ({_pct(total_non_init, total_attempts):.1f}%)")
         if pos1_attempts_count:
-            print(f"    -- Position 1 attempts within trials {pos1_attempts_count} ({pos1_attempts_count/total_non_init*100:.1f}%)")
-            print(f"    -- Baseline non-initiated sequences {base_non_init_count} ({base_non_init_count/total_non_init*100:.1f}%)")
-        print(f"-- Initiated sequences (trials): {len(initiated_trials)} ({len(initiated_trials)/total_attempts*100:.1f}%)\n")
+            print(f"    -- Position 1 attempts within trials {pos1_attempts_count} ({_pct(pos1_attempts_count, total_non_init):.1f}%)")
+            print(f"    -- Baseline non-initiated sequences {base_non_init_count} ({_pct(base_non_init_count, total_non_init):.1f}%)")
+        print(f"-- Initiated sequences (trials): {ini_n} ({_pct(ini_n, total_attempts):.1f}%)\n")
 
         print("INITIATED TRIALS BREAKDOWN:")
-        print(f"-- Completed sequences: {len(result['completed_sequences'])} ({len(result['completed_sequences'])/len(initiated_trials)*100:.1f}%)")
-        print(f"   -- Hidden Rule trials (HR): {len(result['completed_sequences_HR'])} ({len(result['completed_sequences_HR'])/len(initiated_trials)*100:.1f}%)")
-        print(f"   -- Hidden Rule Missed (HR_missed): {len(result['completed_sequences_HR_missed'])} ({len(result['completed_sequences_HR_missed'])/len(initiated_trials)*100:.1f}%)")
-        print(f"-- Aborted sequences: {len(result['aborted_sequences'])} ({len(result['aborted_sequences'])/len(initiated_trials)*100:.1f}%)")
-        print(f"   -- Aborted Hidden Rule trials (HR): {len(result['aborted_sequences_HR'])} ({len(result['aborted_sequences_HR'])/len(initiated_trials)*100:.1f}%)\n")
+        comp_n = len(result['completed_sequences'])
+        print(f"-- Completed sequences: {comp_n} ({_pct(comp_n, ini_n):.1f}%)")
+        print(f"   -- Hidden Rule trials (HR): {len(result['completed_sequences_HR'])} ({_pct(len(result['completed_sequences_HR']), ini_n):.1f}%)")
+        print(f"   -- Hidden Rule Missed (HR_missed): {len(result['completed_sequences_HR_missed'])} ({_pct(len(result['completed_sequences_HR_missed']), ini_n):.1f}%)")
+        print(f"-- Aborted sequences: {len(result['aborted_sequences'])} ({_pct(len(result['aborted_sequences']), ini_n):.1f}%)")
+        print(f"   -- Aborted Hidden Rule trials (HR): {len(result['aborted_sequences_HR'])} ({_pct(len(result['aborted_sequences_HR']), ini_n):.1f}%)\n")
 
         print("REWARD STATUS BREAKDOWN:")
-        cs = len(result['completed_sequences'])
+        cs = comp_n
         if cs > 0:
-            print(f"-- Rewarded: {len(result['completed_sequence_rewarded'])} ({len(result['completed_sequence_rewarded'])/cs*100:.1f}%)")
-            print(f"-- Unrewarded: {len(result['completed_sequence_unrewarded'])} ({len(result['completed_sequence_unrewarded'])/cs*100:.1f}%)")
-            print(f"-- Reward timeout: {len(result['completed_sequence_reward_timeout'])} ({len(result['completed_sequence_reward_timeout'])/cs*100:.1f}%)\n")
+            print(f"-- Rewarded: {len(result['completed_sequence_rewarded'])} ({_pct(len(result['completed_sequence_rewarded']), cs):.1f}%)")
+            print(f"-- Unrewarded: {len(result['completed_sequence_unrewarded'])} ({_pct(len(result['completed_sequence_unrewarded']), cs):.1f}%)")
+            print(f"-- Reward timeout: {len(result['completed_sequence_reward_timeout'])} ({_pct(len(result['completed_sequence_reward_timeout']), cs):.1f}%)\n")
 
         print("HIDDEN RULE SPECIFIC BREAKDOWN:")
         hr_total = len(result['completed_sequences_HR'])
         if hr_total > 0:
-            print(f"-- HR Rewarded: {len(result['completed_sequence_HR_rewarded'])} ({len(result['completed_sequence_HR_rewarded'])/hr_total*100:.1f}%)")
-            print(f"-- HR Unrewarded: {len(result['completed_sequence_HR_unrewarded'])} ({len(result['completed_sequence_HR_unrewarded'])/hr_total*100:.1f}%)")
-            print(f"-- HR Timeout: {len(result['completed_sequence_HR_reward_timeout'])} ({len(result['completed_sequence_HR_reward_timeout'])/hr_total*100:.1f}%)")
+            print(f"-- HR Rewarded: {len(result['completed_sequence_HR_rewarded'])} ({_pct(len(result['completed_sequence_HR_rewarded']), hr_total):.1f}%)")
+            print(f"-- HR Unrewarded: {len(result['completed_sequence_HR_unrewarded'])} ({_pct(len(result['completed_sequence_HR_unrewarded']), hr_total):.1f}%)")
+            print(f"-- HR Timeout: {len(result['completed_sequence_HR_reward_timeout'])} ({_pct(len(result['completed_sequence_HR_reward_timeout']), hr_total):.1f}%)")
 
         hr_missed_total = len(result['completed_sequences_HR_missed'])
         if hr_missed_total > 0:
