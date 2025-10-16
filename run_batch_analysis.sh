@@ -4,7 +4,7 @@
 #SBATCH -N 1                        # Number of nodes
 #SBATCH -n 4                        # Number of cores (adjust as needed)
 #SBATCH --mem 16G                   # Total memory required (adjust as needed)
-#SBATCH -t 0-2:00:00                # Time (D-HH:MM:SS)
+#SBATCH -t 0-8:00:00                # Time (D-HH:MM:SS)
 #SBATCH -o /ceph/harris/hypnose/hpc_output/slurm.%j.out  # STDOUT
 #SBATCH -e /ceph/harris/hypnose/hpc_output/slurm.%j.err  # STDERR
 #
