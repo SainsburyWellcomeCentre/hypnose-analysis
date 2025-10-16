@@ -65,3 +65,39 @@ batch_run_all_metrics_with_merge can run on any combination of dates and subjids
 Results are saved per session and merged for all sessions analyzed, either within the subject directory, or in the merged directory at the subject directory level for multi-subject runs.
 
 Results are saved as a json and csv file combination with a summary txt file. 
+
+
+## Running analysis on the HPC: 
+1. Connect to the HPC 
+
+2. Navigate to home (cd) and install miniconda for linux (x86_64)
+
+    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh
+
+    bash miniconda.sh
+    source ~/.bashrc (if missing, run touch ~/.bashrc followed by ~/miniconda3/bin/conda init bash)
+    conda activate
+
+3. Create hypnose_hpc env
+
+    conda create -n hypnose_hpc python=3.12.11
+    conda activate hypnose_hpc
+    conda install numpy pandas pyyaml swc-aeon moviepy opencv matplotlib ipython harp-python dotmap
+
+4. Update SLURM 
+
+    Navigate to cd /ceph/harris/hypnose/hypnose-analysis/
+
+    Update the .sh file to specify parameters for analysis
+        nano run_batch_analysis.sh --> edit the changes and exit via ^X
+
+5. Run Analysis
+
+    Activate conda environment 
+
+    Submit SLURM job via sbatch run_batch_analysis.sh
+
+6. Output
+    
+    Slurm error and output files are saved in ceph/harris/hypnose/hpc_output
+    Data is saved as usual in the derivatives directory
