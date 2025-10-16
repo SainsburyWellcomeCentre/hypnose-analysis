@@ -102,7 +102,9 @@ def run_all_metrics(results, save_txt=True, save_json=True):
     Returns a dict of all metric values.
     """
     # --- Derive subjid, date, and output_dir from results ---
+    base_dir = Path("/Volumes/harris/hypnose/derivatives")
     manifest = results.get("manifest", {})
+
     summary = results.get("summary", {})
     # Try to get subjid and date from manifest or summary
     subjid = (
@@ -121,9 +123,23 @@ def run_all_metrics(results, save_txt=True, save_json=True):
     )
     # Try to get output_dir from manifest paths
     paths = manifest.get("paths", {})
+
+    # Override paths with the local base_dir
+    if base_dir is not None:
+        base_dir = Path(base_dir)
+        if "rawdata_dir" in paths:
+            paths["rawdata_dir"] = str(base_dir / "rawdata")
+        if "results_dir" in manifest:
+            manifest["results_dir"] = str(base_dir / "derivatives" / paths.get("sub_folder", "") / paths.get("ses_folder", "") / "saved_analysis_results")
+
     out_dir = None
     if "rawdata_dir" in paths:
-        out_dir = Path(paths["rawdata_dir"]).parent / "derivatives" / paths.get("sub_folder", "") / paths.get("ses_folder", "") / "saved_analysis_results"
+        # Ensure 'derivatives' is not duplicated
+        rawdata_parent = Path(paths["rawdata_dir"]).parent
+        if rawdata_parent.name == "derivatives":
+            out_dir = rawdata_parent / paths.get("sub_folder", "") / paths.get("ses_folder", "") / "saved_analysis_results"
+        else:
+            out_dir = rawdata_parent / "derivatives" / paths.get("sub_folder", "") / paths.get("ses_folder", "") / "saved_analysis_results"
     elif "results_dir" in manifest:
         out_dir = Path(manifest["results_dir"])
     else:
