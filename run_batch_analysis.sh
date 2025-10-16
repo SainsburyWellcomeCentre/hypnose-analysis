@@ -18,5 +18,7 @@ conda activate hypnose_hpc
 cd /ceph/harris/hypnose/hypnose-analysis/notebooks/
 
 # Run the script
-
-python hpc_trial_analysis.py --subjids 20 25 26 32 34 36 --dates 20250801 20250804 20250805 20250806 20250807 20250808 20250811 20250812 20250813 20250814 20250815 20250818 20250819 20250820 20250821 20250825 20250826 20250827 20250828 20250829 20250901 20250902 20250903 20250904 20250905 20250907 20250908 20250909 20250910 20250911 20250912 20250915 20250916 20250917 20250918 20250922 20250923 20250924 20250925 20250929 20250930 20251001 20251002 20251003 20251006 20251007 20251008 20251009 20251010 --save --print_summary
+# for dates, either select specific dates with --dates YYYYMMDD YYYYMMDD ...
+# or a date range with --start_date YYYYMMDD --end_date YYYYMMDD
+# or a start date with --start_date YYYYMMDD (will run for 365 days unless changed in hpc_trial_analysis.py)
+python hpc_trial_analysis.py --subjids 20 25 26 --start_date 20251001 --end_date 20251010 --save --print_summary
