@@ -374,12 +374,11 @@ def batch_run_all_metrics_with_merge(
 ):
     """
     Batch run metrics for combinations of subjids and dates, with optional protocol filter.
-    Also computes and saves merged metrics across all sessions.
+    Also computes and saves merged metrics across all sessions, per subject, and across all subjects.
     """
     derivatives_dir = Path("/Volumes/harris/hypnose/derivatives")
     results = []
     results_dicts = []
-    subj_dates = {}
 
     # Find all subject directories
     subj_dirs = list(derivatives_dir.glob("sub-*_id-*")) if subjids is None else [
@@ -390,6 +389,9 @@ def batch_run_all_metrics_with_merge(
         print(f"Found {len(subj_dirs)} subject directories.")
 
     for subj_dir in subj_dirs:
+        subj_results = []  # Store results for this subject
+        subj_dates = []  # Track processed dates for this subject
+
         # Find all session directories for this subject
         ses_dirs = list(subj_dir.glob("ses-*_date-*")) if dates is None else [
             d for date in dates for d in subj_dir.glob(f"ses-*_date-{date}")
@@ -417,8 +419,8 @@ def batch_run_all_metrics_with_merge(
                         print(f"Skipping {summary_path}: {e}")
                     continue
             # Extract subjid and date from path or summary
-            subjid = summary.get("session", {}).get("subject_id") if 'summary' in locals() else subj_dir.name.split("_")[0].replace("sub-", "")
-            date = summary.get("session", {}).get("date") if 'summary' in locals() else ses_dir.name.split("_date-")[-1]
+            subjid = subj_dir.name.split("_")[0].replace("sub-", "")
+            date = ses_dir.name.split("_date-")[-1]
             # Run metrics
             try:
                 session_results = load_session_results(subjid, date)
@@ -427,34 +429,51 @@ def batch_run_all_metrics_with_merge(
                     save_txt=save_txt,
                     save_json=save_json
                 )
-                results.append({
-                    "subjid": subjid,
-                    "date": date,
-                    "metrics": metrics
-                })
-                results_dicts.append(session_results)
-                subj_dates.setdefault(subjid, set()).add(date)
+                subj_results.append(session_results)  # Collect results for this subject
+                subj_dates.append(date)  # Track processed dates for this subject
+                results_dicts.append(session_results)  # Add to global results
                 if verbose:
                     print(f"Processed subjid={subjid}, date={date}")
             except Exception as e:
                 if verbose:
                     print(f"Failed for subjid={subjid}, date={date}: {e}")
 
-    # Print summary
-    if results:
-        print("========== Processed Sessions Summary ==========")
-    for entry in results:
-        subj = entry["subjid"]
-        date = entry["date"]
-        subj_dates.setdefault(subj, set()).add(date)
-    for subj, dates_set in subj_dates.items():
-        dates_list = sorted(dates_set)
-        if protocol:
-            print(f'Subject {subj}, Protocol "{protocol}", processed dates: {", ".join(dates_list)}')
-        else:
-            print(f'Subject {subj}, processed dates: {", ".join(dates_list)}')
+        # --- Merge results for this subject ---
+        if subj_results:
+            pooled_results = pool_results_dicts(subj_results)
+            # --- Capture pretty print output ---
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                merged_metrics = run_all_metrics(pooled_results, save_txt=False, save_json=False)
+            pretty_print_str = buffer.getvalue()
+            print(pretty_print_str)
+            # Prepare header
+            header = (
+                "Merged Results for:\n"
+                f"Subjid: {subjid}\n"
+                f"Date(s): {', '.join(subj_dates)}\n"
+                f"Protocol: {protocol if protocol else 'all'}"
+            )
+            subj_dates_sorted = sorted(subj_dates)
+            first_date = subj_dates_sorted[0][4:]
+            last_date = subj_dates_sorted[-1][4:]
+            # Output directory and filenames
+            merged_dir = subj_dir / "merged_results"
+            merged_dir.mkdir(parents=True, exist_ok=True)
+            fname = f"merged_{subjid}_{protocol if protocol else 'all'}_{first_date}_to_{last_date}"
+            txt_path = merged_dir / f"{fname}.txt"
+            json_path = merged_dir / f"{fname}.json"
+            # Save txt using the pretty print string
+            save_merged_metrics_txt(merged_metrics, header, txt_path, pretty_print_str=pretty_print_str)
+            if verbose:
+                print(f"Saved merged metrics summary for subjid={subjid} to {txt_path}")
+            # Save json
+            with open(json_path, "w", encoding="utf-8") as f:
+                json.dump(merged_metrics, f, indent=2, default=str)
+            if verbose:
+                print(f"Saved merged metrics values for subjid={subjid} to {json_path}")
 
-    # --- Merged metrics ---
+    # --- Total merged metrics across all subjects ---
     if results_dicts:
         pooled_results = pool_results_dicts(results_dicts)
         # --- Capture pretty print output ---
@@ -473,20 +492,30 @@ def batch_run_all_metrics_with_merge(
             f"Date(s): {', '.join(dates_merged)}\n"
             f"Protocol: {protocol_merged if protocol_merged else 'all'}"
         )
+        # Extract first and last dates
+        dates_sorted = sorted(dates_merged)
+        first_date = dates_sorted[0][4:]  # Extract MMDD from YYYYMMDD
+        last_date = dates_sorted[-1][4:]  # Extract MMDD from YYYYMMDD
         # Output directory and filenames
-        merged_dir = merged_results_output_dir(subjids_merged, dates_merged, protocol_merged)
-        fname = merged_metrics_filename(subjids_merged, dates_merged, protocol_merged)
+        merged_dir = derivatives_dir / "merged"
+        if protocol is not None:
+            merged_dir = merged_dir / "protocol_merged"
+        else:
+            merged_dir = merged_dir / "merged"
+        merged_dir.mkdir(parents=True, exist_ok=True)
+        subjids_str = "_".join(subjids_merged)
+        fname = f"merged_subjids_{subjids_str}_{protocol_merged if protocol_merged else 'all'}_{first_date}_to_{last_date}"
         txt_path = merged_dir / f"{fname}.txt"
         json_path = merged_dir / f"{fname}.json"
         # Save txt using the pretty print string
         save_merged_metrics_txt(merged_metrics, header, txt_path, pretty_print_str=pretty_print_str)
         if verbose:
-            print(f"Saved merged metrics summary to {txt_path}")
+            print(f"Saved total merged metrics summary to {txt_path}")
         # Save json
         with open(json_path, "w", encoding="utf-8") as f:
             json.dump(merged_metrics, f, indent=2, default=str)
         if verbose:
-            print(f"Saved merged metrics values to {json_path}")
+            print(f"Saved total merged metrics values to {json_path}")
 
     return results
 
