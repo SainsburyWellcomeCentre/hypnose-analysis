@@ -1157,7 +1157,7 @@ def _ensure_metrics_json(subjid: int, date: Union[int, str], results_dir: Path, 
     return None
 
 def plot_behavior_metrics(
-    subjids: Optional[Iterable[int]],
+    subjids: Optional[Iterable[int]] = None,
     dates: Optional[Union[Iterable[Union[int, str]], tuple]] = None,
     variables: Optional[Iterable[str]] = None,
     *,
@@ -1175,12 +1175,16 @@ def plot_behavior_metrics(
     - Protocol filtering optional (substring match).
     - Values are read from metrics_{subjid}_{date}.json; if missing and compute_if_missing=True, metrics are computed.
 
-    variables:
-      - Each string is a key in the metrics JSON. For nested keys, use dot-path, e.g.:
-        "avg_response_time.Rewarded"
-      - For tuple metrics like ("num","den","val"), the plotted value is the 3rd element.
+    Parameters:
+    - subjids: List of subject IDs to include, or None to include all subjects with matching dates.
+    - dates: List of specific dates (e.g., [20250101, 20250102]) or a date range (e.g., (20250101, 20250202)).
+    - variables: List of metric names or dot-paths to plot.
+    - protocol_filter: Optional substring to filter sessions by protocol.
+    - compute_if_missing: If True, compute metrics if missing.
+    - verbose: If True, print progress and warnings.
 
-    Returns: list of matplotlib Figure objects.
+    Returns:
+    - List of matplotlib Figure objects.
     """
     if not variables:
         raise ValueError("Please provide `variables` (list of metric names or dot-paths).")
