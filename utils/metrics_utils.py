@@ -1,6 +1,6 @@
 import sys
 import os
-project_root = os.path.abspath("/Users/joschua/repos/harris_lab/hypnose/hypnose-analysis")
+project_root = os.path.abspath("")
 if project_root not in sys.path:
     sys.path.append(project_root)
 import os
@@ -32,7 +32,9 @@ def load_session_results(subjid, date):
     Load saved analysis results for a given subject and date.
     Returns a dict of DataFrames and metadata, matching classification keys.
     """
-    base_dir = Path("/Volumes/harris/hypnose/derivatives")
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    base_dir = server_root / "derivatives"
     sub_str = f"sub-{str(subjid).zfill(3)}"
     date_str = str(date)
 
@@ -102,7 +104,9 @@ def run_all_metrics(results, save_txt=True, save_json=True):
     Returns a dict of all metric values.
     """
     # --- Derive subjid, date, and output_dir from results ---
-    base_dir = Path("/Volumes/harris/hypnose/derivatives")
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    base_dir = server_root / "derivatives"    
     manifest = results.get("manifest", {})
 
     summary = results.get("summary", {})
@@ -325,10 +329,13 @@ def save_merged_metrics_txt(metrics, header, txt_path, pretty_print_str=None):
                 else:
                     f.write(f"{k.replace('_',' ').title()}: {v}\n")
 
-def merged_results_output_dir(subjids, dates, protocol, derivatives_dir=Path("/Volumes/harris/hypnose/derivatives")):
+def merged_results_output_dir(subjids, dates, protocol):
     """
     Determine the output directory for merged results based on subjids, dates, and protocol.
     """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
     subjids = sorted(set(str(s) for s in subjids))
     dates = sorted(set(str(d) for d in dates))
     if len(subjids) == 1:
@@ -376,7 +383,9 @@ def batch_run_all_metrics_with_merge(
     Batch run metrics for combinations of subjids and dates, with optional protocol filter.
     Also computes and saves merged metrics across all sessions, per subject, and across all subjects.
     """
-    derivatives_dir = Path("/Volumes/harris/hypnose/derivatives")
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
     results = []
     results_dicts = []
 
@@ -1190,8 +1199,9 @@ def plot_behavior_metrics(
         raise ValueError("Please provide `variables` (list of metric names or dot-paths).")
 
     rows = []
-    derivatives_dir = Path("/Volumes/harris/hypnose/derivatives")
-
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
     # Gather sessions
     for sid, subj_dir in _iter_subject_dirs(derivatives_dir, subjids):
         ses_dirs = _filter_session_dirs(subj_dir, dates)

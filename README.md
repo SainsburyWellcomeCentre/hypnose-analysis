@@ -14,7 +14,7 @@ This repository is utilised for processing and visualising data acquired from Hy
 
 Within your working directory use a terminal to clone the repo to your local folder:
 
-```git clone https://github.com/vlkuzun/hypnose-processing.git```
+```git clone github.com/SainsburyWellcomeCentre/hypnose-analysis```
 
 2. Create a conda virtual environment with preferred replacement for env-name and activate
 
@@ -26,18 +26,9 @@ Within your working directory use a terminal to clone the repo to your local fol
 
 ```python -m ipykernel install --user --name=env-name --display-name="Display Name"```
 
-4. Change path variables to use on your PC
+4. Symlink: 
 
-In classification_utils.py: 
-- Change project_root to match your folder (line 3)
-- For windows users: match storage folder path within load_experiment base_path = ... (line 150), batch_analyze_sessions base_path (line 4415), and cut_video base_dir (line 4461)
-
-In metrics_utils.py:
-- Change project_root to match your folder (line 3)
-- For windows users: match base directory path within load_session_results base_dir = ... (line 31), merged_results_output_dir derivatives directory path (line 308), batch_run_all_metrics_with_merge directory path (line 359)
-
-In trial_classification.ipynb and metrics_analysis.ipynb:
-- Change project root to match your folder (initial import cell)
+Directories in this repo are resolved with a symlink inside /data pointing to the mounted server containing data. Depending on local structure of mounting the server, the symlink may need adjusting. 
 
 
 ## Running Analysis: 

@@ -1,6 +1,6 @@
 import sys
 import os
-project_root = os.path.abspath("/Users/joschua/repos/harris_lab/hypnose/hypnose-analysis")
+project_root = os.path.abspath("")
 if project_root not in sys.path:
     sys.path.append(project_root)
 import os
@@ -211,7 +211,7 @@ def load_experiment(subjid, date, index=None):
     Path object to experiment root, or None if selection needed
     """
     
-    base_path = Path('/Volumes/harris/hypnose/rawdata')
+    base_path = Path(project_root) / "data" / "rawdata"
     
     # Format inputs
     subjid_str = f"sub-{str(subjid).zfill(3)}"  
@@ -4486,7 +4486,7 @@ def batch_analyze_sessions(
     - Handles missing subjects/dates gracefully.
     Returns a dict: {(subjid, date): result_dict}
     """
-    base_path = Path('/Volumes/harris/hypnose/rawdata')
+    base_path = Path(project_root) / "data" / "rawdata"
     results = {}
 
     # Discover subjects
@@ -4542,13 +4542,13 @@ def batch_analyze_sessions(
 # ========================= Further functions / miscillaneous =========================
 
 
-def cut_video(subjid, date, start_time, end_time, index=None, fps=30, base_dir="/Volumes/harris/hypnose"):
+def cut_video(subjid, date, start_time, end_time, index=None, fps=30):
     """
     Cut a video snippet for a subject and date, given start and end time (HH:MM:SS.s).
     Automatically finds the correct experiment folder whose video covers the requested time window.
     """
     from classification_utils import load_all_streams
-    base_path = Path(base_dir) / "rawdata"
+    base_path = Path(project_root) / "data" / "rawdata"
     subjid_str = f"sub-{str(subjid).zfill(3)}"
     date_str = str(date)
     subject_dirs = list(base_path.glob(f"{subjid_str}_id-*"))
@@ -4627,7 +4627,8 @@ def cut_video(subjid, date, start_time, end_time, index=None, fps=30, base_dir="
         print("No frames extracted from any video file.")
         return None
     # Output folder (derivatives/video_analysis)
-    derivatives_dir = Path(base_dir) / "derivatives" / subject_dir.name / session_dir.name / "video_analysis"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives" / subject_dir.name / session_dir.name / "video_analysis"
     derivatives_dir.mkdir(parents=True, exist_ok=True)
     out_mp4 = derivatives_dir / f"video_cut_{start_dt.strftime('%H-%M-%S-%f')}_{end_dt.strftime('%H-%M-%S-%f')}.mp4"
     clip = ImageSequenceClip(images, fps=fps)
