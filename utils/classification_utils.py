@@ -3372,7 +3372,7 @@ def _normalize_df_for_io(df: pd.DataFrame) -> tuple[pd.DataFrame, list[str]]:
                 )
     return df2, json_cols
 
-def save_session_analysis_results(classification: dict, root, session_metadata: dict | None = None, verbose: bool = True) -> Path:
+def save_session_analysis_results(classification: dict, root, session_metadata: dict | None = None, data=None, events=None, verbose: bool = True) -> Path:
     out_dir, info = resolve_derivatives_output_dir(root)
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3426,7 +3426,65 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         if _save_df(k, df):
             saved_any = True
 
-    # 3) Indices
+    # 3) Extract run start and end times
+    runs = manifest["session"].get("runs", [])
+    london_tz = zoneinfo.ZoneInfo("Europe/London")
+
+    for run in runs:
+        # Extract start time from folder path
+        run_start_str = run["root"].split("/")[-1]  # Extract the timestamp part (e.g., "2025-10-17T12-57-05")
+        run_start = datetime.strptime(run_start_str, "%Y-%m-%dT%H-%M-%S").replace(tzinfo=zoneinfo.ZoneInfo("UTC"))
+        run_start_london = run_start.astimezone(london_tz)
+        run["start_time"] = run_start_london.isoformat()
+
+        # Use precomputed end time if available
+        stage_info = run.get("stage", {})
+        precomputed_end_time = stage_info.get("run_end_time") if isinstance(stage_info, dict) else None
+        
+        if precomputed_end_time is not None:
+            # Ensure precomputed_end_time is a datetime object
+            if isinstance(precomputed_end_time, str):
+                precomputed_end_time = datetime.fromisoformat(precomputed_end_time)
+
+            # Convert to London time
+            if precomputed_end_time.tzinfo is None:
+                run_end_london = precomputed_end_time.replace(tzinfo=london_tz)
+            else:
+                run_end_london = precomputed_end_time.astimezone(london_tz)
+            run["end_time"] = run_end_london.isoformat()
+        else:
+            # Fallback: try to extract from current data/events (existing logic)
+            try:
+                all_timestamps = []
+                
+                # Only try this fallback if we have data and events for this specific run
+                if data is not None and events is not None:
+                    # This fallback logic would need to filter by run, but it's complex
+                    # Better to ensure the precomputed end time is always available
+                    pass
+                
+                run["end_time"] = None
+                if verbose:
+                    print(f"Warning: No precomputed end time for run {run.get('run_id')}")
+            except Exception as e:
+                print(f"Error extracting end time for run {run.get('run_id')}: {e}")
+                run["end_time"] = None
+
+    # 4) Calculate gaps between runs
+    for i in range(len(runs) - 1):
+        run_end = runs[i].get("end_time")
+        next_run_start = runs[i + 1].get("start_time")
+        if run_end and next_run_start:
+            run_end_dt = datetime.fromisoformat(run_end)
+            next_run_start_dt = datetime.fromisoformat(next_run_start)
+            gap = next_run_start_dt - run_end_dt
+            runs[i]["gap_to_next_run"] = str(gap)
+        else:
+            runs[i]["gap_to_next_run"] = None
+
+    manifest["session"]["runs"] = runs
+    
+    # 5) Indices
     indices_dir = out_dir / "indices"
     indices_dir.mkdir(parents=True, exist_ok=True)
     idx_payloads = {
@@ -3437,7 +3495,7 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         with open(indices_dir / f"{name}.json", "w", encoding="utf-8") as f:
             json.dump(_json_safe(payload), f, indent=2)
 
-    # 4) Response-time analysis artifacts
+    # 6) Response-time analysis artifacts
     rta = classification.get("response_time_analysis")
     if isinstance(rta, dict):
         try:
@@ -3450,7 +3508,7 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
             if _save_df("response_time_per_trial", per_trial):
                 saved_any = True
 
-    # 5) Manifest + summary
+    # 7) Manifest + summary
     try:
         with open(out_dir / "manifest.json", "w", encoding="utf-8") as f:
             json.dump(_json_safe(manifest), f, indent=2)
@@ -4239,6 +4297,30 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
     roots: list[Optional[Path]] = []
     stages = []
 
+    def extract_run_end_time(data, events):
+        """Extract the latest timestamp from data and events for a single run"""
+        all_timestamps = []
+        
+        # Collect timestamps from data streams
+        for key, stream in data.items():
+            if isinstance(stream, pd.DataFrame) and "Time" in stream.columns:
+                timestamps = pd.to_datetime(stream["Time"], errors="coerce").dropna()
+                all_timestamps.extend(timestamps)
+            elif isinstance(stream, pd.Series) and hasattr(stream.index, 'dtype') and pd.api.types.is_datetime64_any_dtype(stream.index):
+                all_timestamps.extend(stream.index)
+        
+        # Collect timestamps from events
+        for key, event in events.items():
+            if isinstance(event, pd.DataFrame) and "Time" in event.columns:
+                timestamps = pd.to_datetime(event["Time"], errors="coerce").dropna()
+                all_timestamps.extend(timestamps)
+        
+        # Find the latest timestamp
+        if all_timestamps:
+            return max(all_timestamps)
+        return None
+
+
     for i, root in enumerate(session_roots[:max_runs]):
         try:
             vprint(verbose, f"[analyze_session_multi_run] Loaded run index {i}: root={root}")
@@ -4253,6 +4335,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
             # Run pipeline
             data = _maybe_silent(load_all_streams, root, verbose=verbose)
             events = _maybe_silent(load_experiment_events, root, verbose=verbose)
+            run_end_time = extract_run_end_time(data, events)
             odor_map = _maybe_silent(load_odor_mapping, root, data=data, verbose=verbose)
             trial_counts = detect_trials(data, events, root, verbose=verbose)
 
@@ -4260,6 +4343,11 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
                 classify_and_analyze_with_response_times,
                 data, events, trial_counts, odor_map, stage, root, verbose=verbose
             )
+
+            if isinstance(stage, dict):
+                stage['run_end_time'] = run_end_time
+            else:
+                stage = {'stage_name': str(stage), 'run_end_time': run_end_time}
 
             cls = out['classification'] if isinstance(out, dict) and 'classification' in out else out
             DIP0 = data['digital_input_data'].get('DIPort0', pd.Series(dtype=bool))
@@ -4321,7 +4409,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
             ]
         }
         try:
-            save_dir = save_session_analysis_results(merged, first_root, session_meta, verbose=verbose)
+            save_dir = save_session_analysis_results(merged, first_root, session_meta, data, events, verbose=verbose)
         except Exception as e:
             save_err = e
             vprint(verbose, f"[save] WARNING: {e}")
