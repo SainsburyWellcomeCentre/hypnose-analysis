@@ -549,10 +549,26 @@ def plot_movement_by_trial_state(subjid, date, smooth_window=10, linewidth=1, al
     return fig, ax
 
 
-def _load_tracking_and_behavior(subjid, date):
+def _load_tracking_and_behavior(subjid, date, tracking_source='auto'):
     """
     Load combined tracking CSV and behavior results for a session.
-    Returns tracking_df (with parsed time) and behavior dict.
+    Supports both ezTrack (*_combined_tracking_with_timestamps.csv) 
+    and SLEAP (*_combined_sleap_tracking_timestamps.csv) formats.
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    date : int or str
+        Session date
+    tracking_source : str, optional
+        'auto' (default): prefer SLEAP if available, else ezTrack
+        'sleap': only load SLEAP
+        'eztrack': only load ezTrack
+    
+    Returns:
+    --------
+    tracking_df, behavior_dict
     """
     base_path = Path(project_root) / "data" / "rawdata"
     derivatives_dir = base_path.resolve().parent / "derivatives"
@@ -574,14 +590,37 @@ def _load_tracking_and_behavior(subjid, date):
     if not results_dir.exists():
         raise FileNotFoundError(f"Results directory not found: {results_dir}")
 
-    tracking_files = [f for f in results_dir.glob("*_combined_tracking_with_timestamps.csv")
-                      if not f.name.startswith("._")]
-    if not tracking_files:
+    # Find tracking files
+    sleap_files = [f for f in results_dir.glob("*_combined_sleap_tracking_timestamps.csv")
+                   if not f.name.startswith("._")]
+    eztrack_files = [f for f in results_dir.glob("*_combined_tracking_with_timestamps.csv")
+                     if not f.name.startswith("._")]
+    
+    csv_path = None
+    source_used = None
+    
+    if tracking_source == 'auto':
+        # Prefer SLEAP if available
+        if sleap_files:
+            csv_path = sleap_files[0]
+            source_used = 'sleap'
+        elif eztrack_files:
+            csv_path = eztrack_files[0]
+            source_used = 'eztrack'
+    elif tracking_source == 'sleap':
+        if sleap_files:
+            csv_path = sleap_files[0]
+            source_used = 'sleap'
+    elif tracking_source == 'eztrack':
+        if eztrack_files:
+            csv_path = eztrack_files[0]
+            source_used = 'eztrack'
+    
+    if csv_path is None:
         raise FileNotFoundError(
-            f"No combined tracking file found in {results_dir}. "
-            f"Run add_timestamps_to_tracking({subjid}, {date}) first."
+            f"No tracking file found for {tracking_source}. "
+            f"Available: {len(sleap_files)} SLEAP, {len(eztrack_files)} ezTrack"
         )
-    csv_path = tracking_files[0]
 
     try:
         tracking = pd.read_csv(csv_path, encoding='utf-8')
@@ -590,7 +629,23 @@ def _load_tracking_and_behavior(subjid, date):
 
     tracking['time'] = pd.to_datetime(tracking['time'], errors='coerce')
 
+    # For SLEAP data: use 'centroid_x' and 'centroid_y' if available, else 'X'/'Y'
+    if source_used == 'sleap':
+        if 'centroid_x' in tracking.columns and 'centroid_y' in tracking.columns:
+            tracking['X'] = tracking['centroid_x']
+            tracking['Y'] = tracking['centroid_y']
+        elif 'X' not in tracking.columns:
+            # Try to find any x/y columns
+            x_cols = [c for c in tracking.columns if 'x' in c.lower() and 'score' not in c.lower()]
+            y_cols = [c for c in tracking.columns if 'y' in c.lower() and 'score' not in c.lower()]
+            if x_cols and y_cols:
+                tracking['X'] = tracking[x_cols[0]]
+                tracking['Y'] = tracking[y_cols[0]]
+
     behavior = load_session_results(subjid, date)
+    
+    print(f"Loaded {source_used.upper()} tracking: {len(tracking)} frames from {csv_path.name}")
+    
     return tracking, behavior
 
 
@@ -723,8 +778,11 @@ def plot_movement_with_behavior(
     def _plot_segments_by_category(df, category_series, colors, axes=None, legend_name_func=lambda c: str(c)):
         target_ax = axes if axes is not None else ax
         cat = category_series.fillna('other')
+        
+        # Group by consecutive same categories
         cat_reset = cat.reset_index(drop=True)
         seg_boundaries = (cat_reset != cat_reset.shift()).cumsum()
+        
         used = set()
         for seg_id, seg_idx in seg_boundaries.groupby(seg_boundaries).groups.items():
             seg_idx = sorted(seg_idx)
@@ -770,14 +828,13 @@ def plot_movement_with_behavior(
         comps['sequence_start'] = pd.to_datetime(comps['sequence_start'])
         comps['sequence_end'] = pd.to_datetime(comps['sequence_end'])
 
-        # Use the `last_odor` column directly
         if 'last_odor' not in comps.columns:
             raise ValueError("The 'last_odor' column is missing in completed_sequences.")
         
         if last_odor_colors is None:
-            last_odor_colors = {'A': 'red', 'B': 'blue', 'other': 'lightgray'}
+            last_odor_colors = {'OdorA': 'red', 'OdorB': 'blue', 'other': 'lightgray'}
 
-        # Build a series mapping each tracking frame to its odor category
+        # Map each tracking frame to its odor category
         t_time = tracking['time']
         trial_odor = pd.Series('', index=tracking.index, dtype=object)
         
@@ -790,9 +847,9 @@ def plot_movement_with_behavior(
         tracking_in_trial = tracking[in_trial_mask].copy()
         trial_odor_filtered = trial_odor[in_trial_mask]
         
-        trial_odor_filtered = trial_odor_filtered.str.strip() 
-        unique_odors = sorted(trial_odor_filtered.unique())       
-        # Plot combined view
+        unique_odors = sorted(trial_odor_filtered.unique())
+        
+        # Plot combined view with all odors
         _plot_segments_by_category(
             tracking_in_trial, 
             trial_odor_filtered, 
@@ -801,18 +858,14 @@ def plot_movement_with_behavior(
             legend_name_func=lambda c: f"Last odor {c}"
         )
         
-        # Create individual subplot for each odor - use full tracking with proper masks
+        # Create facet plots for individual odors
         facet_plots = []
         for odor in unique_odors:
-            # Create mask directly from the filtered series
             odor_mask = trial_odor_filtered == odor
-            # Map back to full tracking index
             full_mask = pd.Series(False, index=tracking.index)
             full_mask.loc[odor_mask.index[odor_mask]] = True
             color = last_odor_colors.get(odor, last_odor_colors.get('other', 'gray'))
             facet_plots.append((f"Last odor {odor}", full_mask, color))
-
-
     elif mode == "time_windows":
         if not time_windows:
             raise ValueError("time_windows must be provided for mode='time_windows'.")
@@ -853,9 +906,8 @@ def plot_movement_with_behavior(
         trials = trials.copy()
         trials['sequence_start'] = pd.to_datetime(trials['sequence_start'])
         trials['sequence_end'] = pd.to_datetime(trials['sequence_end'])
-        # Create 1-based ordinal index within session by time
+        # Sort by time
         trials = trials.sort_values('sequence_start').reset_index(drop=True)
-        trials['trial_idx'] = trials.index + 1
 
         # Normalize input to list
         if isinstance(trial_windows, tuple):
@@ -863,35 +915,26 @@ def plot_movement_with_behavior(
 
         n = len(trials)
 
-        def resolve_range(lo, hi):
-            # negatives are from the end; -0 means last trial
-            def to_idx(v):
-                if v < 0:
-                    # -1 -> last, -20 -> last-19
-                    return n + v + 1
-                return v
-            lo_i = to_idx(int(lo))
-            hi_i = to_idx(int(hi)) if hi is not None else n
-            lo_i = max(1, lo_i)
-            hi_i = min(n, hi_i if hi_i != 0 else n)
-            if lo_i > hi_i:
-                lo_i, hi_i = hi_i, lo_i
-            return lo_i, hi_i
-
         cmap = plt.cm.Dark2
         facet_plots = []
         t_time = tracking['time']
-        for i, (lo, hi) in enumerate(trial_windows):
-            lo_i, hi_i = resolve_range(lo, hi)
-            sel = trials[(trials['trial_idx'] >= lo_i) & (trials['trial_idx'] <= hi_i)]
+        for i, (start_idx, end_idx) in enumerate(trial_windows):
+            # Use standard Python slicing - negative indices work naturally with iloc
+            sel = trials.iloc[start_idx:end_idx]
+            
             if sel.empty:
                 continue
+            
             mask = pd.Series(False, index=tracking.index)
             for _, tr in sel.iterrows():
                 mask |= ((t_time >= tr['sequence_start']) & (t_time <= tr['sequence_end']))
+            
             color = cmap(i % 8)
-            _plot_segments_by_mask(tracking, mask, color, label=f"Trials {lo}-{hi}")
-            facet_plots.append((f"Trials {lo}-{hi}", mask, color))
+            # Display label using actual indices for clarity
+            actual_indices = sel.index.tolist()
+            label = f"Trials {actual_indices[0]}-{actual_indices[-1]}"
+            _plot_segments_by_mask(tracking, mask, color, label=label)
+            facet_plots.append((label, mask, color))
 
     # Axes/styling (overlay)
     ax.set_xlabel('X Position (pixels)')
@@ -992,183 +1035,29 @@ def get_video_frame_times(root, verbose=True):
     return result
 
 
-def get_frame_for_time(video_frame_times, target_time):
+def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     """
-    Find the video frame closest to a given timestamp.
-    
-    Parameters:
-    -----------
-    video_frame_times : pd.DataFrame
-        Output from get_video_frame_times()
-    target_time : pd.Timestamp or datetime
-        The time to find the frame for
-    
-    Returns:
-    --------
-    dict with frame info: frame, local_frame, time, video_path, video_file
-    """
-    if video_frame_times.empty:
-        return None
-    
-    # Ensure target_time is tz-aware
-    if isinstance(target_time, pd.Timestamp) and target_time.tz is None:
-        target_time = target_time.tz_localize('Europe/London')
-    
-    # Find closest frame by time
-    idx = (video_frame_times['time'] - target_time).abs().idxmin()
-    
-    return video_frame_times.loc[idx].to_dict()
-
-
-def get_frames_for_trial(video_frame_times, trial_row, padding_sec=0.0):
-    """
-    Get all video frames for a trial (with optional padding).
-    
-    Parameters:
-    -----------
-    video_frame_times : pd.DataFrame
-        Output from get_video_frame_times()
-    trial_row : dict or pd.Series
-        Trial data containing 'sequence_start' and 'sequence_end'
-    padding_sec : float
-        Seconds to add before/after trial times
-    
-    Returns:
-    --------
-    pd.DataFrame of frames within the trial window
-    """
-    start_time = trial_row.get('sequence_start')
-    end_time = trial_row.get('sequence_end')
-    
-    if start_time is None or end_time is None:
-        return pd.DataFrame()
-    
-    # Add padding
-    if padding_sec > 0:
-        start_time = start_time - pd.Timedelta(seconds=padding_sec)
-        end_time = end_time + pd.Timedelta(seconds=padding_sec)
-    
-    # Filter frames in time window
-    mask = (video_frame_times['time'] >= start_time) & (video_frame_times['time'] <= end_time)
-    return video_frame_times[mask].copy()
-
-
-def add_timestamps_to_tracking_simple(csv_path, root, save_output=True, output_suffix='_with_timestamps'):
-    """
-    Add synchronized timestamps to ezTrack location tracking CSV.
-    
-    Parameters:
-    -----------
-    csv_path : str or Path
-        Path to the ezTrack output CSV file
-    root : Path or experiment object
-        Root directory or experiment object for load_all_streams
-    save_output : bool, optional
-        If True, saves the timestamped CSV to a new file (default: True)
-    output_suffix : str, optional
-        Suffix to add to output filename (default: '_with_timestamps')
-    
-    Returns:
-    --------
-    pd.DataFrame : Tracking data with added columns:
-        - 'time': synchronized timestamp (tz-aware Europe/London)
-        - 'global_frame': frame index across all videos in session
-        - 'video_file': video filename
-    """
-    from pathlib import Path
-    
-    # Load tracking CSV
-    tracking_df = pd.read_csv(csv_path)
-    
-    # Get video filename from CSV
-    if 'File' in tracking_df.columns:
-        video_file = tracking_df['File'].iloc[0]
-    else:
-        # Infer from CSV filename
-        csv_name = Path(csv_path).stem
-        if '_LocationOutput' in csv_name:
-            video_file = csv_name.replace('_LocationOutput', '.avi')
-        else:
-            raise ValueError("Cannot determine video file from CSV")
-    
-    # Get all video frame times for this session
-    frame_times = get_video_frame_times(root, verbose=False)
-    
-    if frame_times.empty:
-        raise ValueError("No video metadata found for this session")
-    
-    # Filter for this specific video file
-    video_frames = frame_times[frame_times['video_file'] == video_file].copy()
-    
-    if video_frames.empty:
-        raise ValueError(f"Video file '{video_file}' not found in video metadata")
-    
-    # Validate frame count
-    if len(tracking_df) != len(video_frames):
-        print(f"Warning: Frame count mismatch!")
-        print(f"  Tracking CSV: {len(tracking_df)}")
-        print(f"  Video data:   {len(video_frames)}")
-        print(f"  Proceeding with merge, but some frames may not have timestamps")
-    
-    # Merge tracking data with timestamps
-    # Match on local frame index
-    result = tracking_df.merge(
-        video_frames[['local_frame', 'time', 'frame', 'video_file']],
-        left_on='Frame',
-        right_on='local_frame',
-        how='left'
-    )
-    
-    # Rename 'frame' to 'global_frame' for clarity
-    if 'frame' in result.columns:
-        result = result.rename(columns={'frame': 'global_frame'})
-    
-    # Drop redundant 'local_frame' column (same as 'Frame')
-    if 'local_frame' in result.columns:
-        result = result.drop(columns=['local_frame'])
-    
-    # Reorder columns to put time info near the front
-    cols = result.columns.tolist()
-    time_cols = ['Frame', 'time', 'global_frame', 'video_file']
-    other_cols = [c for c in cols if c not in time_cols]
-    result = result[time_cols + other_cols]
-    
-    # Save output if requested
-    if save_output:
-        output_path = Path(csv_path).parent / f"{Path(csv_path).stem}{output_suffix}.csv"
-        result.to_csv(output_path, index=False)
-        print(f"Saved timestamped tracking data to: {output_path}")
-    
-    print(f"Added timestamps to {len(result)} tracking frames")
-    print(f"Time range: {result['time'].min()} to {result['time'].max()}")
-    
-    return result
-
-
-def add_timestamps_to_tracking(subjid, date, save_output=True, output_suffix='_with_timestamps'):
-    """
-    Add synchronized timestamps to all ezTrack location tracking CSVs for a session.
-    Automatically finds all tracking files and combines them in temporal order.
+    Add synchronized timestamps to all SLEAP tracking CSVs for a session.
+    Combines sleap_tracking_videox.csv files in temporal order.
+    Works even if only some videos have been processed with SLEAP.
     
     Parameters:
     -----------
     subjid : int
         Subject ID
     date : int or str
-        Session date (e.g., 20251017)
+        Session date (e.g., 20251027)
     save_output : bool, optional
         If True, saves the combined timestamped CSV (default: True)
-    output_suffix : str, optional
-        Suffix to add to output filename (default: '_with_timestamps')
     
     Returns:
     --------
-    pd.DataFrame : Combined tracking data from all videos with added columns:
+    pd.DataFrame : Combined SLEAP tracking data from all videos with added columns:
         - 'time': synchronized timestamp (tz-aware Europe/London)
         - 'global_frame': frame index across all videos in session
         - 'video_file': video filename
     """
-    
+    import re
     # Build path to derivatives directory
     base_path = Path(project_root) / "data" / "rawdata"
     derivatives_dir = base_path.resolve().parent / "derivatives"
@@ -1186,89 +1075,150 @@ def add_timestamps_to_tracking(subjid, date, save_output=True, output_suffix='_w
         raise FileNotFoundError(f"No session found for date {date_str}")
     session_dir = session_dirs[0]
     
-    # Find all LocationOutput CSV files (exclude macOS metadata files)
+    # Find all sleap_tracking_videox.csv files
     results_dir = session_dir / "saved_analysis_results"
     if not results_dir.exists():
         raise FileNotFoundError(f"Results directory not found: {results_dir}")
     
-    tracking_csvs = [f for f in sorted(results_dir.glob("*_LocationOutput.csv")) 
-                     if not f.name.startswith('._')]
+    tracking_csvs = sorted([f for f in results_dir.glob("sleap_tracking_video*.csv") 
+                           if not f.name.startswith('._')])
     if not tracking_csvs:
-        raise FileNotFoundError(f"No LocationOutput CSV files found in {results_dir}")
+        raise FileNotFoundError(f"No sleap_tracking_videox.csv files found in {results_dir}")
     
-    print(f"Found {len(tracking_csvs)} tracking file(s)")
+    print(f"Found {len(tracking_csvs)} SLEAP tracking file(s)")
     
-    # Step 1: Load ALL experiment folders and get video frame times
+    # Step 1: Find behavior directory and experiment folders
+    behav_dirs = list(base_path.glob(f"{sub_str}_id-*/{Path(session_dirs[0]).name}/behav"))
+    if not behav_dirs:
+        raise FileNotFoundError(f"Behavior directory not found")
+    behav_dir = behav_dirs[0]
+    
+    # Find all experiment folders (numbered time-stamped directories)
+    exp_folders = sorted([d for d in behav_dir.iterdir() 
+                         if d.is_dir() and re.match(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', d.name)])
+    
+    if not exp_folders:
+        raise FileNotFoundError(f"No experiment folders found in {behav_dir}")
+    
+    print(f"Found {len(exp_folders)} experiment folder(s) with {len(exp_folders)} video file(s) total")
+    
+    # Step 2: Load video frame times from each experiment
     all_frame_times = []
-    exp_index = 0
-    while True:
+    for exp_idx, exp_folder in enumerate(exp_folders):
         try:
-            root = load_experiment(subjid, date, index=exp_index)
-            frame_times = get_video_frame_times(root, verbose=False)
+            frame_times = get_video_frame_times(exp_folder, verbose=False)
             if not frame_times.empty:
                 all_frame_times.append(frame_times)
-            exp_index += 1
-        except (FileNotFoundError, IndexError):
-            break
+                print(f"  Loaded {len(frame_times)} frames from experiment {exp_idx}")
+        except Exception as e:
+            print(f"  Warning: Could not load experiment {exp_idx}: {e}")
+            continue
     
     if not all_frame_times:
         raise ValueError("No video metadata found for this session")
     
-    # Step 2: Combine and sort all video frame times
+    # Step 3: Combine and sort all video frame times
     combined_frame_times = pd.concat(all_frame_times, ignore_index=True)
     combined_frame_times = combined_frame_times.sort_values('time').reset_index(drop=True)
-    combined_frame_times['frame'] = range(len(combined_frame_times))
+    combined_frame_times['global_frame'] = range(len(combined_frame_times))
     
-    print(f"Loaded {len(combined_frame_times):,} frames from {combined_frame_times['video_file'].nunique()} video file(s)")
+    print(f"Total: {len(combined_frame_times):,} frames from {combined_frame_times['video_file'].nunique()} video file(s)")
     
-    # Step 3: Add timestamps to each tracking CSV
-    all_tracking = []
+    # Step 4: Determine which videos have SLEAP data
+    # by inspecting frame ranges in SLEAP CSVs
+    sleap_video_mapping = {}  # maps video_file name to list of SLEAP CSVs
+    
     for csv_path in tracking_csvs:
-        # Load tracking CSV
         try:
             tracking_df = pd.read_csv(csv_path, encoding='utf-8')
         except UnicodeDecodeError:
             tracking_df = pd.read_csv(csv_path, encoding='latin1')
         
-        # Get video filename
-        video_file = tracking_df['File'].iloc[0] if 'File' in tracking_df.columns else \
-                     csv_path.stem.replace('_LocationOutput', '.avi')
+        # Get frame range from this SLEAP file
+        sleap_min_frame = tracking_df['frame'].min()
+        sleap_max_frame = tracking_df['frame'].max()
+        sleap_frame_span = sleap_max_frame - sleap_min_frame
         
-        # Match to video metadata
-        video_frames = combined_frame_times[combined_frame_times['video_file'] == video_file].copy()
-        if video_frames.empty:
-            print(f"Warning: {csv_path.name} - video '{video_file}' not found, skipping")
-            continue
+        # Find which video this frame range belongs to by best match
+        best_match = None
+        best_overlap = 0
         
-        # Merge tracking with timestamps
-        result = tracking_df.merge(
-            video_frames[['local_frame', 'time', 'frame', 'video_file']],
-            left_on='Frame',
-            right_on='local_frame',
-            how='left'
-        ).drop(columns=['local_frame']).rename(columns={'frame': 'global_frame'})
+        for video_file in combined_frame_times['video_file'].unique():
+            video_frame_times = combined_frame_times[combined_frame_times['video_file'] == video_file]
+            video_min_local = video_frame_times['local_frame'].min()
+            video_max_local = video_frame_times['local_frame'].max()
+            
+            # Calculate overlap between SLEAP range and video range
+            overlap_start = max(sleap_min_frame, video_min_local)
+            overlap_end = min(sleap_max_frame, video_max_local)
+            overlap = max(0, overlap_end - overlap_start)
+            
+            # Pick video with maximum overlap
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_match = video_file
         
-        all_tracking.append(result)
+        if best_match and best_overlap > 0:
+            if best_match not in sleap_video_mapping:
+                sleap_video_mapping[best_match] = []
+            sleap_video_mapping[best_match].append(csv_path)
+            print(f"Matched {csv_path.name} to video {best_match} (frames {sleap_min_frame}-{sleap_max_frame}, overlap: {best_overlap:.0f})")
+        else:
+            print(f"Warning: Could not match {csv_path.name} to any video (frames {sleap_min_frame}-{sleap_max_frame})")
+    
+    # Step 5: Add timestamps to each SLEAP tracking CSV
+    all_tracking = []
+    for video_file, csv_list in sleap_video_mapping.items():
+        for csv_path in csv_list:
+            try:
+                tracking_df = pd.read_csv(csv_path, encoding='utf-8')
+            except UnicodeDecodeError:
+                tracking_df = pd.read_csv(csv_path, encoding='latin1')
+            
+            # Get frame times for this video
+            video_frames = combined_frame_times[combined_frame_times['video_file'] == video_file].copy()
+            if video_frames.empty:
+                print(f"Warning: Video '{video_file}' not found in frame times, skipping {csv_path.name}")
+                continue
+            
+            print(f"Processing {csv_path.name} with {len(tracking_df)} frames")
+            
+            # Merge to add timestamps - only for frames present in the SLEAP CSV
+            result = tracking_df.merge(
+                video_frames[['local_frame', 'time', 'global_frame']],
+                left_on='frame',
+                right_on='local_frame',
+                how='left'
+            ).drop(columns=['local_frame'], errors='ignore')
+            
+            result['video_file'] = video_file
+            
+            all_tracking.append(result)
     
     if not all_tracking:
-        raise ValueError("No tracking data could be matched to video metadata")
+        raise ValueError("No SLEAP tracking data could be matched to video metadata")
     
-    # Step 4: Combine and sort all tracking data by time
+    # Step 6: Combine and sort all tracking data by time
     combined = pd.concat(all_tracking, ignore_index=True)
     combined = combined.sort_values('time').reset_index(drop=True)
     
-    # Reorder columns
-    time_cols = ['Frame', 'time', 'global_frame', 'video_file']
-    other_cols = [c for c in combined.columns if c not in time_cols]
-    combined = combined[time_cols + other_cols]
+    # Reorder columns - put frame/time/video info first
+    priority_cols = ['frame', 'time', 'global_frame', 'video_file', 'instance']
+    other_cols = [c for c in combined.columns if c not in priority_cols]
+    priority_cols = [c for c in priority_cols if c in combined.columns]
+    combined = combined[priority_cols + other_cols]
     
     # Save output
     if save_output:
-        output_path = results_dir / f"sub-{str(subjid).zfill(3)}_ses-{date_str}_combined_tracking{output_suffix}.csv"
+        output_filename = f"sub-{str(subjid).zfill(3)}_ses-{date_str}_combined_sleap_tracking_timestamps.csv"
+        output_path = results_dir / output_filename
         combined.to_csv(output_path, index=False)
-        print(f"Saved: {output_path}")
+        print(f"\nSaved: {output_path}")
     
-    duration = (combined['time'].max() - combined['time'].min()).total_seconds()
-    print(f"Combined: {len(combined):,} frames, {duration/60:.1f} minutes")
+    if 'time' in combined.columns and combined['time'].notna().any():
+        duration = (combined['time'].max() - combined['time'].min()).total_seconds()
+        print(f"Combined: {len(combined):,} frames, {duration/60:.1f} minutes")
+    else:
+        print(f"Combined: {len(combined):,} frames (timestamps could not be matched)")
     
     return combined

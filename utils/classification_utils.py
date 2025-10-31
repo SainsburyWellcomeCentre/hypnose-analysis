@@ -4635,7 +4635,7 @@ def cut_video(subjid, date, start_time, end_time, index=None, fps=30):
     Cut a video snippet for a subject and date, given start and end time (HH:MM:SS.s).
     Automatically finds the correct experiment folder whose video covers the requested time window.
     """
-    from classification_utils import load_all_streams
+    from utils.classification_utils import load_all_streams
     base_path = Path(project_root) / "data" / "rawdata"
     subjid_str = f"sub-{str(subjid).zfill(3)}"
     date_str = str(date)
@@ -4697,23 +4697,47 @@ def cut_video(subjid, date, start_time, end_time, index=None, fps=30):
     # Detect frame column
     frame_col = [c for c in frames_in_window.columns if 'frame' in c.lower()][0]
     frame_indices = frames_in_window[frame_col].tolist()
-    avi_files = sorted(video_dir.glob("*.avi"))
+    
+    # Filter out macOS resource fork files (files starting with ._)
+    avi_files = sorted([f for f in video_dir.glob("*.avi") if not f.name.startswith("._")])
+    
+    if not avi_files:
+        print("No valid AVI files found in video directory.")
+        return None
+    
     images = []
     for video_file in avi_files:
+        print(f"Attempting to read from: {video_file}")
         cap = cv2.VideoCapture(str(video_file))
+        
+        if not cap.isOpened():
+            print(f"Failed to open {video_file}")
+            continue
+            
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        print(f"Video has {total_frames} total frames, requesting frames: {frame_indices[0]} to {frame_indices[-1]}")
+        
         images = []
         for idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ret, frame = cap.read()
             if ret:
                 images.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            else:
+                print(f"Failed to read frame {idx}")
+        
         cap.release()
+        
         if images:
             print(f"Successfully read {len(images)} frames from {video_file}")
             break
+        else:
+            print(f"No frames could be read from {video_file}")
+    
     if not images:
         print("No frames extracted from any video file.")
         return None
+        
     # Output folder (derivatives/video_analysis)
     server_root = base_path.resolve().parent
     derivatives_dir = server_root / "derivatives" / subject_dir.name / session_dir.name / "video_analysis"
