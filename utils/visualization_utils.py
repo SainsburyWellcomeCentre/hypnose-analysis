@@ -1038,8 +1038,8 @@ def get_video_frame_times(root, verbose=True):
 def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     """
     Add synchronized timestamps to all SLEAP tracking CSVs for a session.
-    Combines sleap_tracking_videox.csv files in temporal order.
-    Works even if only some videos have been processed with SLEAP.
+    Matches sleap_tracking_videox.csv files to video files by index (1-indexed filename to 0-indexed video order).
+    Handles gaps in frame coverage and partial tracking.
     
     Parameters:
     -----------
@@ -1052,12 +1052,13 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     
     Returns:
     --------
-    pd.DataFrame : Combined SLEAP tracking data from all videos with added columns:
+    pd.DataFrame : Combined SLEAP tracking data with added columns:
         - 'time': synchronized timestamp (tz-aware Europe/London)
         - 'global_frame': frame index across all videos in session
         - 'video_file': video filename
     """
     import re
+    
     # Build path to derivatives directory
     base_path = Path(project_root) / "data" / "rawdata"
     derivatives_dir = base_path.resolve().parent / "derivatives"
@@ -1100,7 +1101,7 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     if not exp_folders:
         raise FileNotFoundError(f"No experiment folders found in {behav_dir}")
     
-    print(f"Found {len(exp_folders)} experiment folder(s) with {len(exp_folders)} video file(s) total")
+    print(f"Found {len(exp_folders)} experiment folder(s)")
     
     # Step 2: Load video frame times from each experiment
     all_frame_times = []
@@ -1124,83 +1125,78 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     
     print(f"Total: {len(combined_frame_times):,} frames from {combined_frame_times['video_file'].nunique()} video file(s)")
     
-    # Step 4: Determine which videos have SLEAP data
-    # by inspecting frame ranges in SLEAP CSVs
-    sleap_video_mapping = {}  # maps video_file name to list of SLEAP CSVs
+    # Get unique video files in order
+    video_files_ordered = combined_frame_times['video_file'].unique()
+    print(f"\nVideo files in order:")
+    for i, vf in enumerate(video_files_ordered):
+        print(f"  {i+1}. {vf}")
+    
+    # Step 4: Match SLEAP files to videos by index
+    # Extract video number from filename (sleap_tracking_video2.csv -> 2)
+    sleap_video_mapping = {}  # maps video_file to SLEAP CSV path
     
     for csv_path in tracking_csvs:
+        match = re.search(r'sleap_tracking_video(\d+)', csv_path.name)
+        if not match:
+            print(f"Warning: Could not extract video number from {csv_path.name}, skipping")
+            continue
+        
+        video_num = int(match.group(1))  # 1-indexed from filename
+        video_idx = video_num - 1  # Convert to 0-indexed
+        
+        if video_idx >= len(video_files_ordered):
+            print(f"Warning: {csv_path.name} references video {video_num}, but only {len(video_files_ordered)} video(s) exist")
+            continue
+        
+        video_file = video_files_ordered[video_idx]
+        sleap_video_mapping[video_file] = csv_path
+        print(f"Matched {csv_path.name} (video {video_num}) to {video_file}")
+    
+    if not sleap_video_mapping:
+        raise ValueError("No SLEAP files could be matched to videos")
+    
+    # Step 5: Add timestamps to each SLEAP tracking CSV
+    all_tracking = []
+    
+    for video_file, csv_path in sleap_video_mapping.items():
         try:
             tracking_df = pd.read_csv(csv_path, encoding='utf-8')
         except UnicodeDecodeError:
             tracking_df = pd.read_csv(csv_path, encoding='latin1')
         
-        # Get frame range from this SLEAP file
-        sleap_min_frame = tracking_df['frame'].min()
-        sleap_max_frame = tracking_df['frame'].max()
-        sleap_frame_span = sleap_max_frame - sleap_min_frame
+        # Get frame times for this specific video
+        video_frames = combined_frame_times[combined_frame_times['video_file'] == video_file].copy()
+        if video_frames.empty:
+            print(f"Warning: Video '{video_file}' not found in frame times, skipping {csv_path.name}")
+            continue
         
-        # Find which video this frame range belongs to by best match
-        best_match = None
-        best_overlap = 0
+        print(f"\nProcessing {csv_path.name}:")
+        print(f"  SLEAP frames: {tracking_df['frame'].min():.0f} - {tracking_df['frame'].max():.0f} ({len(tracking_df)} rows)")
+        print(f"  Video local frames: {video_frames['local_frame'].min():.0f} - {video_frames['local_frame'].max():.0f}")
         
-        for video_file in combined_frame_times['video_file'].unique():
-            video_frame_times = combined_frame_times[combined_frame_times['video_file'] == video_file]
-            video_min_local = video_frame_times['local_frame'].min()
-            video_max_local = video_frame_times['local_frame'].max()
-            
-            # Calculate overlap between SLEAP range and video range
-            overlap_start = max(sleap_min_frame, video_min_local)
-            overlap_end = min(sleap_max_frame, video_max_local)
-            overlap = max(0, overlap_end - overlap_start)
-            
-            # Pick video with maximum overlap
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_match = video_file
+        # Merge to add timestamps - match on 'frame' column (local frame index within video)
+        # Use left join to keep all SLEAP frames
+        result = tracking_df.merge(
+            video_frames[['local_frame', 'time', 'global_frame']],
+            left_on='frame',
+            right_on='local_frame',
+            how='left'
+        ).drop(columns=['local_frame'], errors='ignore')
         
-        if best_match and best_overlap > 0:
-            if best_match not in sleap_video_mapping:
-                sleap_video_mapping[best_match] = []
-            sleap_video_mapping[best_match].append(csv_path)
-            print(f"Matched {csv_path.name} to video {best_match} (frames {sleap_min_frame}-{sleap_max_frame}, overlap: {best_overlap:.0f})")
-        else:
-            print(f"Warning: Could not match {csv_path.name} to any video (frames {sleap_min_frame}-{sleap_max_frame})")
-    
-    # Step 5: Add timestamps to each SLEAP tracking CSV
-    all_tracking = []
-    for video_file, csv_list in sleap_video_mapping.items():
-        for csv_path in csv_list:
-            try:
-                tracking_df = pd.read_csv(csv_path, encoding='utf-8')
-            except UnicodeDecodeError:
-                tracking_df = pd.read_csv(csv_path, encoding='latin1')
-            
-            # Get frame times for this video
-            video_frames = combined_frame_times[combined_frame_times['video_file'] == video_file].copy()
-            if video_frames.empty:
-                print(f"Warning: Video '{video_file}' not found in frame times, skipping {csv_path.name}")
-                continue
-            
-            print(f"Processing {csv_path.name} with {len(tracking_df)} frames")
-            
-            # Merge to add timestamps - only for frames present in the SLEAP CSV
-            result = tracking_df.merge(
-                video_frames[['local_frame', 'time', 'global_frame']],
-                left_on='frame',
-                right_on='local_frame',
-                how='left'
-            ).drop(columns=['local_frame'], errors='ignore')
-            
-            result['video_file'] = video_file
-            
-            all_tracking.append(result)
+        result['video_file'] = video_file
+        
+        # Check how many frames got timestamps
+        matched_frames = result['time'].notna().sum()
+        print(f"  Matched {matched_frames}/{len(result)} frames to timestamps")
+        
+        all_tracking.append(result)
     
     if not all_tracking:
         raise ValueError("No SLEAP tracking data could be matched to video metadata")
     
     # Step 6: Combine and sort all tracking data by time
     combined = pd.concat(all_tracking, ignore_index=True)
-    combined = combined.sort_values('time').reset_index(drop=True)
+    combined = combined.sort_values('time', na_position='last').reset_index(drop=True)
     
     # Reorder columns - put frame/time/video info first
     priority_cols = ['frame', 'time', 'global_frame', 'video_file', 'instance']
@@ -1218,7 +1214,9 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     if 'time' in combined.columns and combined['time'].notna().any():
         duration = (combined['time'].max() - combined['time'].min()).total_seconds()
         print(f"Combined: {len(combined):,} frames, {duration/60:.1f} minutes")
+        print(f"  Frames with timestamps: {combined['time'].notna().sum()}")
+        print(f"  Frames without timestamps (gaps): {combined['time'].isna().sum()}")
     else:
-        print(f"Combined: {len(combined):,} frames (timestamps could not be matched)")
+        print(f"Combined: {len(combined):,} frames (no timestamps matched)")
     
     return combined
