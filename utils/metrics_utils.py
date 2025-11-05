@@ -158,6 +158,9 @@ def run_all_metrics(results, save_txt=True, save_json=True):
     with contextlib.redirect_stdout(buffer):
         print("\n--- Decision Accuracy ---")
         metrics['decision_accuracy'] = decision_accuracy(results)
+        print("\n--- Decision Accuracy by Odor ---")
+        accuracy_by_odor = decision_accuracy_by_odor(results)
+        metrics['decision_accuracy_by_odor'] = accuracy_by_odor.to_dict() if len(accuracy_by_odor) > 0 else {}
         print("\n--- Premature Response Rate ---")
         metrics['premature_response_rate'] = premature_response_rate(results)
         print("\n--- Response-Contingent False Alarm Rate ---")
@@ -528,7 +531,7 @@ def batch_run_all_metrics_with_merge(
 
     return results
 
-# ================== Behavioral Metrics Functions =================
+# ================== Behavioral Metrics Functions =================================================================================================================================
 
 def decision_accuracy(results):
     comp_rew = results.get("completed_sequence_rewarded", pd.DataFrame())
@@ -539,9 +542,72 @@ def decision_accuracy(results):
     print(f"Decision Accuracy: {n_rew}/{denom} = {n_rew/denom if denom>0 else np.nan:.3f}")
     return n_rew, denom, n_rew / denom if denom > 0 else np.nan
 
+def decision_accuracy_by_odor(results):
+    """
+    Calculate decision accuracy separately for each odor (A, B, etc.).
+    Decision accuracy = rewarded / (rewarded + unrewarded) for trials ending with that odor.
+    
+    Returns:
+    --------
+    pd.Series : Accuracy per odor (indexed by odor letter: 'A', 'B', etc.)
+    """
+    comp_rew = results.get("completed_sequence_rewarded", pd.DataFrame())
+    comp_unr = results.get("completed_sequence_unrewarded", pd.DataFrame())
+    
+    if comp_rew.empty and comp_unr.empty:
+        print("No completed trials found")
+        return pd.Series(dtype=float)
+    
+    # Extract just the odor letter from 'last_odor' (e.g., 'OdorA' -> 'A')
+    def extract_odor_letter(odor_str):
+        if pd.isna(odor_str):
+            return np.nan
+        # Handle both 'OdorA' format and plain 'A' format
+        if isinstance(odor_str, str) and odor_str.startswith('Odor'):
+            return odor_str.replace('Odor', '')
+        return odor_str
+    
+    # Add reward status and odor letter
+    if not comp_rew.empty:
+        comp_rew_copy = comp_rew.copy()
+        comp_rew_copy['reward_status'] = 'rewarded'
+        comp_rew_copy['odor_letter'] = comp_rew_copy['last_odor'].apply(extract_odor_letter)
+    else:
+        comp_rew_copy = pd.DataFrame()
+    
+    if not comp_unr.empty:
+        comp_unr_copy = comp_unr.copy()
+        comp_unr_copy['reward_status'] = 'unrewarded'
+        comp_unr_copy['odor_letter'] = comp_unr_copy['last_odor'].apply(extract_odor_letter)
+    else:
+        comp_unr_copy = pd.DataFrame()
+    
+    # Combine both
+    combined = pd.concat([comp_rew_copy, comp_unr_copy], ignore_index=True)
+    
+    if combined.empty:
+        print("No completed trials found")
+        return pd.Series(dtype=float)
+    
+    # Calculate accuracy per odor
+    accuracy_by_odor = {}
+    odors = sorted(combined['odor_letter'].dropna().unique())
+    
+    print("Decision Accuracy by Odor:")
+    for odor in odors:
+        odor_trials = combined[combined['odor_letter'] == odor]
+        n_rew = (odor_trials['reward_status'] == 'rewarded').sum()
+        n_unr = (odor_trials['reward_status'] == 'unrewarded').sum()
+        n_total = len(odor_trials)
+        acc = n_rew / n_total if n_total > 0 else np.nan
+        accuracy_by_odor[odor] = acc
+        print(f"  Odor {odor}: {n_rew} rewarded, {n_unr} unrewarded → {n_rew}/{n_total} = {acc:.3f}")
+    
+    return pd.Series(accuracy_by_odor).sort_index()
+
 def premature_response_rate(results):
     ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    n_fa = (ab_det["fa_label"] != "nFA").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
+    n_fa = (ab_det["fa_label"] == "FA_time_in").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
     n_total = len(ab_det)
     print(f"Premature Response Rate: {n_fa}/{n_total} = {n_fa/n_total if n_total>0 else np.nan:.3f}")
     return n_fa, n_total, n_fa / n_total if n_total > 0 else np.nan
@@ -550,7 +616,7 @@ def response_contingent_FA_rate(results):
     ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
     comp_rew = results.get("completed_sequence_rewarded", pd.DataFrame())
     comp_unr = results.get("completed_sequence_unrewarded", pd.DataFrame())
-    n_fa = (ab_det["fa_label"] != "nFA").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
+    n_fa = (ab_det["fa_label"] == "FA_time_in").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
     denom = n_fa + len(comp_rew) + len(comp_unr)
     print(f"Response-Contingent False Alarm Rate: {n_fa}/{denom} = {n_fa/denom if denom>0 else np.nan:.3f}")
     return n_fa, denom, n_fa / denom if denom > 0 else np.nan
@@ -558,7 +624,7 @@ def response_contingent_FA_rate(results):
 def global_FA_rate(results):
     ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
     ini = results.get("initiated_sequences", pd.DataFrame())
-    n_fa = (ab_det["fa_label"] != "nFA").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
+    n_fa = (ab_det["fa_label"] == "FA_time_in").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
     n_ini = len(ini)
     print(f"Global False Alarm Rate: {n_fa}/{n_ini} = {n_fa/n_ini if n_ini>0 else np.nan:.3f}")
     return n_fa, n_ini, n_fa / n_ini if n_ini > 0 else np.nan
@@ -887,7 +953,7 @@ def non_initiated_FA_rate(results):
     fa_noninit_df = results.get("non_initiated_FA", pd.DataFrame())
     if fa_noninit_df.empty or "fa_label" not in fa_noninit_df.columns:
         return np.nan
-    n_fa = (fa_noninit_df["fa_label"] != "nFA").sum()
+    n_fa = (fa_noninit_df["fa_label"] == "FA_time_in").sum()
     print(f"Non-Initiated FA Rate: {n_fa}/{len(fa_noninit_df)} = {n_fa/len(fa_noninit_df) if len(fa_noninit_df)>0 else np.nan:.3f}")
     return n_fa, len(fa_noninit_df), n_fa / len(fa_noninit_df) if len(fa_noninit_df) > 0 else np.nan
 
@@ -1331,3 +1397,680 @@ def plot_behavior_metrics(
         figs.append(fig)
 
     return figs
+
+
+
+
+
+
+# ================================= Extra Plotting, might be preliminary ==================================
+
+def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_path=None):
+    """
+    Plot decision accuracy by odor (A, B) and total over dates.
+    Fast version using pre-computed metrics with existing helper functions.
+    """
+    rows = []
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            
+            metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
+            if metrics is None:
+                continue
+            
+            # Extract DA by odor using the helper function
+            acc_by_odor = metrics.get('decision_accuracy_by_odor', {})
+            acc_total = _extract_metric_value(metrics, 'decision_accuracy')
+            
+            # Add odor-specific accuracies
+            for odor, acc in acc_by_odor.items():
+                if isinstance(acc, (int, float)) and not np.isnan(acc):
+                    rows.append({
+                        "date": int(date_str),
+                        "odor": str(odor),
+                        "accuracy": float(acc)
+                    })
+            
+            # Add total accuracy
+            if isinstance(acc_total, (int, float)) and not np.isnan(acc_total):
+                rows.append({
+                    "date": int(date_str),
+                    "odor": "Total",
+                    "accuracy": float(acc_total)
+                })
+    
+    if not rows:
+        print("No data found")
+        return None, None
+    
+    df = pd.DataFrame(rows)
+    unique_dates = sorted(df["date"].unique())
+    date_to_x = {d: i for i, d in enumerate(unique_dates)}
+    df["x"] = df["date"].map(date_to_x)
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    colors = {'A': '#FF6B6B', 'B': '#4ECDC4', 'Total': 'black'}
+    linewidths = {'A': 1.5, 'B': 1.5, 'Total': 3}
+    markers = {'A': 'o', 'B': 'o', 'Total': 's'}
+    
+    for odor in ['A', 'B', 'Total']:
+        subset = df[df["odor"] == odor]
+        if not subset.empty:
+            ax.plot(subset["x"].values, subset["accuracy"].values, 
+                   label=f'DA - {odor}',
+                   color=colors.get(odor, '#999999'),
+                   linewidth=linewidths.get(odor, 1.5),
+                   marker=markers.get(odor, 'o'),
+                   markersize=4 if odor != 'Total' else 6,
+                   alpha=0.7 if odor != 'Total' else 0.8,
+                   zorder=10 if odor == 'Total' else 1)
+    
+    ax.set_xlabel('Days', fontsize=12)
+    ax.set_ylabel('Decision Accuracy', fontsize=12)
+    ax.set_ylim([0, 1.05])
+    ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1, alpha=0.3)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=10)
+    ax.set_title(f"Subject {str(subjid).zfill(3)} - Decision Accuracy by Odor", fontsize=14, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
+    return fig, ax
+
+
+def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
+    """
+    Plot sampling times (poke durations) by position and by odor for completed and aborted trials.
+    Loads all data into a DataFrame first, then plots.
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    # Load all data into lists
+    rows = []
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            
+            try:
+                results = load_session_results(subjid, date_str)
+            except Exception:
+                continue
+            
+            # ============ COMPLETED TRIALS ============
+            comp = results.get("completed_sequences", pd.DataFrame())
+            if not comp.empty and "position_poke_times" in comp.columns:
+                for ppt in comp["position_poke_times"]:
+                    ppt_dict = parse_json_column(ppt)
+                    if isinstance(ppt_dict, dict):
+                        for pos_str, info in ppt_dict.items():
+                            if not isinstance(info, dict):
+                                continue
+                            poke_ms = info.get("poke_time_ms")
+                            odor = info.get("odor_name")
+                            
+                            if poke_ms is not None and isinstance(poke_ms, (int, float)) and poke_ms > 0:
+                                try:
+                                    rows.append({
+                                        "trial_type": "completed",
+                                        "position": int(pos_str),
+                                        "odor": str(odor) if odor else None,
+                                        "poke_time_ms": float(poke_ms)
+                                    })
+                                except (ValueError, TypeError):
+                                    continue
+            
+            # ============ ABORTED TRIALS ============
+            ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
+            if not ab_det.empty and "presentations" in ab_det.columns:
+                for presentations, last_event_idx in zip(ab_det["presentations"], ab_det.get("last_event_index", [None]*len(ab_det))):
+                    pres_list = parse_json_column(presentations)
+                    
+                    if isinstance(pres_list, list):
+                        for pres in pres_list:
+                            if not isinstance(pres, dict):
+                                continue
+                            
+                            idx = pres.get("index_in_trial")
+                            if idx == last_event_idx:
+                                continue
+                            
+                            poke_ms = pres.get("poke_time_ms")
+                            pos = pres.get("position")
+                            odor = pres.get("odor_name")
+                            
+                            if poke_ms is not None and isinstance(poke_ms, (int, float)) and poke_ms > 0:
+                                try:
+                                    rows.append({
+                                        "trial_type": "aborted",
+                                        "position": int(pos) if pos is not None else None,
+                                        "odor": str(odor) if odor else None,
+                                        "poke_time_ms": float(poke_ms)
+                                    })
+                                except (ValueError, TypeError):
+                                    continue
+    
+    if not rows:
+        print("No data found")
+        return None, None
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(rows)
+    
+    # Create figure
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    
+    # ============ PLOT 1: Completed by Position ============
+    ax = axes[0, 0]
+    df_comp_pos = df[(df["trial_type"] == "completed") & (df["position"].notna())].copy()
+    
+    if not df_comp_pos.empty:
+        positions = sorted(df_comp_pos["position"].unique())
+        
+        means = []
+        stds = []
+        
+        for pos in positions:
+            values = df_comp_pos[df_comp_pos["position"] == pos]["poke_time_ms"].values
+            
+            # Scatter with jitter
+            x_jitter = np.random.normal(pos, 0.04, size=len(values))
+            ax.scatter(x_jitter, values, alpha=0.4, s=20, color='steelblue')
+            
+            means.append(np.mean(values))
+            stds.append(np.std(values))
+        
+        # Mean points with error bars (no line)
+        ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(positions, means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(positions)
+    
+    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
+    ax.set_title(f'Completed Trials: Sampling Time by Position\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 2: Aborted by Position ============
+    ax = axes[0, 1]
+    df_abort_pos = df[(df["trial_type"] == "aborted") & (df["position"].notna())].copy()
+    
+    if not df_abort_pos.empty:
+        positions = sorted(df_abort_pos["position"].unique())
+        
+        means = []
+        stds = []
+        
+        for pos in positions:
+            values = df_abort_pos[df_abort_pos["position"] == pos]["poke_time_ms"].values
+            
+            # Scatter with jitter
+            x_jitter = np.random.normal(pos, 0.04, size=len(values))
+            ax.scatter(x_jitter, values, alpha=0.4, s=20, color='coral')
+            
+            means.append(np.mean(values))
+            stds.append(np.std(values))
+        
+        # Mean points with error bars (no line)
+        ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(positions, means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(positions)
+    
+    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
+    ax.set_title(f'Aborted Trials: Sampling Time by Position\n(excl. abort position)', 
+                fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 3: Completed by Odor ============
+    ax = axes[1, 0]
+    df_comp_odor = df[(df["trial_type"] == "completed") & (df["odor"].notna())].copy()
+    
+    if not df_comp_odor.empty:
+        odors = sorted(df_comp_odor["odor"].unique())
+        odor_to_x = {odor: i for i, odor in enumerate(odors)}
+        
+        means = []
+        stds = []
+        
+        for odor in odors:
+            values = df_comp_odor[df_comp_odor["odor"] == odor]["poke_time_ms"].values
+            x_pos = odor_to_x[odor]
+            
+            # Scatter with jitter
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(values))
+            ax.scatter(x_jitter, values, alpha=0.4, s=20, color='steelblue')
+            
+            means.append(np.mean(values))
+            stds.append(np.std(values))
+        
+        # Mean points with error bars (no line)
+        ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(range(len(odors)), means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(odors)))
+        ax.set_xticklabels(odors)
+    
+    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
+    ax.set_title(f'Completed Trials: Sampling Time by Odor\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 4: Aborted by Odor ============
+    ax = axes[1, 1]
+    df_abort_odor = df[(df["trial_type"] == "aborted") & (df["odor"].notna())].copy()
+    
+    if not df_abort_odor.empty:
+        odors = sorted(df_abort_odor["odor"].unique())
+        odor_to_x = {odor: i for i, odor in enumerate(odors)}
+        
+        means = []
+        stds = []
+        
+        for odor in odors:
+            values = df_abort_odor[df_abort_odor["odor"] == odor]["poke_time_ms"].values
+            x_pos = odor_to_x[odor]
+            
+            # Scatter with jitter
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(values))
+            ax.scatter(x_jitter, values, alpha=0.4, s=20, color='coral')
+            
+            means.append(np.mean(values))
+            stds.append(np.std(values))
+        
+        # Mean points with error bars (no line)
+        ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(range(len(odors)), means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(odors)))
+        ax.set_xticklabels(odors)
+    
+    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
+    ax.set_title(f'Aborted Trials: Sampling Time by Odor\n(excl. abort odor)', 
+                fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    plt.tight_layout()
+    return fig, axes
+
+
+def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
+    """
+    Plot FA rates and abortion rates by position and odor across sessions.
+    Uses pre-computed metrics from saved JSON files.
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    rows = []
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            
+            metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
+            if metrics is None:
+                continue
+            
+            # ============ FA RATES ============
+            fa_stats = metrics.get("fa_abortion_stats", {})
+
+            # FA rate per odor (FA Time In only)
+            fa_by_odor = fa_stats.get("by_odor", [])
+            if isinstance(fa_by_odor, list):
+                for item in fa_by_odor:
+                    if isinstance(item, dict) and "Odor" in item:
+                        odor = item["Odor"]
+                        total_ab = item.get("Total Abortions")
+                        fa_time_in_str = item.get("FA Time In", "")
+                        # Extract count from format like "5 (0.50)"
+                        if "(" in fa_time_in_str and total_ab is not None:
+                            try:
+                                fa_time_in_count = int(fa_time_in_str.split()[0])
+                                fa_ratio = fa_time_in_count / total_ab
+                                rows.append({
+                                    "date": int(date_str),
+                                    "metric_type": "fa_rate",
+                                    "category": "odor",
+                                    "position_or_odor": str(odor),
+                                    "rate": fa_ratio
+                                })
+                            except (ValueError, IndexError):
+                                continue
+
+            # FA rate per position (FA Time In only)
+            fa_by_position = fa_stats.get("by_position", [])
+            if isinstance(fa_by_position, list):
+                for item in fa_by_position:
+                    if isinstance(item, dict) and "Position" in item:
+                        pos = item["Position"]
+                        total_ab = item.get("Total Abortions")
+                        fa_time_in_str = item.get("FA Time In", "")
+                        # Extract count from format like "5 (0.50)"
+                        if "(" in fa_time_in_str and total_ab is not None:
+                            try:
+                                pos_int = int(pos)
+                                fa_time_in_count = int(fa_time_in_str.split()[0])
+                                fa_ratio = fa_time_in_count / total_ab
+                                rows.append({
+                                    "date": int(date_str),
+                                    "metric_type": "fa_rate",
+                                    "category": "position",
+                                    "position_or_odor": pos_int,
+                                    "rate": fa_ratio
+                                })
+                            except (ValueError, IndexError):
+                                continue
+            
+            # ============ ABORTION RATES ============
+            
+            # Abortion rate per position
+            ab_pos_data = metrics.get("abortion_rate_positionX", {})
+            if isinstance(ab_pos_data, dict):
+                for pos, rate in ab_pos_data.items():
+                    if rate is not None and isinstance(rate, (int, float)):
+                        try:
+                            rows.append({
+                                "date": int(date_str),
+                                "metric_type": "abortion_rate",
+                                "category": "position",
+                                "position_or_odor": int(pos),
+                                "rate": float(rate)
+                            })
+                        except (ValueError, TypeError):
+                            continue
+            
+            # Abortion rate per odor
+            ab_odor_data = metrics.get("odorx_abortion_rate", {})
+            if isinstance(ab_odor_data, dict):
+                for odor, rate in ab_odor_data.items():
+                    if rate is not None and isinstance(rate, (int, float)):
+                        rows.append({
+                            "date": int(date_str),
+                            "metric_type": "abortion_rate",
+                            "category": "odor",
+                            "position_or_odor": str(odor),
+                            "rate": float(rate)
+                        })
+    
+    if not rows:
+        print("No data found")
+        return None, None
+    
+    df = pd.DataFrame(rows)
+    
+    # Create figure
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    
+    # ============ PLOT 1: FA Rate per Position ============
+    ax = axes[0, 0]
+    df_fa_pos = df[(df["metric_type"] == "fa_rate") & (df["category"] == "position")].copy()
+    
+    if not df_fa_pos.empty:
+        positions = sorted(df_fa_pos["position_or_odor"].unique())
+        
+        for pos in positions:
+            rates = df_fa_pos[df_fa_pos["position_or_odor"] == pos]["rate"].values
+            x_jitter = np.random.normal(pos, 0.04, size=len(rates))
+            ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='steelblue')
+        
+        means = [df_fa_pos[df_fa_pos["position_or_odor"] == pos]["rate"].mean() for pos in positions]
+        stds = [df_fa_pos[df_fa_pos["position_or_odor"] == pos]["rate"].std() for pos in positions]
+        
+        ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(positions, means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(positions)
+    
+    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
+    ax.set_ylabel('FA Rate', fontsize=11, fontweight='bold')
+    ax.set_title(f'FA Rate per Position\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 2: FA Rate per Odor ============
+    ax = axes[0, 1]
+    df_fa_odor = df[(df["metric_type"] == "fa_rate") & (df["category"] == "odor")].copy()
+    
+    if not df_fa_odor.empty:
+        odors = sorted(df_fa_odor["position_or_odor"].unique())
+        odor_to_x = {odor: i for i, odor in enumerate(odors)}
+        
+        for odor in odors:
+            rates = df_fa_odor[df_fa_odor["position_or_odor"] == odor]["rate"].values
+            x_pos = odor_to_x[odor]
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(rates))
+            ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='steelblue')
+        
+        means = [df_fa_odor[df_fa_odor["position_or_odor"] == odor]["rate"].mean() for odor in odors]
+        stds = [df_fa_odor[df_fa_odor["position_or_odor"] == odor]["rate"].std() for odor in odors]
+        
+        ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(range(len(odors)), means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(odors)))
+        ax.set_xticklabels(odors)
+    
+    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
+    ax.set_ylabel('FA Rate', fontsize=11, fontweight='bold')
+    ax.set_title(f'FA Rate per Odor\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 3: Abortion Rate per Position ============
+    ax = axes[1, 0]
+    df_ab_pos = df[(df["metric_type"] == "abortion_rate") & (df["category"] == "position")].copy()
+    
+    if not df_ab_pos.empty:
+        positions = sorted(df_ab_pos["position_or_odor"].unique())
+        
+        for pos in positions:
+            rates = df_ab_pos[df_ab_pos["position_or_odor"] == pos]["rate"].values
+            x_jitter = np.random.normal(pos, 0.04, size=len(rates))
+            ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='coral')
+        
+        means = [df_ab_pos[df_ab_pos["position_or_odor"] == pos]["rate"].mean() for pos in positions]
+        stds = [df_ab_pos[df_ab_pos["position_or_odor"] == pos]["rate"].std() for pos in positions]
+        
+        ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(positions, means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(positions)
+    
+    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Abortion Rate', fontsize=11, fontweight='bold')
+    ax.set_title(f'Abortion Rate per Position\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 4: Abortion Rate per Odor ============
+    ax = axes[1, 1]
+    df_ab_odor = df[(df["metric_type"] == "abortion_rate") & (df["category"] == "odor")].copy()
+    
+    if not df_ab_odor.empty:
+        odors = sorted(df_ab_odor["position_or_odor"].unique())
+        odor_to_x = {odor: i for i, odor in enumerate(odors)}
+        
+        for odor in odors:
+            rates = df_ab_odor[df_ab_odor["position_or_odor"] == odor]["rate"].values
+            x_pos = odor_to_x[odor]
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(rates))
+            ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='coral')
+        
+        means = [df_ab_odor[df_ab_odor["position_or_odor"] == odor]["rate"].mean() for odor in odors]
+        stds = [df_ab_odor[df_ab_odor["position_or_odor"] == odor]["rate"].std() for odor in odors]
+        
+        ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(range(len(odors)), means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(odors)))
+        ax.set_xticklabels(odors)
+    
+    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Abortion Rate', fontsize=11, fontweight='bold')
+    ax.set_title(f'Abortion Rate per Odor\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    plt.tight_layout()
+    return fig, axes
+
+
+def plot_response_times_completed_vs_fa(subjid, dates=None, figsize=(12, 8), y_limit=20000):
+    """
+    Scatter plot comparing average response times for completed sequences vs FA Time In abortions.
+    Both metrics on the same plot sharing Y-axis for easy comparison.
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    dates : tuple, list, or None
+        Date or date range. If None, plots all available dates.
+    figsize : tuple, optional
+        Figure size (default: (12, 8))
+    y_limit : float, optional
+        Maximum Y-axis value to display (default: 20000). Points above this are excluded.
+    
+    Returns:
+    --------
+    fig, ax : matplotlib figure and axes
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    rows = []
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            
+            metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
+            if metrics is None:
+                continue
+            
+            # Get average response time for completed sequences
+            avg_resp_times = metrics.get("avg_response_time", {})
+            completed_rt = avg_resp_times.get("Average Response Time (Rewarded + Unrewarded)")
+            if completed_rt is not None and not np.isnan(completed_rt):
+                rows.append({
+                    "date": int(date_str),
+                    "response_type": "Completed Sequences",
+                    "response_time_ms": float(completed_rt)
+                })
+            
+            # Get average response time for FA Time In abortions
+            fa_resp_times = metrics.get("FA_avg_response_times", {})
+            fa_time_in_rt = fa_resp_times.get("Aborted FA Time In")
+            if fa_time_in_rt is not None and not np.isnan(fa_time_in_rt):
+                rows.append({
+                    "date": int(date_str),
+                    "response_type": "FA Time In Abortions",
+                    "response_time_ms": float(fa_time_in_rt)
+                })
+    
+    if not rows:
+        print("No data found")
+        return None, None
+    
+    df = pd.DataFrame(rows)
+    
+    # Filter by y_limit
+    df_filtered = df[df["response_time_ms"] <= y_limit].copy()
+    
+    if df_filtered.empty:
+        print(f"No data found below y_limit={y_limit}")
+        return None, None
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    response_types = ["Completed Sequences", "FA Time In Abortions"]
+    x_positions = [0, 1]
+    colors = ['steelblue', 'coral']
+    
+    for x_pos, resp_type, color in zip(x_positions, response_types, colors):
+        df_subset = df_filtered[df_filtered["response_type"] == resp_type].copy()
+        
+        if not df_subset.empty:
+            values = df_subset["response_time_ms"].values
+            
+            # Scatter with jitter
+            x_jitter = np.random.normal(x_pos, 0.08, size=len(values))
+            ax.scatter(x_jitter, values, alpha=0.4, s=80, color=color, zorder=3)
+            
+            # Calculate mean and std
+            mean_rt = values.mean()
+            std_rt = values.std()
+            
+            # Plot mean point with error bars
+            ax.scatter([x_pos], [mean_rt], color='darkred', s=150, zorder=5, marker='D',
+                      edgecolors='black', linewidth=2, label='Mean ± SD' if x_pos == 0 else "")
+            ax.errorbar([x_pos], [mean_rt], yerr=std_rt, fmt='none', ecolor='darkred',
+                       capsize=8, capthick=2, linewidth=2.5, zorder=4)
+    
+    ax.set_xlim([-0.5, 1.5])
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(response_types, fontsize=12, fontweight='bold')
+    ax.set_ylabel('Response Time (ms)', fontsize=12, fontweight='bold')
+    ax.set_ylim([0, y_limit])
+    ax.set_title(f'Average Response Times Comparison\n(Subject {str(subjid).zfill(3)})',
+                fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best', fontsize=11)
+    
+    plt.tight_layout()
+    return fig, ax
