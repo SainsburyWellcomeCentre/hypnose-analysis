@@ -1213,18 +1213,21 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     def window_poke_summary(window_start, window_end):
         if window_start is None or window_end is None or window_start >= window_end:
             return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+        
         s_bool = poke_series_full
-        # State at window start
         prev = s_bool.loc[:window_start]
         in_at_start = bool(prev.iloc[-1]) if len(prev) else False
         w = s_bool.loc[window_start:window_end]
+        
         if w.empty and not in_at_start:
             return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+        
         rises = w & ~w.shift(1, fill_value=in_at_start)
         falls = ~w & w.shift(1, fill_value=in_at_start)
         intervals = []
         cur = window_start if in_at_start else None
         first_in = window_start if in_at_start else None
+        
         for ts in w.index:
             if rises.get(ts, False) and cur is None:
                 cur = ts
@@ -1233,21 +1236,34 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             if falls.get(ts, False) and cur is not None:
                 intervals.append((cur, ts))
                 cur = None
+        
         if cur is not None:
             intervals.append((cur, window_end))
+        
         if not intervals:
             return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
-        # Merge across gaps ≤ sample_offset_time_ms
+        
+        # Merge across gaps <= sample_offset_time_ms
         merged = [intervals[0]]
         for s2, e2 in intervals[1:]:
             ls, le = merged[-1]
             gap_ms = (s2 - le).total_seconds() * 1000.0
             if gap_ms <= sample_offset_time_ms:
-                merged[-1] = (ls, max(le, e2))
+                # Extend but cap at window_end
+                merged[-1] = (ls, min(max(le, e2), window_end))
             else:
                 merged.append((s2, e2))
-        first_block_ms = (merged[0][1] - merged[0][0]).total_seconds() * 1000.0
-        return {'poke_time_ms': float(first_block_ms), 'poke_first_in': first_in, 'poke_odor_start': window_start}
+        
+        # Extract first block and cap at window_end
+        first_block_start, first_block_end = merged[0]
+        first_block_end_capped = min(first_block_end, window_end)
+        first_block_ms = max(0.0, (first_block_end_capped - first_block_start).total_seconds() * 1000.0)
+        
+        return {
+            'poke_time_ms': float(first_block_ms),
+            'poke_first_in': first_in,
+            'poke_odor_start': window_start
+        }
 
     
     def _attempt_bout_from_poke_in(anchor_ts, cap_end=None):
@@ -1282,6 +1298,9 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         m = k
         while m - 1 >= 0:
             prev_start, prev_end = poke_intervals[m - 1]
+            if cap_end is not None and prev_start < cap_end:
+                # Don't merge intervals that start before cap_end
+                break
             gap_ms = (bout_start - prev_end).total_seconds() * 1000.0
             if gap_ms <= sample_offset_time_ms:
                 bout_start = prev_start
@@ -1298,7 +1317,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 break
             gap_ms = (next_start - cur_end).total_seconds() * 1000.0
             if gap_ms <= sample_offset_time_ms:
-                cur_end = max(cur_end, next_end)
+                cur_end = max(cur_end, min(next_end, cap_end))
                 n += 1
             else:
                 break
@@ -1327,7 +1346,9 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 else:
                     break
             if first_odor_activations:
+                # Position 1 = LAST activation of first odor
                 position_locations[1] = first_odor_activations[-1]
+                # Earlier activations are prior_presentations (failed attempts)
                 prior_presentations = [
                     {
                         'position': 1,
@@ -1337,45 +1358,23 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                     }
                     for e in first_odor_activations[:-1]
                 ]
-            else:
-                prior_presentations = []
-        else:
-            prior_presentations = []
 
-        # Group consecutive events for positions 2-5
-        grouped = []
-        current_valve = None
-        current_start_time = None
-        current_end_time = None
-        current_odor_name = None
-
-        for event in trial_valve_events:
-            if event['valve_key'] != current_valve:
-                if current_valve is not None:
-                    grouped.append({
-                        'valve_key': current_valve,
-                        'odor_name': current_odor_name,
-                        'start_time': current_start_time,
-                        'end_time': current_end_time
-                    })
-                current_valve = event['valve_key']
-                current_odor_name = event['odor_name']
-                current_start_time = event['start_time']
-                current_end_time = event['end_time']
-            else:
-                current_end_time = event['end_time']
-
-        if current_valve is not None:
-            grouped.append({
-                'valve_key': current_valve,
-                'odor_name': current_odor_name,
-                'start_time': current_start_time,
-                'end_time': current_end_time
-            })
-
-        for i, presentation in enumerate(grouped[1:], 2):
-            if i <= 5:
-                position_locations[i] = presentation
+        # Positions 2-5: Keep ONLY the LAST occurrence of each new odor
+        # (Don't merge consecutive events with same valve_key, just track the last one)
+        odor_to_pos = {}
+        next_pos = 2
+        
+        for event in trial_valve_events[len(first_odor_activations if trial_valve_events else []):]:
+            odor = event['odor_name']
+            
+            # If we haven't seen this odor yet, assign it a position
+            if odor not in odor_to_pos and next_pos <= 5:
+                odor_to_pos[odor] = next_pos
+                next_pos += 1
+            
+            # If this odor has a position, track it (will be overwritten by later occurrences)
+            if odor in odor_to_pos:
+                position_locations[odor_to_pos[odor]] = event
 
         # Valve timing per position
         for position in range(1, 6):
@@ -1396,7 +1395,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 entry['prior_presentations'] = prior_presentations
             position_valve_times[position] = entry 
 
-        # Poke-time analysis positions
+        # Poke-time analysis: use ONLY the LAST valve event per position
         poke_position_locations = dict(position_locations)
 
         s_bool = poke_data.astype(bool)
@@ -1515,7 +1514,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         for attempt in pos1_info.get('prior_presentations', []) or []:
             a_start = attempt.get('valve_start')   # attempt valve start (for reference)
             # Cap at the last Pos1 valve START (trial starts at last odor 1 opening)
-            first_in, bout_end, dur_ms = _attempt_bout_from_poke_in(anchor_ts=a_start, cap_end=last_pos1_start)
+            last_pos1_valve_end = pos1_info.get('valve_end')  # The valve CLOSE time
+            first_in, bout_end, dur_ms = _attempt_bout_from_poke_in(anchor_ts=a_start, cap_end=last_pos1_valve_end)
             non_initiated_odor1_attempts.append({
                 'trial_id': trial['trial_id'] if 'trial_id' in trial else None,
                 'attempt_start': a_start,
@@ -2359,6 +2359,15 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
          'abortion_time','fa_label','fa_time','fa_latency_ms']
     """
 
+    DIP0 = data['digital_input_data'].get('DIPort0', pd.Series(dtype=bool)).astype(bool)
+    DIP1 = data['digital_input_data'].get('DIPort1', pd.Series(dtype=bool)).astype(bool)
+    DIP2 = data['digital_input_data'].get('DIPort2', pd.Series(dtype=bool)).astype(bool)
+    
+    # NOW use them
+    dip1_rises = DIP1[DIP1 & ~DIP1.shift(1, fill_value=False)].index.tolist()
+    dip2_rises = DIP2[DIP2 & ~DIP2.shift(1, fill_value=False)].index.tolist()
+    reward_rises = sorted(dip1_rises + dip2_rises)
+
     # Parameters
     sample_offset_time, minimum_sampling_time, response_time = get_experiment_parameters(root)
     sample_offset_time_ms = float(sample_offset_time) * 1000.0
@@ -2678,6 +2687,7 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
         fa_label = 'nFA'
         fa_time = pd.NaT
         fa_latency_ms = np.nan
+        fa_port = None 
 
         if abortion_time is not None:
             # Find next initiation after t_end
@@ -2708,12 +2718,20 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
                 if lo < hi:
                     fa_time = reward_rises[lo]
                     fa_latency_ms = (fa_time - abortion_time).total_seconds() * 1000.0
+                    
+                    # Determine which port the FA poke came from ← NEW
+                    if fa_time in dip1_rises:
+                        fa_port = 1
+                    elif fa_time in dip2_rises:
+                        fa_port = 2
+                    
                     if fa_latency_ms <= response_time_ms:
                         fa_label = 'FA_time_in'
                     elif fa_latency_ms <= 3.0 * response_time_ms:
                         fa_label = 'FA_time_out'
                     else:
                         fa_label = 'FA_late'
+
 
         rows.append({
             'trial_id': trial_id,
@@ -2733,6 +2751,7 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
             'fa_label': fa_label,
             'fa_time': fa_time,
             'fa_latency_ms': float(fa_latency_ms) if pd.notna(fa_latency_ms) else np.nan,
+            'fa_port': fa_port, 
         })
 
     aborted_detailed = pd.DataFrame(rows)
@@ -3003,15 +3022,15 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
     return aborted_detailed
 
 def classify_noninitiated_FA(noninit_df, DIP0, DIP1, DIP2, response_time, hr_odors=None):
-    """
-    For each non-initiated sequence, check for FA events after poke-out until next cue port poke-in.
-    Returns a DataFrame with FA classification and HR status.
-    """
+    """Classify False Alarms in non-initiated trials"""
+    
     results = []
-    reward_rises = sorted(
-        list(DIP1[DIP1 & ~DIP1.shift(1, fill_value=False)].index) +
-        list(DIP2[DIP2 & ~DIP2.shift(1, fill_value=False)].index)
-    )
+    
+    # Get port rises
+    dip1_rises = DIP1[DIP1 & ~DIP1.shift(1, fill_value=False)].index.tolist()
+    dip2_rises = DIP2[DIP2 & ~DIP2.shift(1, fill_value=False)].index.tolist()
+    reward_rises = sorted(dip1_rises + dip2_rises)
+    
     cue_rises = list(DIP0[DIP0 & ~DIP0.shift(1, fill_value=False)].index)
     response_time_ms = float(response_time) * 1000.0
 
@@ -3019,6 +3038,7 @@ def classify_noninitiated_FA(noninit_df, DIP0, DIP1, DIP2, response_time, hr_odo
         attempt_end = row.get('attempt_end')
         if pd.isna(attempt_end):
             continue
+            
         # Find next cue port poke-in after attempt_end
         next_cue_in = None
         cue_after = [t for t in cue_rises if t > attempt_end]
@@ -3031,10 +3051,19 @@ def classify_noninitiated_FA(noninit_df, DIP0, DIP1, DIP2, response_time, hr_odo
         fa_label = 'nFA'
         fa_time = pd.NaT
         fa_latency_ms = np.nan
+        fa_port = None  # ← NEW
+        
         reward_after = [t for t in reward_rises if attempt_end < t <= next_cue_in]
         if reward_after:
             fa_time = reward_after[0]
             fa_latency_ms = (fa_time - attempt_end).total_seconds() * 1000.0
+            
+            # Determine which port ← NEW
+            if fa_time in dip1_rises:
+                fa_port = 1
+            elif fa_time in dip2_rises:
+                fa_port = 2
+            
             if fa_latency_ms <= response_time_ms:
                 fa_label = 'FA_time_in'
             elif fa_latency_ms <= 3.0 * response_time_ms:
@@ -3049,12 +3078,14 @@ def classify_noninitiated_FA(noninit_df, DIP0, DIP1, DIP2, response_time, hr_odo
             is_hr = odor_name in hr_odors
 
         results.append({
-            **row,
+            **row.to_dict(),
             'fa_label': fa_label,
             'fa_time': fa_time,
             'fa_latency_ms': fa_latency_ms,
+            'fa_port': fa_port,  # ← NEW
             'is_hr': is_hr
         })
+        
     return pd.DataFrame(results)
 
 def build_classification_index(classification: dict) -> dict: # Classification function for easier dictionary access later on
@@ -3680,6 +3711,14 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
         'non_initiated_FA',
     ]
 
+    def _normalize_trial_id(s):
+        if pd.isna(s):
+            return None
+        try:
+            return int(s)
+        except (ValueError, TypeError):
+            return s
+    
     merged: dict = {}
     # Concatenate tables
     for key in preferred_tables:
@@ -3690,7 +3729,7 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
                 df2 = _with_run_id(df, ridx)
                 # Normalize known ID columns to int-like (but don't force if incompatible)
                 if 'trial_id' in df2.columns:
-                    df2['trial_id'] = _coerce_int_like(df2['trial_id'])
+                    df2['trial_id'] = df2['trial_id'].apply(_normalize_trial_id)
                 parts.append(df2)
         merged[key] = pd.concat(parts, axis=0, ignore_index=True, sort=False) if parts else pd.DataFrame()
 
