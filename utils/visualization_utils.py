@@ -1220,3 +1220,245 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
         print(f"Combined: {len(combined):,} frames (no timestamps matched)")
     
     return combined
+
+
+
+
+def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_suffix="sleap_visualization", 
+                                          centroid_radius=8, centroid_color='red', show_fps_counter=True,
+                                          show_timestamp=True, show_trial_state=True):
+    """
+    Annotate behavior videos with SLEAP centroid tracking and trial state overlays.
+    
+    Creates MP4 videos with:
+    - Red dot at animal centroid position (from SLEAP tracking)
+    - Frame counter (bottom right)
+    - Synchronized timestamp from video metadata (bottom left)
+    - Trial state indicator: "WITHIN TRIAL" (white) or "OUTSIDE TRIAL" (blue)
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    date : int or str
+        Session date (e.g., 20251029)
+    base_dir : str or Path, optional
+        Base data directory (default: /Volumes/harris/hypnose)
+    output_suffix : str, optional
+        Suffix for output files (default: "sleap_visualization")
+    centroid_radius : int, optional
+        Radius of centroid marker in pixels (default: 8)
+    centroid_color : str, optional
+        Color of centroid marker (default: 'red')
+    show_fps_counter : bool, optional
+        Show frame counter (default: True)
+    show_timestamp : bool, optional
+        Show synchronized timestamp (default: True)
+    show_trial_state : bool, optional
+        Show trial state overlay (default: True)
+    
+    Returns:
+    --------
+    list : Paths to generated output MP4 files
+    """
+    from pathlib import Path
+    import pandas as pd
+    import cv2
+    from PIL import Image, ImageDraw, ImageFont
+    from tqdm import tqdm
+    
+    # Default base directory
+    if base_dir is None:
+        base_dir = Path("/Volumes/harris/hypnose")
+    else:
+        base_dir = Path(base_dir)
+    
+    # Load behavior data for trial state
+    behavior = load_session_results(subjid, date)
+    
+    # Find directories
+    deriv_dir = base_dir / "derivatives"
+    subj_pattern = f"sub-{subjid:03d}_*"
+    subj_dirs = list(deriv_dir.glob(subj_pattern))
+    
+    if not subj_dirs:
+        raise FileNotFoundError(f"No subject directory found for pattern {subj_pattern}")
+    
+    subj_dir = subj_dirs[0]
+    session_pattern = f"ses-*_date-{date}"
+    session_dirs = list(subj_dir.glob(session_pattern))
+    
+    if not session_dirs:
+        raise FileNotFoundError(f"No session found for date {date}")
+    
+    session_dir = session_dirs[0]
+    results_dir = session_dir / "saved_analysis_results"
+    
+    # Find video files
+    rawdata_dir = base_dir / "rawdata"
+    rawdata_subj_dirs = list(rawdata_dir.glob(f"sub-{subjid:03d}_*"))
+    
+    if not rawdata_subj_dirs:
+        raise FileNotFoundError(f"No rawdata subject directory found")
+    
+    rawdata_subj_dir = rawdata_subj_dirs[0]
+    rawdata_session_dir = next(rawdata_subj_dir.glob(f"ses-*_date-{date}"), None)
+    
+    if not rawdata_session_dir:
+        raise FileNotFoundError(f"No rawdata session directory found for date {date}")
+    
+    video_files = sorted(rawdata_session_dir.glob("behav/*/VideoData/*.avi"))
+    
+    if not video_files:
+        raise FileNotFoundError(f"No video files found in {rawdata_session_dir}")
+    
+    # Load combined timestamps file
+    combined_ts_file = list(results_dir.glob("*_combined_sleap_tracking_timestamps.csv"))
+    if not combined_ts_file:
+        raise FileNotFoundError(f"No combined timestamps file found in {results_dir}")
+    
+    combined_df = pd.read_csv(combined_ts_file[0])
+    print(f"Loaded combined timestamps: {len(combined_df)} frames")
+    
+    # Get trial times
+    trials = behavior.get('initiated_sequences', pd.DataFrame())
+    if not trials.empty:
+        trials = trials.copy()
+        trials['sequence_start'] = pd.to_datetime(trials['sequence_start'])
+        trials['sequence_end'] = pd.to_datetime(trials['sequence_end'])
+        print(f"Loaded {len(trials)} trials")
+    else:
+        print("⚠️ No trials found - will show OUTSIDE TRIAL for all frames")
+    
+    # Load fonts
+    try:
+        font_large = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 40)
+        font_small = ImageFont.truetype("/System/Library/Fonts/Helvetica.ttc", 24)
+    except:
+        font_large = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+    
+    output_paths = []
+    
+    # Process each video
+    for video_idx, video_path in enumerate(video_files, 1):
+        print(f"\nProcessing video {video_idx}/{len(video_files)}: {video_path.name}")
+        
+        # Filter combined_df for this video
+        video_name = video_path.stem  # e.g., VideoData_1904-01-02T03-00-00
+        df_video = combined_df[combined_df['video_file'].str.contains(video_name, na=False)].copy()
+        
+        if df_video.empty:
+            print(f"  ⚠️ No timestamps found for video {video_name}, skipping")
+            continue
+        
+        # Convert time column to datetime
+        df_video['time'] = pd.to_datetime(df_video['time'])
+        df_video = df_video.reset_index(drop=True)
+        
+        print(f"  Found {len(df_video)} frames with timestamps")
+        
+        # Load video with OpenCV for frame-by-frame processing
+        cap = cv2.VideoCapture(str(video_path))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        
+        print(f"  Video: {width}x{height} @ {fps} fps, {total_frames} frames")
+        
+        # Output video writer
+        output_path = results_dir / f"{output_suffix}_video{video_idx}.mp4"
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        out = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+        output_paths.append(output_path)
+        
+        print(f"  Saving to: {output_path.name}")
+        
+        # Use tqdm for progress bar
+        with tqdm(total=total_frames, desc="  Encoding", unit="frames") as pbar:
+            frame_idx = 0
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                # Convert BGR to RGB for PIL
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frame_pil = Image.fromarray(frame_rgb)
+                draw = ImageDraw.Draw(frame_pil)
+                
+                # Plot centroid if available
+                if show_fps_counter and frame_idx < len(df_video):
+                    row = df_video.iloc[frame_idx]
+                    if not pd.isna(row['centroid_x']) and not pd.isna(row['centroid_y']):
+                        cx = int(row['centroid_x'])
+                        cy = int(row['centroid_y'])
+                        # Draw simple red dot
+                        draw.ellipse([cx - centroid_radius, cy - centroid_radius, 
+                                     cx + centroid_radius, cy + centroid_radius], 
+                                    fill=centroid_color, outline=centroid_color)
+                
+                # Add frame counter in bottom right
+                if show_fps_counter:
+                    counter_text = f"{frame_idx}/{total_frames}"
+                    counter_bbox = draw.textbbox((0, 0), counter_text, font=font_small)
+                    counter_width = counter_bbox[2] - counter_bbox[0]
+                    counter_x = width - counter_width - 20
+                    counter_y = height - 50
+                    draw.rectangle([counter_x - 10, counter_y - 10, counter_x + counter_width + 10, counter_y + 40],
+                                  fill='black', outline='white', width=2)
+                    draw.text((counter_x, counter_y), counter_text, fill='white', font=font_small)
+                
+                # Add timestamp in bottom left from CSV
+                if show_timestamp and frame_idx < len(df_video):
+                    row = df_video.iloc[frame_idx]
+                    frame_time = row['time']
+                    timestamp_text = frame_time.strftime("%H:%M:%S")
+                    
+                    timestamp_bbox = draw.textbbox((0, 0), timestamp_text, font=font_small)
+                    timestamp_width = timestamp_bbox[2] - timestamp_bbox[0]
+                    timestamp_x = 20
+                    timestamp_y = height - 50
+                    draw.rectangle([timestamp_x - 10, timestamp_y - 10, timestamp_x + timestamp_width + 10, timestamp_y + 40],
+                                  fill='black', outline='white', width=2)
+                    draw.text((timestamp_x, timestamp_y), timestamp_text, fill='white', font=font_small)
+                
+                # Determine trial state from timestamps
+                if show_trial_state:
+                    trial_state = "OUTSIDE TRIAL"
+                    trial_color = (100, 100, 255)  # Blue RGB
+                    
+                    if not trials.empty and frame_idx < len(df_video):
+                        row = df_video.iloc[frame_idx]
+                        frame_time = row['time']
+                        
+                        for _, trial in trials.iterrows():
+                            if trial['sequence_start'] <= frame_time <= trial['sequence_end']:
+                                trial_state = "WITHIN TRIAL"
+                                trial_color = (255, 255, 255)  # White RGB
+                                break
+                    
+                    # Add trial state in top center
+                    state_bbox = draw.textbbox((0, 0), trial_state, font=font_large)
+                    state_width = state_bbox[2] - state_bbox[0]
+                    state_x = (width - state_width) // 2
+                    state_y = 20
+                    draw.rectangle([state_x - 15, state_y - 10, state_x + state_width + 15, state_y + 50],
+                                  fill='black', outline=trial_color, width=3)
+                    draw.text((state_x, state_y), trial_state, fill=trial_color, font=font_large)
+                
+                # Convert back to BGR for OpenCV
+                frame_annotated = cv2.cvtColor(np.array(frame_pil), cv2.COLOR_RGB2BGR)
+                out.write(frame_annotated)
+                
+                frame_idx += 1
+                pbar.update(1)
+        
+        cap.release()
+        out.release()
+        
+        print(f"  ✓ Completed!")
+    
+    print(f"\n✅ All videos processed and saved!")
+    return output_paths

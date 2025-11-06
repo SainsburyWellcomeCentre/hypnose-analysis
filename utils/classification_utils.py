@@ -4596,6 +4596,38 @@ def build_position_pokes_table(classification: dict, *, threshold_ms: float | No
     return out
 
 
+def _parse_date_input(dates_input):
+    """
+    Parse date input into a list of dates to analyze.
+    
+    - If dates_input is a list/iterable: return as-is (specific dates)
+    - If dates_input is a tuple of 2 elements: treat as (start_date, end_date) range
+      and discover all dates in that range from the filesystem
+    - If dates_input is None: return None (analyze all dates)
+    
+    Returns: list of dates (int YYYYMMDD format) or None
+    """
+    if dates_input is None:
+        return None
+    
+    # If it's a tuple with exactly 2 elements, treat as a range
+    if isinstance(dates_input, tuple) and len(dates_input) == 2:
+        start_date = int(dates_input[0])
+        end_date = int(dates_input[1])
+        
+        # Convert to datetime for range operations
+        start_dt = pd.to_datetime(str(start_date), format='%Y%m%d')
+        end_dt = pd.to_datetime(str(end_date), format='%Y%m%d')
+        
+        # Generate all dates in range
+        date_range = pd.date_range(start=start_dt, end=end_dt, freq='D')
+        dates_list = [int(dt.strftime('%Y%m%d')) for dt in date_range]
+        
+        return dates_list
+    
+    # Otherwise treat as specific dates (list, set, etc.)
+    return list(dates_input)
+
 def batch_analyze_sessions(
     subjids=None,
     dates=None,
@@ -4603,7 +4635,7 @@ def batch_analyze_sessions(
     save=True,
     verbose=False,
     print_summary=True,
-    max_runs=32
+    max_runs=200
 ):
     """
     Analyze all sessions for given subject(s) and/or date(s).
@@ -4623,6 +4655,8 @@ def batch_analyze_sessions(
     else:
         subjids = [int(s) for s in subjids]
 
+    dates_to_run_global = _parse_date_input(dates)
+
     for subjid in subjids:
         subj_str = f"sub-{str(subjid).zfill(3)}"
         subj_dirs = list(base_path.glob(f"{subj_str}_id-*"))
@@ -4630,17 +4664,24 @@ def batch_analyze_sessions(
             print(f"[batch_analyze_sessions] WARNING: Subject {subjid} not found.")
             continue
         subj_dir = subj_dirs[0]
-        # Discover dates
+        
+        # Discover available dates for this subject
         session_dirs = sorted(subj_dir.glob("ses-*_date-*"))
         available_dates = [int(d.name.split('date-')[-1]) for d in session_dirs]
-        if dates is None:
-            dates_to_run = available_dates
+        
+        # Determine which dates to run for this subject
+        if dates_to_run_global is None:
+            # Analyze all available dates
+            dates_for_subject = available_dates
         else:
-            dates_to_run = [int(dt) for dt in dates if int(dt) in available_dates]
-            missing = [dt for dt in dates if int(dt) not in available_dates]
-            for dt in missing:
-                print(f"[batch_analyze_sessions] WARNING: Date {dt} not found for subject {subjid}.")
-        for date in dates_to_run:
+            # Use only dates that exist for this subject
+            dates_for_subject = [dt for dt in dates_to_run_global if dt in available_dates]
+            missing = [dt for dt in dates_to_run_global if dt not in available_dates]
+            if missing and verbose:
+                for dt in missing:
+                    print(f"[batch_analyze_sessions] WARNING: Date {dt} not found for subject {subjid}.")
+        
+        for date in dates_for_subject:
             try:
                 print(f"\n[batch_analyze_sessions] Analyzing subject {subjid}, date {date}...")
                 res = analyze_session_multi_run_by_id_date(
@@ -4654,10 +4695,12 @@ def batch_analyze_sessions(
             except Exception as e:
                 print(f"[batch_analyze_sessions] WARNING: Failed to analyze subject {subjid}, date {date}: {e}")
                 continue
+    
     # Return summary of analyzed sessions
     analyzed = {}
     for (subjid, date) in results.keys():
         analyzed.setdefault(subjid, []).append(date)
+    
     print("\nAnalyzed session(s) for:")
     for subjid in sorted(analyzed):
         print(f"Subject {subjid}:")
