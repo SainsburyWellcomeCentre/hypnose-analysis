@@ -161,6 +161,8 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         print("\n--- Decision Accuracy by Odor ---")
         accuracy_by_odor = decision_accuracy_by_odor(results)
         metrics['decision_accuracy_by_odor'] = accuracy_by_odor.to_dict() if len(accuracy_by_odor) > 0 else {}
+        print("\n--- Global Choice Accuracy ---")
+        metrics['global_choice_accuracy'] = global_choice_accuracy(results)
         print("\n--- Premature Response Rate ---")
         metrics['premature_response_rate'] = premature_response_rate(results)
         print("\n--- Response-Contingent False Alarm Rate ---")
@@ -405,9 +407,8 @@ def batch_run_all_metrics_with_merge(
         subj_dates = []  # Track processed dates for this subject
 
         # Find all session directories for this subject
-        ses_dirs = list(subj_dir.glob("ses-*_date-*")) if dates is None else [
-            d for date in dates for d in subj_dir.glob(f"ses-*_date-{date}")
-        ]
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        
         if not ses_dirs:
             continue
         for ses_dir in ses_dirs:
@@ -541,6 +542,47 @@ def decision_accuracy(results):
     denom = n_rew + n_unr
     print(f"Decision Accuracy: {n_rew}/{denom} = {n_rew/denom if denom>0 else np.nan:.3f}")
     return n_rew, denom, n_rew / denom if denom > 0 else np.nan
+
+
+def global_choice_accuracy(results):
+    """
+    Calculate global choice accuracy: out of all choices made, how many were correct?
+    
+    This metric includes ALL choice events:
+    - Correct choices (completed rewarded trials)
+    - Incorrect choices (completed unrewarded trials)
+    - False alarms during sampling (FA Time In abortions)
+    
+    Numerator: # Correct trials (completed rewarded)
+    Denominator: # Correct + # Incorrect + # FA Time In
+    
+    Returns:
+    --------
+    tuple: (n_correct, n_total, accuracy)
+        - n_correct: number of correct trials
+        - n_total: total number of choice events
+        - accuracy: n_correct / n_total
+    """
+    comp_rew = results.get("completed_sequence_rewarded", pd.DataFrame())
+    comp_unr = results.get("completed_sequence_unrewarded", pd.DataFrame())
+    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
+    
+    # Numerator: correct choices
+    n_correct = len(comp_rew)
+    
+    # Denominator: all choices
+    n_incorrect = len(comp_unr)
+    n_fa_time_in = (ab_det["fa_label"] == "FA_time_in").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
+    n_total = n_correct + n_incorrect + n_fa_time_in
+    
+    accuracy = n_correct / n_total if n_total > 0 else np.nan
+    
+    print(f"Global Choice Accuracy: {n_correct}/{n_total} = {accuracy:.3f}")
+    print(f"  - Correct choices: {n_correct}")
+    print(f"  - Incorrect choices: {n_incorrect}")
+    print(f"  - False alarms (FA Time In): {n_fa_time_in}")
+    
+    return n_correct, n_total, accuracy
 
 def decision_accuracy_by_odor(results):
     """
@@ -1271,7 +1313,7 @@ def plot_behavior_metrics(
     # Gather sessions
     for sid, subj_dir in _iter_subject_dirs(derivatives_dir, subjids):
         ses_dirs = _filter_session_dirs(subj_dir, dates)
-        for ses in ses_dirs:
+        for session_num, ses in enumerate(ses_dirs, start=1):
             date_str = ses.name.split("_date-")[-1]
             results_dir = ses / "saved_analysis_results"
             if not results_dir.exists():
@@ -1291,6 +1333,7 @@ def plot_behavior_metrics(
                 if isinstance(val, (int, float)) and not np.isnan(val):
                     rows.append({
                         "subjid": int(sid),
+                        "session_num": session_num,
                         "date": int(date_str) if str(date_str).isdigit() else date_str,
                         "date_str": str(date_str),
                         "protocol": str(protocol) if protocol else "Unknown",
@@ -1304,19 +1347,17 @@ def plot_behavior_metrics(
         return []
 
     df = pd.DataFrame(rows)
-    # Union of all dates across all subjects
-    unique_dates = sorted(df["date"].unique())
-    date_to_x = {d: i for i, d in enumerate(unique_dates)}
-    df["x"] = df["date"].map(date_to_x)
-
+    
     # Subject -> marker mapping
     markers_cycle = ['o', '^', 's', 'X', 'D', 'P', 'v', '>', '<', '*', 'h', 'H', '8', 'p', 'x']
     unique_subj = sorted(df["subjid"].unique())
     subj_to_marker = {sid: markers_cycle[i % len(markers_cycle)] for i, sid in enumerate(unique_subj)}
 
     # Protocol -> color mapping
-    unique_protocols = [p for p in sorted(df["protocol"].unique()) if p and p != "Unknown"]
-    # Add Unknown at end if present
+    unique_protocols = []
+    for p in df["protocol"]:
+        if p not in unique_protocols and p and p != "Unknown":
+            unique_protocols.append(p)
     if "Unknown" in df["protocol"].unique():
         unique_protocols.append("Unknown")
     cmap = cm.get_cmap("tab10", max(10, len(unique_protocols)))
@@ -1333,36 +1374,68 @@ def plot_behavior_metrics(
                 print(f"[plot_behavior_metrics] No data for variable '{var}'.")
             continue
 
-        fig, ax = plt.subplots(figsize=(10, 4.5))
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
         # Plot each subject: black connecting line + colored markers per protocol
         for sid in unique_subj:
-            dsub = df_var[df_var["subjid"] == sid].sort_values("x")
+            dsub = df_var[df_var["subjid"] == sid].sort_values("session_num")
             if dsub.empty:
                 continue
-            ax.plot(dsub["x"], dsub["value"], color="black", linewidth=1.0, alpha=0.8, zorder=1)
+            ax.plot(dsub["session_num"], dsub["value"], color="black", linewidth=1.0, alpha=0.8, zorder=1)
             # Scatter with subject marker and protocol color
             colors = dsub["protocol"].map(lambda p: prot_to_color.get(p, (0.6, 0.6, 0.6, 1.0)))
             ax.scatter(
-                dsub["x"], dsub["value"],
+                dsub["session_num"], dsub["value"],
                 c=list(colors),
                 marker=subj_to_marker[sid],
                 edgecolors="black",
                 linewidths=0.5,
-                s=55,
+                s=40,
                 zorder=2,
                 label=f"sub-{sid:03d}"
             )
 
-        # X axis: categorical dates
-        ax.set_xticks(range(len(unique_dates)))
-        ax.set_xticklabels([str(d) for d in unique_dates], rotation=45, ha="right")
-        ax.set_xlim(-0.5, len(unique_dates) - 0.5)
-        ax.set_xlabel("Date")
-        ax.set_ylabel(var.replace("_", " ").title())
-        ax.set_title(f"{var}")
+        # X-axis: session numbers with sparse labels
+        session_nums = sorted(df_var["session_num"].unique())
+        n_sessions = len(session_nums)
+        
+        # Determine tick spacing (every 5-10 sessions)
+        if n_sessions <= 10:
+            tick_spacing = 2
+        elif n_sessions <= 30:
+            tick_spacing = 5
+        elif n_sessions <= 80:
+            tick_spacing = 10
+        elif n_sessions <= 100:
+            tick_spacing = 20
+        else:
+            tick_spacing = 50
+        
+        # Create x-axis ticks and labels
+        x_ticks = [i for i in session_nums if i % tick_spacing == 0]
+        ax.set_xticks(x_ticks)
+        ax.set_xticklabels([str(i) for i in x_ticks])
+        ax.set_xlim([0.5, n_sessions + 0.5])
+        
+        # Format title: split by "_" and capitalize each word
+        title_formatted = " ".join(word.capitalize() for word in var.split(".")[0].split("_")) + (f" ({var.split('.')[1].capitalize()})" if '.' in var else "")
 
-        # Grid
-        ax.grid(True, which="both", axis="both", alpha=0.25)
+        
+        ax.set_xlabel("Session Number", fontsize=16, fontweight='bold')
+        ax.set_ylabel(var.replace("_", " ").title(), fontsize=16, fontweight='bold')
+        ax.set_title(title_formatted, fontsize=16, fontweight='bold')
+        ax.tick_params(axis='both', labelsize=12)
+        
+        # Make axes bold
+        ax.spines['left'].set_linewidth(2)
+        ax.spines['bottom'].set_linewidth(2)
+        
+        # Remove upper and right spines
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        # No grid
+        ax.grid(False)
 
         # Build separate legends: subjects (markers) and protocols (colors)
         subject_handles = [
@@ -1405,10 +1478,28 @@ def plot_behavior_metrics(
 
 # ================================= Extra Plotting, might be preliminary ==================================
 
-def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_path=None):
+def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_path=None, plot_choice_acc=False):
     """
     Plot decision accuracy by odor (A, B) and total over dates.
+    Optionally include global choice accuracy as a separate line.
     Fast version using pre-computed metrics with existing helper functions.
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    dates : tuple, list, or None
+        Date or date range. If None, plots all available dates.
+    figsize : tuple, optional
+        Figure size (default: (12, 6))
+    save_path : str, optional
+        Path to save the figure. If None, figure is not saved.
+    plot_choice_acc : bool, optional
+        If True, also plot global choice accuracy as a dark grey line (default: False)
+    
+    Returns:
+    --------
+    fig, ax : matplotlib figure and axes
     """
     rows = []
     base_path = Path(project_root) / "data" / "rawdata"
@@ -1447,6 +1538,18 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
                     "odor": "Total",
                     "accuracy": float(acc_total)
                 })
+            
+            # Add global choice accuracy if requested
+            if plot_choice_acc:
+                gca = metrics.get('global_choice_accuracy', None)
+                if isinstance(gca, (tuple, list)) and len(gca) >= 3:
+                    gca_value = gca[2]
+                    if isinstance(gca_value, (int, float)) and not np.isnan(gca_value):
+                        rows.append({
+                            "date": int(date_str),
+                            "odor": "Global Choice Accuracy",
+                            "accuracy": float(gca_value)
+                        })
     
     if not rows:
         print("No data found")
@@ -1459,29 +1562,39 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
     
     fig, ax = plt.subplots(figsize=figsize)
     
-    colors = {'A': '#FF6B6B', 'B': '#4ECDC4', 'Total': 'black'}
-    linewidths = {'A': 1.5, 'B': 1.5, 'Total': 3}
-    markers = {'A': 'o', 'B': 'o', 'Total': 's'}
+    colors = {'A': '#FF6B6B', 'B': '#4ECDC4', 'Total': 'black', 'Global Choice Accuracy': '#404040'}
+    linewidths = {'A': 1.5, 'B': 1.5, 'Total': 3, 'Global Choice Accuracy': 2.5}
+    markers = {'A': 'o', 'B': 'o', 'Total': 's', 'Global Choice Accuracy': '^'}
+    linestyles = {'A': '-', 'B': '-', 'Total': '-', 'Global Choice Accuracy': '--'}
     
-    for odor in ['A', 'B', 'Total']:
+    # Determine which odors to plot
+    odors_to_plot = ['A', 'B', 'Total']
+    if plot_choice_acc:
+        odors_to_plot.append('Global Choice Accuracy')
+    
+    for odor in odors_to_plot:
         subset = df[df["odor"] == odor]
         if not subset.empty:
             ax.plot(subset["x"].values, subset["accuracy"].values, 
-                   label=f'DA - {odor}',
+                   label=odor,
                    color=colors.get(odor, '#999999'),
                    linewidth=linewidths.get(odor, 1.5),
+                   linestyle=linestyles.get(odor, '-'),
                    marker=markers.get(odor, 'o'),
-                   markersize=4 if odor != 'Total' else 6,
-                   alpha=0.7 if odor != 'Total' else 0.8,
-                   zorder=10 if odor == 'Total' else 1)
+                   markersize=4 if odor != 'Total' and odor != 'Global Choice Accuracy' else 6,
+                   alpha=0.7 if odor != 'Total' and odor != 'Global Choice Accuracy' else 0.8,
+                   zorder=10 if odor in ['Total', 'Global Choice Accuracy'] else 1)
     
     ax.set_xlabel('Days', fontsize=12)
-    ax.set_ylabel('Decision Accuracy', fontsize=12)
+    ax.set_ylabel('Accuracy', fontsize=12)
     ax.set_ylim([0, 1.05])
     ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1, alpha=0.3)
     ax.grid(True, alpha=0.3)
     ax.legend(loc='best', fontsize=10)
-    ax.set_title(f"Subject {str(subjid).zfill(3)} - Decision Accuracy by Odor", fontsize=14, fontweight='bold')
+    title = f"Subject {str(subjid).zfill(3)} - Decision Accuracy by Odor"
+    if plot_choice_acc:
+        title += " (with Global Choice Accuracy)"
+    ax.set_title(title, fontsize=14, fontweight='bold')
     
     plt.tight_layout()
     
@@ -1725,16 +1838,34 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
     return fig, axes
 
 
-def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
+def plot_abortion_and_fa_rates(
+    subjid, 
+    dates=None, 
+    figsize=(18, 14),
+    include_noninitiated_in_fa_odor=True
+):
     """
-    Plot FA rates and abortion rates by position and odor across sessions.
+    Plot FA rates, abortion rates, and FA ratio by position and odor across sessions.
     Uses pre-computed metrics from saved JSON files.
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    dates : list, tuple, or None
+        Dates to include
+    figsize : tuple
+        Figure size
+    include_noninitiated_in_fa_odor : bool
+        If True, include non-initiated FAs in FA Rate per Odor.
+        If False, only include aborted FAs.
     """
     base_path = Path(project_root) / "data" / "rawdata"
     server_root = base_path.resolve().parent
     derivatives_dir = server_root / "derivatives"
     
     rows = []
+    fa_port_rows = []
     
     for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
         ses_dirs = _filter_session_dirs(subj_dir, dates)
@@ -1798,6 +1929,49 @@ def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
                             except (ValueError, IndexError):
                                 continue
             
+            # Non-Initiated FA before position 1 (add as "Non-Initiated" to position category)
+            fa_noninit_rate = metrics.get("non_initiated_FA_rate", None)
+            if isinstance(fa_noninit_rate, (tuple, list)) and len(fa_noninit_rate) == 3:
+                n_fa, n_total, rate_noninit = fa_noninit_rate
+                rows.append({
+                    "date": int(date_str),
+                    "metric_type": "fa_rate",
+                    "category": "position",
+                    "position_or_odor": "Non-Initiated",
+                    "rate": rate_noninit
+                })
+
+            # ============ FA PORT RATIO A/(A+B) for secondary axis ============
+            # Extract from raw results for FA Ratio per odor
+            try:
+                results = load_session_results(subjid, date_str)
+                ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
+                fa_noninit = results.get("non_initiated_FA", pd.DataFrame())
+                
+                # Combine or not based on parameter
+                if include_noninitiated_in_fa_odor:
+                    fa_ab = ab_det[ab_det["fa_label"].str.startswith("FA_")].copy() if not ab_det.empty else pd.DataFrame()
+                    fa_ni = fa_noninit[fa_noninit["fa_label"].str.startswith("FA_")].copy() if not fa_noninit.empty else pd.DataFrame()
+                    fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True)
+                else:
+                    fa_all = ab_det[ab_det["fa_label"].str.startswith("FA_")].copy() if not ab_det.empty else pd.DataFrame()
+                
+                # Calculate FA port ratio per odor
+                if not fa_all.empty and "fa_port" in fa_all.columns and "last_odor_name" in fa_all.columns:
+                    for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
+                        fa_odor = fa_all[fa_all["last_odor_name"] == odor]
+                        n_a = (fa_odor["fa_port"] == 1).sum()
+                        n_b = (fa_odor["fa_port"] == 2).sum()
+                        n_total = n_a + n_b
+                        ratio_a = n_a / n_total if n_total > 0 else np.nan
+                        fa_port_rows.append({
+                            "date": int(date_str),
+                            "odor": str(odor),
+                            "fa_ratio_a": ratio_a
+                        })
+            except Exception:
+                pass
+            
             # ============ ABORTION RATES ============
             
             # Abortion rate per position
@@ -1834,30 +2008,43 @@ def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
         return None, None
     
     df = pd.DataFrame(rows)
+    df_port = pd.DataFrame(fa_port_rows) if fa_port_rows else pd.DataFrame()
     
-    # Create figure
-    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    # Create figure with 5 subplots (3 rows: top 2x2, bottom 1x2 centered)
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(3, 2, hspace=0.35, wspace=0.3)
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax3 = fig.add_subplot(gs[1, 0])
+    ax4 = fig.add_subplot(gs[1, 1])
+    ax5 = fig.add_subplot(gs[2, :])  # Spans full width
     
-    # ============ PLOT 1: FA Rate per Position ============
-    ax = axes[0, 0]
+    axes = [ax1, ax2, ax3, ax4, ax5]
+    
+    # ============ PLOT 1: FA Rate per Position (with Non-Initiated) ============
+    ax = ax1
     df_fa_pos = df[(df["metric_type"] == "fa_rate") & (df["category"] == "position")].copy()
     
     if not df_fa_pos.empty:
-        positions = sorted(df_fa_pos["position_or_odor"].unique())
+        # Sort positions: Non-Initiated first, then 1, 2, 3, 4, 5
+        positions = ["Non-Initiated"] + sorted([p for p in df_fa_pos["position_or_odor"].unique() if p != "Non-Initiated"])
+        position_to_x = {pos: i for i, pos in enumerate(positions)}
         
         for pos in positions:
             rates = df_fa_pos[df_fa_pos["position_or_odor"] == pos]["rate"].values
-            x_jitter = np.random.normal(pos, 0.04, size=len(rates))
+            x_pos = position_to_x[pos]
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(rates))
             ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='steelblue')
         
         means = [df_fa_pos[df_fa_pos["position_or_odor"] == pos]["rate"].mean() for pos in positions]
-        stds = [df_fa_pos[df_fa_pos["position_or_odor"] == pos]["rate"].std() for pos in positions]
+        sems = [df_fa_pos[df_fa_pos["position_or_odor"] == pos]["rate"].sem() for pos in positions]
         
-        ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
-                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
-        ax.errorbar(positions, means, yerr=stds, fmt='none', ecolor='darkred', 
+        ax.scatter(range(len(positions)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SEM')
+        ax.errorbar(range(len(positions)), means, yerr=sems, fmt='none', ecolor='darkred', 
                    capsize=5, capthick=2, linewidth=2, zorder=4)
-        ax.set_xticks(positions)
+        ax.set_xticks(range(len(positions)))
+        ax.set_xticklabels(positions)
     
     ax.set_xlabel('Position', fontsize=11, fontweight='bold')
     ax.set_ylabel('FA Rate', fontsize=11, fontweight='bold')
@@ -1868,7 +2055,7 @@ def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
     ax.legend(loc='best')
     
     # ============ PLOT 2: FA Rate per Odor ============
-    ax = axes[0, 1]
+    ax = ax2
     df_fa_odor = df[(df["metric_type"] == "fa_rate") & (df["category"] == "odor")].copy()
     
     if not df_fa_odor.empty:
@@ -1882,11 +2069,11 @@ def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
             ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='steelblue')
         
         means = [df_fa_odor[df_fa_odor["position_or_odor"] == odor]["rate"].mean() for odor in odors]
-        stds = [df_fa_odor[df_fa_odor["position_or_odor"] == odor]["rate"].std() for odor in odors]
+        sems = [df_fa_odor[df_fa_odor["position_or_odor"] == odor]["rate"].sem() for odor in odors]
         
         ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
-                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
-        ax.errorbar(range(len(odors)), means, yerr=stds, fmt='none', ecolor='darkred', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SEM')
+        ax.errorbar(range(len(odors)), means, yerr=sems, fmt='none', ecolor='darkred', 
                    capsize=5, capthick=2, linewidth=2, zorder=4)
         ax.set_xticks(range(len(odors)))
         ax.set_xticklabels(odors)
@@ -1900,7 +2087,7 @@ def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
     ax.legend(loc='best')
     
     # ============ PLOT 3: Abortion Rate per Position ============
-    ax = axes[1, 0]
+    ax = ax3
     df_ab_pos = df[(df["metric_type"] == "abortion_rate") & (df["category"] == "position")].copy()
     
     if not df_ab_pos.empty:
@@ -1912,11 +2099,11 @@ def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
             ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='coral')
         
         means = [df_ab_pos[df_ab_pos["position_or_odor"] == pos]["rate"].mean() for pos in positions]
-        stds = [df_ab_pos[df_ab_pos["position_or_odor"] == pos]["rate"].std() for pos in positions]
+        sems = [df_ab_pos[df_ab_pos["position_or_odor"] == pos]["rate"].sem() for pos in positions]
         
         ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
-                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
-        ax.errorbar(positions, means, yerr=stds, fmt='none', ecolor='darkred', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SEM')
+        ax.errorbar(positions, means, yerr=sems, fmt='none', ecolor='darkred', 
                    capsize=5, capthick=2, linewidth=2, zorder=4)
         ax.set_xticks(positions)
     
@@ -1929,7 +2116,7 @@ def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
     ax.legend(loc='best')
     
     # ============ PLOT 4: Abortion Rate per Odor ============
-    ax = axes[1, 1]
+    ax = ax4
     df_ab_odor = df[(df["metric_type"] == "abortion_rate") & (df["category"] == "odor")].copy()
     
     if not df_ab_odor.empty:
@@ -1943,11 +2130,11 @@ def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
             ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='coral')
         
         means = [df_ab_odor[df_ab_odor["position_or_odor"] == odor]["rate"].mean() for odor in odors]
-        stds = [df_ab_odor[df_ab_odor["position_or_odor"] == odor]["rate"].std() for odor in odors]
+        sems = [df_ab_odor[df_ab_odor["position_or_odor"] == odor]["rate"].sem() for odor in odors]
         
         ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
-                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
-        ax.errorbar(range(len(odors)), means, yerr=stds, fmt='none', ecolor='darkred', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SEM')
+        ax.errorbar(range(len(odors)), means, yerr=sems, fmt='none', ecolor='darkred', 
                    capsize=5, capthick=2, linewidth=2, zorder=4)
         ax.set_xticks(range(len(odors)))
         ax.set_xticklabels(odors)
@@ -1960,7 +2147,36 @@ def plot_abortion_and_fa_rates(subjid, dates=None, figsize=(16, 12)):
     ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
-    plt.tight_layout()
+    # ============ PLOT 5: FA Ratio A / (A+B) per Odor (full width) ============
+    ax = ax5
+    if not df_port.empty:
+        odors = sorted(df_port["odor"].unique())
+        odor_to_x = {odor: i for i, odor in enumerate(odors)}
+        
+        for odor in odors:
+            ratios = df_port[df_port["odor"] == odor]["fa_ratio_a"].values
+            x_pos = odor_to_x[odor]
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(ratios))
+            ax.scatter(x_jitter, ratios, alpha=0.4, s=20, color='steelblue')
+        
+        means = [df_port[df_port["odor"] == odor]["fa_ratio_a"].mean() for odor in odors]
+        sems = [df_port[df_port["odor"] == odor]["fa_ratio_a"].sem() for odor in odors]
+        
+        ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SEM')
+        ax.errorbar(range(len(odors)), means, yerr=sems, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(odors)))
+        ax.set_xticklabels(odors)
+    
+    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
+    ax.set_ylabel('FA Ratio A / (A+B)', fontsize=11, fontweight='bold')
+    ax.set_title(f'FA Ratio A/(A+B) per Odor\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
     return fig, axes
 
 
@@ -2074,3 +2290,142 @@ def plot_response_times_completed_vs_fa(subjid, dates=None, figsize=(12, 8), y_l
     
     plt.tight_layout()
     return fig, ax
+
+
+def plot_fa_ratio_a_over_sessions(
+    subjid,
+    dates=None,
+    figsize=(14, 10),
+    include_noninitiated=True
+):
+    """
+    Plot FA Ratio A/(A+B) over sessions for each odor.
+    One plot per odor, with X-axis as session number and Y-axis as FA Ratio A/(A+B).
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    dates : list, tuple, or None
+        Dates to include. Can be:
+        - None: all available dates
+        - (start_date, end_date): date range (inclusive)
+        - [date1, date2, ...]: specific dates
+    figsize : tuple
+        Figure size
+    include_noninitiated : bool
+        If True, include non-initiated FAs in the ratio calculation.
+        If False, only include aborted FAs.
+    
+    Returns:
+    --------
+    figs : dict
+        Dictionary mapping odor names to matplotlib Figure objects.
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    fa_data = {}  # {odor: [(session_num, ratio, n_a, n_b, n_total), ...]}
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        
+        for session_num, ses in enumerate(ses_dirs, start=1):
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            
+            try:
+                results = load_session_results(subjid, date_str)
+                ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
+                fa_noninit = results.get("non_initiated_FA", pd.DataFrame())
+                
+                # Combine or not based on parameter
+                if include_noninitiated:
+                    fa_ab = ab_det[ab_det["fa_label"].str.startswith("FA_")].copy() if not ab_det.empty else pd.DataFrame()
+                    fa_ni = fa_noninit[fa_noninit["fa_label"].str.startswith("FA_")].copy() if not fa_noninit.empty else pd.DataFrame()
+                    fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True)
+                else:
+                    fa_all = ab_det[ab_det["fa_label"].str.startswith("FA_")].copy() if not ab_det.empty else pd.DataFrame()
+                
+                # Calculate FA port ratio per odor
+                if not fa_all.empty and "fa_port" in fa_all.columns and "last_odor_name" in fa_all.columns:
+                    for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
+                        fa_odor = fa_all[fa_all["last_odor_name"] == odor]
+                        n_a = (fa_odor["fa_port"] == 1).sum()
+                        n_b = (fa_odor["fa_port"] == 2).sum()
+                        n_total = n_a + n_b
+                        ratio_a = n_a / n_total if n_total > 0 else np.nan
+                        
+                        if odor not in fa_data:
+                            fa_data[odor] = []
+                        fa_data[odor].append({
+                            "session_num": session_num,
+                            "date": int(date_str),
+                            "ratio_a": ratio_a,
+                            "n_a": n_a,
+                            "n_b": n_b,
+                            "n_total": n_total
+                        })
+            except Exception as e:
+                print(f"Error processing session {session_num} (date {date_str}): {e}")
+                continue
+    
+    if not fa_data:
+        print("No FA data found")
+        return {}
+    
+    # Create one figure per odor
+    figs = {}
+    odor_list = sorted(fa_data.keys())
+    
+    for odor in odor_list:
+        data = fa_data[odor]
+        
+        # Sort by session number
+        data = sorted(data, key=lambda x: x["session_num"])
+        
+        # Use range(len(data)) for evenly spaced x-axis
+        x_positions = np.arange(len(data))
+        session_nums = [d["session_num"] for d in data]
+        ratios = [d["ratio_a"] for d in data]
+        n_a_list = [d["n_a"] for d in data]
+        n_total_list = [d["n_total"] for d in data]
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=figsize)
+        
+        # Plot with evenly spaced x-axis
+        ax.plot(x_positions, ratios, color='black', linewidth=1.0, alpha=0.6, zorder=1)
+        ax.scatter(x_positions, ratios, s=40, color='black', alpha=0.8, 
+                  edgecolors='black', linewidth=0.5, zorder=3)
+        
+        # Add horizontal line at 0.5 (chance level) - grey, thin, no label
+        ax.axhline(y=0.5, color='#888888', linestyle='--', linewidth=1.0, alpha=0.5, zorder=0)
+        
+        # Add text annotations for each point showing n_a / n_total
+        # All text at same height above plot
+        y_text = 1.08
+        for x_pos, n_a, n_total in zip(x_positions, n_a_list, n_total_list):
+            ax.text(x_pos, y_text, f"{n_a}/{n_total}", 
+                   ha='center', va='bottom', fontsize=9, fontweight='bold',
+                   transform=ax.get_xaxis_transform())
+        
+        # Set x-axis to fit all data with even spacing
+        ax.set_xlim([-0.5, len(data) - 0.5])
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels([str(sn) for sn in session_nums])
+        
+        ax.set_xlabel('Session Number', fontsize=12, fontweight='bold')
+        ax.set_ylabel('FA Ratio A / (A+B)', fontsize=12, fontweight='bold')
+        ax.set_title(f'FA Ratio Odor {odor}\n(Subject {str(subjid).zfill(3)})',
+                    fontsize=13, fontweight='bold')
+        ax.set_ylim([0, 1.0])
+        ax.grid(False)
+        
+        plt.tight_layout()
+        figs[odor] = fig
+    
+    return figs
