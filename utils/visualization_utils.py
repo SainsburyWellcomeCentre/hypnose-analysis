@@ -5,79 +5,1326 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
+from matplotlib import cm
 from typing import Iterable, Optional, Union
-from utils.metrics_utils import load_session_results
+from utils.metrics_utils import load_session_results, run_all_metrics, parse_json_column
 from datetime import timedelta, datetime
 from utils.classification_utils import load_all_streams, load_experiment
 from pathlib import Path
 import re
 import numpy as np
+import json
 
-def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), title=None, save_path=None):
+# Load metric results for visualization (NOTE: Previously in metrics_utils.py) ==============================================================================
+
+def _extract_metric_value(metrics: dict, var_path: str):
     """
-    Plot accumulated rewards over time for one or more sessions.
+    Extract a numeric value from metrics dict given a dot-path.
+    Examples:
+      - "decision_accuracy" -> uses the 3rd element (value) if tuple/list (num, denom, value)
+      - "avg_response_time.Rewarded" -> nested dict lookup
+    Returns float or np.nan if not found/unsupported.
+    """
+    try:
+        parts = var_path.split(".")
+        cur = metrics.get(parts[0], None)
+        for p in parts[1:]:
+            if isinstance(cur, dict):
+                cur = cur.get(p, None)
+            else:
+                # unsupported path deeper into non-dict
+                return float("nan")
+        # Resolve final value
+        if isinstance(cur, (int, float)) and not isinstance(cur, bool):
+            return float(cur)
+        if isinstance(cur, (list, tuple)) and len(cur) >= 3:
+            # assume (numerator, denominator, value)
+            val = cur[2]
+            return float(val) if val is not None else float("nan")
+        # Some dicts may hold numbers directly keyed by categories (needs explicit subkey in var_path)
+        return float(cur) if isinstance(cur, (int, float)) else float("nan")
+    except Exception:
+        return float("nan")
+    
+def _iter_subject_dirs(derivatives_dir: Path, subjids: Optional[Iterable[int]]):
+    if subjids is None:
+        for d in sorted(derivatives_dir.glob("sub-*_id-*")):
+            name = d.name.split("_")[0].replace("sub-", "")
+            try:
+                yield int(name), d
+            except Exception:
+                continue
+    else:
+        for sid in subjids:
+            sub_str = f"sub-{str(int(sid)).zfill(3)}"
+            dirs = sorted(derivatives_dir.glob(f"{sub_str}_id-*"))
+            if dirs:
+                yield int(sid), dirs[0]
+
+def _filter_session_dirs(subj_dir: Path, dates: Optional[Union[Iterable[Union[int,str]], tuple]]):
+    ses_dirs = sorted(subj_dir.glob("ses-*_date-*"))
+    if dates is None:
+        return ses_dirs
+    # dates can be list/iterable or (start, end) tuple
+    def norm_date(d):
+        s = str(d)
+        return int(s) if s.isdigit() else None
+    if isinstance(dates, tuple) and len(dates) == 2:
+        start = norm_date(dates[0]); end = norm_date(dates[1])
+        out = []
+        for d in ses_dirs:
+            try:
+                ds = int(d.name.split("_date-")[-1])
+                if (start is None or ds >= start) and (end is None or ds <= end):
+                    out.append(d)
+            except Exception:
+                pass
+        return out
+    # iterable of dates
+    wanted = {norm_date(d) for d in dates}
+    out = []
+    for d in ses_dirs:
+        try:
+            ds = int(d.name.split("_date-")[-1])
+            if ds in wanted:
+                out.append(d)
+        except Exception:
+            pass
+    return out
+
+def _load_protocol_from_summary(results_dir: Path) -> str:
+    try:
+        with open(results_dir / "summary.json", "r", encoding="utf-8") as f:
+            summary = json.load(f)
+        runs = summary.get("session", {}).get("runs", [])
+        if runs and isinstance(runs, list):
+            stage = runs[0].get("stage", {}) if isinstance(runs[0], dict) else {}
+            name = stage.get("stage_name") or stage.get("name")
+            return str(name) if name else "Unknown"
+    except Exception:
+        pass
+    return "Unknown"
+
+def _ensure_metrics_json(subjid: int, date: Union[int, str], results_dir: Path, compute_if_missing: bool) -> Optional[dict]:
+    """
+    Return metrics dict by loading metrics_{subjid}_{date}.json if present,
+    else compute via run_all_metrics if compute_if_missing=True.
+    """
+    subjid_i = int(subjid)
+    date_s = str(date)
+    metrics_path = results_dir / f"metrics_{subjid_i}_{date_s}.json"
+    if metrics_path.exists():
+        try:
+            return json.load(open(metrics_path, "r", encoding="utf-8"))
+        except Exception:
+            pass
+    if compute_if_missing:
+        try:
+            session_results = load_session_results(subjid_i, date_s)
+            return run_all_metrics(session_results, save_txt=True, save_json=True)
+        except Exception:
+            return None
+    return None
+
+
+# =========================================================== Metrics Plotting Functions =============================================================================
+
+def plot_behavior_metrics(
+    subjids: Optional[Iterable[int]] = None,
+    dates: Optional[Union[Iterable[Union[int, str]], tuple]] = None,
+    variables: Optional[Iterable[str]] = None,
+    *,
+    protocol_filter: Optional[str] = None,
+    compute_if_missing: bool = False,
+    verbose: bool = True
+):
+    """
+    Plot selected metrics over sessions for one or more subjects.
+
+    - X-axis: union of all available dates across selected subjects (categorical, no time gaps).
+    - Y-axis: metric value.
+    - One figure per variable.
+    - Marker shape encodes subject; dot color encodes protocol; connecting lines are thin black.
+    - Protocol filtering optional (substring match).
+    - Values are read from metrics_{subjid}_{date}.json; if missing and compute_if_missing=True, metrics are computed.
+
+    Parameters:
+    - subjids: List of subject IDs to include, or None to include all subjects with matching dates.
+    - dates: List of specific dates (e.g., [20250101, 20250102]) or a date range (e.g., (20250101, 20250202)).
+    - variables: List of metric names or dot-paths to plot.
+    - protocol_filter: Optional substring to filter sessions by protocol.
+    - compute_if_missing: If True, compute metrics if missing.
+    - verbose: If True, print progress and warnings.
+
+    Returns:
+    - List of matplotlib Figure objects.
+    """
+    if not variables:
+        raise ValueError("Please provide `variables` (list of metric names or dot-paths).")
+
+    rows = []
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    # Gather sessions
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, subjids):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for session_num, ses in enumerate(ses_dirs, start=1):
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            # Protocol (for coloring)
+            protocol = _load_protocol_from_summary(results_dir)
+            if protocol_filter and (protocol is None or protocol_filter not in str(protocol)):
+                continue
+            # Load metrics (json or compute)
+            metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing)
+            if metrics is None:
+                if verbose:
+                    print(f"[plot_behavior_metrics] Skipping sub-{sid:03d} {date_str}: metrics JSON missing.")
+                continue
+            for var in variables:
+                val = _extract_metric_value(metrics, var)
+                if isinstance(val, (int, float)) and not np.isnan(val):
+                    rows.append({
+                        "subjid": int(sid),
+                        "session_num": session_num,
+                        "date": int(date_str) if str(date_str).isdigit() else date_str,
+                        "date_str": str(date_str),
+                        "protocol": str(protocol) if protocol else "Unknown",
+                        "variable": var,
+                        "value": float(val)
+                    })
+
+    if not rows:
+        if verbose:
+            print("[plot_behavior_metrics] No data found for the given filters.")
+        return []
+
+    df = pd.DataFrame(rows)
+    
+    # Subject -> marker mapping
+    markers_cycle = ['o', '^', 's', 'X', 'D', 'P', 'v', '>', '<', '*', 'h', 'H', '8', 'p', 'x']
+    unique_subj = sorted(df["subjid"].unique())
+    subj_to_marker = {sid: markers_cycle[i % len(markers_cycle)] for i, sid in enumerate(unique_subj)}
+
+    # Protocol -> color mapping
+    unique_protocols = []
+    for p in df["protocol"]:
+        if p not in unique_protocols and p and p != "Unknown":
+            unique_protocols.append(p)
+    if "Unknown" in df["protocol"].unique():
+        unique_protocols.append("Unknown")
+    cmap = cm.get_cmap("tab10", max(10, len(unique_protocols)))
+    prot_to_color = {p: cmap(i % cmap.N) for i, p in enumerate(unique_protocols)}
+    if "Unknown" in prot_to_color:
+        prot_to_color["Unknown"] = (0.6, 0.6, 0.6, 1.0)
+
+    figs = []
+    # One plot per variable
+    for var in variables:
+        df_var = df[df["variable"] == var]
+        if df_var.empty:
+            if verbose:
+                print(f"[plot_behavior_metrics] No data for variable '{var}'.")
+            continue
+
+        fig, ax = plt.subplots(figsize=(14, 8))
+        
+        # Plot each subject: black connecting line + colored markers per protocol
+        for sid in unique_subj:
+            dsub = df_var[df_var["subjid"] == sid].sort_values("session_num")
+            if dsub.empty:
+                continue
+            ax.plot(dsub["session_num"], dsub["value"], color="black", linewidth=1.0, alpha=0.8, zorder=1)
+            # Scatter with subject marker and protocol color
+            colors = dsub["protocol"].map(lambda p: prot_to_color.get(p, (0.6, 0.6, 0.6, 1.0)))
+            ax.scatter(
+                dsub["session_num"], dsub["value"],
+                c=list(colors),
+                marker=subj_to_marker[sid],
+                edgecolors="black",
+                linewidths=0.5,
+                s=40,
+                zorder=2,
+                label=f"sub-{sid:03d}"
+            )
+
+        # X-axis: session numbers with sparse labels
+        session_nums = sorted(df_var["session_num"].unique())
+        n_sessions = len(session_nums)
+        
+        # Determine tick spacing (every 5-10 sessions)
+        if n_sessions <= 10:
+            tick_spacing = 2
+        elif n_sessions <= 30:
+            tick_spacing = 5
+        elif n_sessions <= 80:
+            tick_spacing = 10
+        elif n_sessions <= 100:
+            tick_spacing = 20
+        else:
+            tick_spacing = 50
+        
+        # Create x-axis ticks and labels
+        x_ticks = [i for i in session_nums if i % tick_spacing == 0]
+        ax.set_xticks(x_ticks)
+        ax.set_xticklabels([str(i) for i in x_ticks])
+        ax.set_xlim([0.5, n_sessions + 0.5])
+        
+        # Format title: split by "_" and capitalize each word
+        title_formatted = " ".join(word.capitalize() for word in var.split(".")[0].split("_")) + (f" ({var.split('.')[1].capitalize()})" if '.' in var else "")
+
+        
+        ax.set_xlabel("Session Number", fontsize=16, fontweight='bold')
+        ax.set_ylabel(var.replace("_", " ").title(), fontsize=16, fontweight='bold')
+        ax.set_title(title_formatted, fontsize=16, fontweight='bold')
+        ax.tick_params(axis='both', labelsize=12)
+        
+        # Make axes bold
+        ax.spines['left'].set_linewidth(2)
+        ax.spines['bottom'].set_linewidth(2)
+        
+        # Remove upper and right spines
+        ax.spines['top'].set_visible(False)
+        ax.spines['right'].set_visible(False)
+
+        # No grid
+        ax.grid(False)
+
+        # Build separate legends: subjects (markers) and protocols (colors)
+        subject_handles = [
+            Line2D([0], [0],
+                   marker=subj_to_marker[sid],
+                   color="black", linestyle="",
+                   markerfacecolor="white",
+                   markeredgecolor="black",
+                   markersize=7,
+                   label=f"sub-{sid:03d}")
+            for sid in unique_subj
+        ]
+        protocol_handles = [
+            Line2D([0], [0],
+                   marker='o',
+                   color='none', linestyle="",
+                   markerfacecolor=prot_to_color[p],
+                   markeredgecolor="black",
+                   markersize=7,
+                   label=p)
+            for p in unique_protocols
+        ]
+
+        # Place legends
+        if subject_handles:
+            leg1 = ax.legend(handles=subject_handles, title="Subjects", loc="upper left", bbox_to_anchor=(1.02, 1.0))
+            ax.add_artist(leg1)
+        if protocol_handles:
+            ax.legend(handles=protocol_handles, title="Protocols", loc="lower left", bbox_to_anchor=(1.02, 0.0))
+
+        plt.tight_layout()
+        figs.append(fig)
+
+    return figs
+
+def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_path=None, plot_choice_acc=False):
+    """
+    Plot decision accuracy by odor (A, B) and total over dates.
+    Optionally include global choice accuracy as a separate line.
+    Fast version using pre-computed metrics with existing helper functions.
     
     Parameters:
     -----------
-    subjids : int or list of int
-        Subject ID(s) to plot
-    dates : int/str or list of int/str
-        Date(s) to plot for each subject
-    split_days : bool, optional
-        If True, reset cumulative count to 0 for each day
-        If False, accumulate rewards continuously across days
+    subjid : int
+        Subject ID
+    dates : tuple, list, or None
+        Date or date range. If None, plots all available dates.
     figsize : tuple, optional
-        Figure size (width, height)
-    title : str, optional
-        Custom plot title. If None, uses default title
-    save_path : str or Path, optional
-        If provided, saves the plot to this path
+        Figure size (default: (12, 6))
+    save_path : str, optional
+        Path to save the figure. If None, figure is not saved.
+    plot_choice_acc : bool, optional
+        If True, also plot global choice accuracy as a dark grey line (default: False)
     
     Returns:
     --------
-    fig, ax : matplotlib figure and axis objects
+    fig, ax : matplotlib figure and axes
     """
-    # Ensure subjids and dates are lists
-    if not isinstance(subjids, (list, tuple)):
-        subjids = [subjids]
-    if not isinstance(dates, (list, tuple)):
-        dates = [dates]
+    rows = []
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            
+            metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
+            if metrics is None:
+                continue
+            
+            # Extract DA by odor using the helper function
+            acc_by_odor = metrics.get('decision_accuracy_by_odor', {})
+            acc_total = _extract_metric_value(metrics, 'decision_accuracy')
+            
+            # Add odor-specific accuracies
+            for odor, acc in acc_by_odor.items():
+                if isinstance(acc, (int, float)) and not np.isnan(acc):
+                    rows.append({
+                        "date": int(date_str),
+                        "odor": str(odor),
+                        "accuracy": float(acc)
+                    })
+            
+            # Add total accuracy
+            if isinstance(acc_total, (int, float)) and not np.isnan(acc_total):
+                rows.append({
+                    "date": int(date_str),
+                    "odor": "Total",
+                    "accuracy": float(acc_total)
+                })
+            
+            # Add global choice accuracy if requested
+            if plot_choice_acc:
+                gca = metrics.get('global_choice_accuracy', None)
+                if isinstance(gca, (tuple, list)) and len(gca) >= 3:
+                    gca_value = gca[2]
+                    if isinstance(gca_value, (int, float)) and not np.isnan(gca_value):
+                        rows.append({
+                            "date": int(date_str),
+                            "odor": "Global Choice Accuracy",
+                            "accuracy": float(gca_value)
+                        })
+    
+    if not rows:
+        print("No data found")
+        return None, None
+    
+    df = pd.DataFrame(rows)
+    unique_dates = sorted(df["date"].unique())
+    date_to_x = {d: i for i, d in enumerate(unique_dates)}
+    df["x"] = df["date"].map(date_to_x)
+    
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    colors = {'A': '#FF6B6B', 'B': '#4ECDC4', 'Total': 'black', 'Global Choice Accuracy': '#404040'}
+    linewidths = {'A': 1.5, 'B': 1.5, 'Total': 3, 'Global Choice Accuracy': 2.5}
+    markers = {'A': 'o', 'B': 'o', 'Total': 's', 'Global Choice Accuracy': '^'}
+    linestyles = {'A': '-', 'B': '-', 'Total': '-', 'Global Choice Accuracy': '--'}
+    
+    # Determine which odors to plot
+    odors_to_plot = ['A', 'B', 'Total']
+    if plot_choice_acc:
+        odors_to_plot.append('Global Choice Accuracy')
+    
+    for odor in odors_to_plot:
+        subset = df[df["odor"] == odor]
+        if not subset.empty:
+            ax.plot(subset["x"].values, subset["accuracy"].values, 
+                   label=odor,
+                   color=colors.get(odor, '#999999'),
+                   linewidth=linewidths.get(odor, 1.5),
+                   linestyle=linestyles.get(odor, '-'),
+                   marker=markers.get(odor, 'o'),
+                   markersize=4 if odor != 'Total' and odor != 'Global Choice Accuracy' else 6,
+                   alpha=0.7 if odor != 'Total' and odor != 'Global Choice Accuracy' else 0.8,
+                   zorder=10 if odor in ['Total', 'Global Choice Accuracy'] else 1)
+    
+    ax.set_xlabel('Days', fontsize=12)
+    ax.set_ylabel('Accuracy', fontsize=12)
+    ax.set_ylim([0, 1.05])
+    ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1, alpha=0.3)
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc='best', fontsize=10)
+    title = f"Subject {str(subjid).zfill(3)} - Decision Accuracy by Odor"
+    if plot_choice_acc:
+        title += " (with Global Choice Accuracy)"
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
+    return fig, ax
+
+def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
+    """
+    Plot sampling times (poke durations) by position and by odor for completed and aborted trials.
+    Loads all data into a DataFrame first, then plots.
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    # Load all data into lists
+    rows = []
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            
+            try:
+                results = load_session_results(subjid, date_str)
+            except Exception:
+                continue
+            
+            # ============ COMPLETED TRIALS ============
+            comp = results.get("completed_sequences", pd.DataFrame())
+            if not comp.empty and "position_poke_times" in comp.columns:
+                for ppt in comp["position_poke_times"]:
+                    ppt_dict = parse_json_column(ppt)
+                    if isinstance(ppt_dict, dict):
+                        for pos_str, info in ppt_dict.items():
+                            if not isinstance(info, dict):
+                                continue
+                            poke_ms = info.get("poke_time_ms")
+                            odor = info.get("odor_name")
+                            
+                            if poke_ms is not None and isinstance(poke_ms, (int, float)) and poke_ms > 0:
+                                try:
+                                    rows.append({
+                                        "trial_type": "completed",
+                                        "position": int(pos_str),
+                                        "odor": str(odor) if odor else None,
+                                        "poke_time_ms": float(poke_ms)
+                                    })
+                                except (ValueError, TypeError):
+                                    continue
+            
+            # ============ ABORTED TRIALS ============
+            ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
+            if not ab_det.empty and "presentations" in ab_det.columns:
+                for presentations, last_event_idx in zip(ab_det["presentations"], ab_det.get("last_event_index", [None]*len(ab_det))):
+                    pres_list = parse_json_column(presentations)
+                    
+                    if isinstance(pres_list, list):
+                        for pres in pres_list:
+                            if not isinstance(pres, dict):
+                                continue
+                            
+                            idx = pres.get("index_in_trial")
+                            if idx == last_event_idx:
+                                continue
+                            
+                            poke_ms = pres.get("poke_time_ms")
+                            pos = pres.get("position")
+                            odor = pres.get("odor_name")
+                            
+                            if poke_ms is not None and isinstance(poke_ms, (int, float)) and poke_ms > 0:
+                                try:
+                                    rows.append({
+                                        "trial_type": "aborted",
+                                        "position": int(pos) if pos is not None else None,
+                                        "odor": str(odor) if odor else None,
+                                        "poke_time_ms": float(poke_ms)
+                                    })
+                                except (ValueError, TypeError):
+                                    continue
+    
+    if not rows:
+        print("No data found")
+        return None, None
+    
+    # Convert to DataFrame
+    df = pd.DataFrame(rows)
+    
+    # Create figure
+    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    
+    # ============ PLOT 1: Completed by Position ============
+    ax = axes[0, 0]
+    df_comp_pos = df[(df["trial_type"] == "completed") & (df["position"].notna())].copy()
+    
+    if not df_comp_pos.empty:
+        positions = sorted(df_comp_pos["position"].unique())
+        
+        means = []
+        stds = []
+        
+        for pos in positions:
+            values = df_comp_pos[df_comp_pos["position"] == pos]["poke_time_ms"].values
+            
+            # Scatter with jitter
+            x_jitter = np.random.normal(pos, 0.04, size=len(values))
+            ax.scatter(x_jitter, values, alpha=0.4, s=20, color='steelblue')
+            
+            means.append(np.mean(values))
+            stds.append(np.std(values))
+        
+        # Mean points with error bars (no line)
+        ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(positions, means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(positions)
+    
+    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
+    ax.set_title(f'Completed Trials: Sampling Time by Position\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 2: Aborted by Position ============
+    ax = axes[0, 1]
+    df_abort_pos = df[(df["trial_type"] == "aborted") & (df["position"].notna())].copy()
+    
+    if not df_abort_pos.empty:
+        positions = sorted(df_abort_pos["position"].unique())
+        
+        means = []
+        stds = []
+        
+        for pos in positions:
+            values = df_abort_pos[df_abort_pos["position"] == pos]["poke_time_ms"].values
+            
+            # Scatter with jitter
+            x_jitter = np.random.normal(pos, 0.04, size=len(values))
+            ax.scatter(x_jitter, values, alpha=0.4, s=20, color='coral')
+            
+            means.append(np.mean(values))
+            stds.append(np.std(values))
+        
+        # Mean points with error bars (no line)
+        ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(positions, means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(positions)
+    
+    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
+    ax.set_title(f'Aborted Trials: Sampling Time by Position\n(excl. abort position)', 
+                fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 3: Completed by Odor ============
+    ax = axes[1, 0]
+    df_comp_odor = df[(df["trial_type"] == "completed") & (df["odor"].notna())].copy()
+    
+    if not df_comp_odor.empty:
+        odors = sorted(df_comp_odor["odor"].unique())
+        odor_to_x = {odor: i for i, odor in enumerate(odors)}
+        
+        means = []
+        stds = []
+        
+        for odor in odors:
+            values = df_comp_odor[df_comp_odor["odor"] == odor]["poke_time_ms"].values
+            x_pos = odor_to_x[odor]
+            
+            # Scatter with jitter
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(values))
+            ax.scatter(x_jitter, values, alpha=0.4, s=20, color='steelblue')
+            
+            means.append(np.mean(values))
+            stds.append(np.std(values))
+        
+        # Mean points with error bars (no line)
+        ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(range(len(odors)), means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(odors)))
+        ax.set_xticklabels(odors)
+    
+    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
+    ax.set_title(f'Completed Trials: Sampling Time by Odor\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 4: Aborted by Odor ============
+    ax = axes[1, 1]
+    df_abort_odor = df[(df["trial_type"] == "aborted") & (df["odor"].notna())].copy()
+    
+    if not df_abort_odor.empty:
+        odors = sorted(df_abort_odor["odor"].unique())
+        odor_to_x = {odor: i for i, odor in enumerate(odors)}
+        
+        means = []
+        stds = []
+        
+        for odor in odors:
+            values = df_abort_odor[df_abort_odor["odor"] == odor]["poke_time_ms"].values
+            x_pos = odor_to_x[odor]
+            
+            # Scatter with jitter
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(values))
+            ax.scatter(x_jitter, values, alpha=0.4, s=20, color='coral')
+            
+            means.append(np.mean(values))
+            stds.append(np.std(values))
+        
+        # Mean points with error bars (no line)
+        ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SD')
+        ax.errorbar(range(len(odors)), means, yerr=stds, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(odors)))
+        ax.set_xticklabels(odors)
+    
+    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
+    ax.set_title(f'Aborted Trials: Sampling Time by Odor\n(excl. abort odor)', 
+                fontsize=12, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    plt.tight_layout()
+    return fig, axes
+
+def plot_abortion_and_fa_rates(
+    subjid, 
+    dates=None, 
+    figsize=(18, 14),
+    include_noninitiated_in_fa_odor=True
+):
+    """
+    Plot FA rates, abortion rates, and FA ratio by position and odor across sessions.
+    Uses pre-computed metrics from saved JSON files.
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    dates : list, tuple, or None
+        Dates to include
+    figsize : tuple
+        Figure size
+    include_noninitiated_in_fa_odor : bool
+        If True, include non-initiated FAs in FA Rate per Odor.
+        If False, only include aborted FAs.
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    rows = []
+    fa_port_rows = []
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            
+            metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
+            if metrics is None:
+                continue
+            
+            # ============ FA RATES ============
+            fa_stats = metrics.get("fa_abortion_stats", {})
+
+            # FA rate per odor (FA Time In only)
+            fa_by_odor = fa_stats.get("by_odor", [])
+            if isinstance(fa_by_odor, list):
+                for item in fa_by_odor:
+                    if isinstance(item, dict) and "Odor" in item:
+                        odor = item["Odor"]
+                        total_ab = item.get("Total Abortions")
+                        fa_time_in_str = item.get("FA Time In", "")
+                        # Extract count from format like "5 (0.50)"
+                        if "(" in fa_time_in_str and total_ab is not None:
+                            try:
+                                fa_time_in_count = int(fa_time_in_str.split()[0])
+                                fa_ratio = fa_time_in_count / total_ab
+                                rows.append({
+                                    "date": int(date_str),
+                                    "metric_type": "fa_rate",
+                                    "category": "odor",
+                                    "position_or_odor": str(odor),
+                                    "rate": fa_ratio
+                                })
+                            except (ValueError, IndexError):
+                                continue
+
+            # FA rate per position (FA Time In only)
+            fa_by_position = fa_stats.get("by_position", [])
+            if isinstance(fa_by_position, list):
+                for item in fa_by_position:
+                    if isinstance(item, dict) and "Position" in item:
+                        pos = item["Position"]
+                        total_ab = item.get("Total Abortions")
+                        fa_time_in_str = item.get("FA Time In", "")
+                        # Extract count from format like "5 (0.50)"
+                        if "(" in fa_time_in_str and total_ab is not None:
+                            try:
+                                pos_int = int(pos)
+                                fa_time_in_count = int(fa_time_in_str.split()[0])
+                                fa_ratio = fa_time_in_count / total_ab
+                                rows.append({
+                                    "date": int(date_str),
+                                    "metric_type": "fa_rate",
+                                    "category": "position",
+                                    "position_or_odor": pos_int,
+                                    "rate": fa_ratio
+                                })
+                            except (ValueError, IndexError):
+                                continue
+            
+            # Non-Initiated FA before position 1 (add as "Non-Initiated" to position category)
+            fa_noninit_rate = metrics.get("non_initiated_FA_rate", None)
+            if isinstance(fa_noninit_rate, (tuple, list)) and len(fa_noninit_rate) == 3:
+                n_fa, n_total, rate_noninit = fa_noninit_rate
+                rows.append({
+                    "date": int(date_str),
+                    "metric_type": "fa_rate",
+                    "category": "position",
+                    "position_or_odor": "Non-Initiated",
+                    "rate": rate_noninit
+                })
+
+            # ============ FA PORT RATIO A/(A+B) for secondary axis ============
+            # Extract from raw results for FA Ratio per odor
+            try:
+                results = load_session_results(subjid, date_str)
+                ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
+                fa_noninit = results.get("non_initiated_FA", pd.DataFrame())
+                
+                # Combine or not based on parameter
+                if include_noninitiated_in_fa_odor:
+                    fa_ab = ab_det[ab_det["fa_label"].str.startswith("FA_")].copy() if not ab_det.empty else pd.DataFrame()
+                    fa_ni = fa_noninit[fa_noninit["fa_label"].str.startswith("FA_")].copy() if not fa_noninit.empty else pd.DataFrame()
+                    fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True)
+                else:
+                    fa_all = ab_det[ab_det["fa_label"].str.startswith("FA_")].copy() if not ab_det.empty else pd.DataFrame()
+                
+                # Calculate FA port ratio per odor
+                if not fa_all.empty and "fa_port" in fa_all.columns and "last_odor_name" in fa_all.columns:
+                    for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
+                        fa_odor = fa_all[fa_all["last_odor_name"] == odor]
+                        n_a = (fa_odor["fa_port"] == 1).sum()
+                        n_b = (fa_odor["fa_port"] == 2).sum()
+                        n_total = n_a + n_b
+                        ratio_a = n_a / n_total if n_total > 0 else np.nan
+                        fa_port_rows.append({
+                            "date": int(date_str),
+                            "odor": str(odor),
+                            "fa_ratio_a": ratio_a
+                        })
+            except Exception:
+                pass
+            
+            # ============ ABORTION RATES ============
+            
+            # Abortion rate per position
+            ab_pos_data = metrics.get("abortion_rate_positionX", {})
+            if isinstance(ab_pos_data, dict):
+                for pos, rate in ab_pos_data.items():
+                    if rate is not None and isinstance(rate, (int, float)):
+                        try:
+                            rows.append({
+                                "date": int(date_str),
+                                "metric_type": "abortion_rate",
+                                "category": "position",
+                                "position_or_odor": int(pos),
+                                "rate": float(rate)
+                            })
+                        except (ValueError, TypeError):
+                            continue
+            
+            # Abortion rate per odor
+            ab_odor_data = metrics.get("odorx_abortion_rate", {})
+            if isinstance(ab_odor_data, dict):
+                for odor, rate in ab_odor_data.items():
+                    if rate is not None and isinstance(rate, (int, float)):
+                        rows.append({
+                            "date": int(date_str),
+                            "metric_type": "abortion_rate",
+                            "category": "odor",
+                            "position_or_odor": str(odor),
+                            "rate": float(rate)
+                        })
+    
+    if not rows:
+        print("No data found")
+        return None, None
+    
+    df = pd.DataFrame(rows)
+    df_port = pd.DataFrame(fa_port_rows) if fa_port_rows else pd.DataFrame()
+    
+    # Create figure with 5 subplots (3 rows: top 2x2, bottom 1x2 centered)
+    fig = plt.figure(figsize=figsize)
+    gs = fig.add_gridspec(3, 2, hspace=0.35, wspace=0.3)
+    ax1 = fig.add_subplot(gs[0, 0])
+    ax2 = fig.add_subplot(gs[0, 1])
+    ax3 = fig.add_subplot(gs[1, 0])
+    ax4 = fig.add_subplot(gs[1, 1])
+    ax5 = fig.add_subplot(gs[2, :])  # Spans full width
+    
+    axes = [ax1, ax2, ax3, ax4, ax5]
+    
+    # ============ PLOT 1: FA Rate per Position (with Non-Initiated) ============
+    ax = ax1
+    df_fa_pos = df[(df["metric_type"] == "fa_rate") & (df["category"] == "position")].copy()
+    
+    if not df_fa_pos.empty:
+        # Sort positions: Non-Initiated first, then 1, 2, 3, 4, 5
+        positions = ["Non-Initiated"] + sorted([p for p in df_fa_pos["position_or_odor"].unique() if p != "Non-Initiated"])
+        position_to_x = {pos: i for i, pos in enumerate(positions)}
+        
+        for pos in positions:
+            rates = df_fa_pos[df_fa_pos["position_or_odor"] == pos]["rate"].values
+            x_pos = position_to_x[pos]
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(rates))
+            ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='steelblue')
+        
+        means = [df_fa_pos[df_fa_pos["position_or_odor"] == pos]["rate"].mean() for pos in positions]
+        sems = [df_fa_pos[df_fa_pos["position_or_odor"] == pos]["rate"].sem() for pos in positions]
+        
+        ax.scatter(range(len(positions)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SEM')
+        ax.errorbar(range(len(positions)), means, yerr=sems, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(positions)))
+        ax.set_xticklabels(positions)
+    
+    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
+    ax.set_ylabel('FA Rate', fontsize=11, fontweight='bold')
+    ax.set_title(f'FA Rate per Position\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 2: FA Rate per Odor ============
+    ax = ax2
+    df_fa_odor = df[(df["metric_type"] == "fa_rate") & (df["category"] == "odor")].copy()
+    
+    if not df_fa_odor.empty:
+        odors = sorted(df_fa_odor["position_or_odor"].unique())
+        odor_to_x = {odor: i for i, odor in enumerate(odors)}
+        
+        for odor in odors:
+            rates = df_fa_odor[df_fa_odor["position_or_odor"] == odor]["rate"].values
+            x_pos = odor_to_x[odor]
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(rates))
+            ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='steelblue')
+        
+        means = [df_fa_odor[df_fa_odor["position_or_odor"] == odor]["rate"].mean() for odor in odors]
+        sems = [df_fa_odor[df_fa_odor["position_or_odor"] == odor]["rate"].sem() for odor in odors]
+        
+        ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SEM')
+        ax.errorbar(range(len(odors)), means, yerr=sems, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(odors)))
+        ax.set_xticklabels(odors)
+    
+    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
+    ax.set_ylabel('FA Rate', fontsize=11, fontweight='bold')
+    ax.set_title(f'FA Rate per Odor\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 3: Abortion Rate per Position ============
+    ax = ax3
+    df_ab_pos = df[(df["metric_type"] == "abortion_rate") & (df["category"] == "position")].copy()
+    
+    if not df_ab_pos.empty:
+        positions = sorted(df_ab_pos["position_or_odor"].unique())
+        
+        for pos in positions:
+            rates = df_ab_pos[df_ab_pos["position_or_odor"] == pos]["rate"].values
+            x_jitter = np.random.normal(pos, 0.04, size=len(rates))
+            ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='coral')
+        
+        means = [df_ab_pos[df_ab_pos["position_or_odor"] == pos]["rate"].mean() for pos in positions]
+        sems = [df_ab_pos[df_ab_pos["position_or_odor"] == pos]["rate"].sem() for pos in positions]
+        
+        ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SEM')
+        ax.errorbar(positions, means, yerr=sems, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(positions)
+    
+    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Abortion Rate', fontsize=11, fontweight='bold')
+    ax.set_title(f'Abortion Rate per Position\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 4: Abortion Rate per Odor ============
+    ax = ax4
+    df_ab_odor = df[(df["metric_type"] == "abortion_rate") & (df["category"] == "odor")].copy()
+    
+    if not df_ab_odor.empty:
+        odors = sorted(df_ab_odor["position_or_odor"].unique())
+        odor_to_x = {odor: i for i, odor in enumerate(odors)}
+        
+        for odor in odors:
+            rates = df_ab_odor[df_ab_odor["position_or_odor"] == odor]["rate"].values
+            x_pos = odor_to_x[odor]
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(rates))
+            ax.scatter(x_jitter, rates, alpha=0.4, s=20, color='coral')
+        
+        means = [df_ab_odor[df_ab_odor["position_or_odor"] == odor]["rate"].mean() for odor in odors]
+        sems = [df_ab_odor[df_ab_odor["position_or_odor"] == odor]["rate"].sem() for odor in odors]
+        
+        ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SEM')
+        ax.errorbar(range(len(odors)), means, yerr=sems, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(odors)))
+        ax.set_xticklabels(odors)
+    
+    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
+    ax.set_ylabel('Abortion Rate', fontsize=11, fontweight='bold')
+    ax.set_title(f'Abortion Rate per Odor\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    # ============ PLOT 5: FA Ratio A / (A+B) per Odor (full width) ============
+    ax = ax5
+    if not df_port.empty:
+        odors = sorted(df_port["odor"].unique())
+        odor_to_x = {odor: i for i, odor in enumerate(odors)}
+        
+        for odor in odors:
+            ratios = df_port[df_port["odor"] == odor]["fa_ratio_a"].values
+            x_pos = odor_to_x[odor]
+            x_jitter = np.random.normal(x_pos, 0.04, size=len(ratios))
+            ax.scatter(x_jitter, ratios, alpha=0.4, s=20, color='steelblue')
+        
+        means = [df_port[df_port["odor"] == odor]["fa_ratio_a"].mean() for odor in odors]
+        sems = [df_port[df_port["odor"] == odor]["fa_ratio_a"].sem() for odor in odors]
+        
+        ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
+                  edgecolors='black', linewidth=1.5, label='Mean ± SEM')
+        ax.errorbar(range(len(odors)), means, yerr=sems, fmt='none', ecolor='darkred', 
+                   capsize=5, capthick=2, linewidth=2, zorder=4)
+        ax.set_xticks(range(len(odors)))
+        ax.set_xticklabels(odors)
+    
+    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
+    ax.set_ylabel('FA Ratio A / (A+B)', fontsize=11, fontweight='bold')
+    ax.set_title(f'FA Ratio A/(A+B) per Odor\n(Subject {str(subjid).zfill(3)})', 
+                fontsize=12, fontweight='bold')
+    ax.set_ylim([0, 1.05])
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best')
+    
+    return fig, axes
+
+def plot_response_times_completed_vs_fa(subjid, dates=None, figsize=(12, 8), y_limit=20000):
+    """
+    Scatter plot comparing average response times for completed sequences vs FA Time In abortions.
+    Both metrics on the same plot sharing Y-axis for easy comparison.
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    dates : tuple, list, or None
+        Date or date range. If None, plots all available dates.
+    figsize : tuple, optional
+        Figure size (default: (12, 8))
+    y_limit : float, optional
+        Maximum Y-axis value to display (default: 20000). Points above this are excluded.
+    
+    Returns:
+    --------
+    fig, ax : matplotlib figure and axes
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    rows = []
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            
+            metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
+            if metrics is None:
+                continue
+            
+            # Get average response time for completed sequences
+            avg_resp_times = metrics.get("avg_response_time", {})
+            completed_rt = avg_resp_times.get("Average Response Time (Rewarded + Unrewarded)")
+            if completed_rt is not None and not np.isnan(completed_rt):
+                rows.append({
+                    "date": int(date_str),
+                    "response_type": "Completed Sequences",
+                    "response_time_ms": float(completed_rt)
+                })
+            
+            # Get average response time for FA Time In abortions
+            fa_resp_times = metrics.get("FA_avg_response_times", {})
+            fa_time_in_rt = fa_resp_times.get("Aborted FA Time In")
+            if fa_time_in_rt is not None and not np.isnan(fa_time_in_rt):
+                rows.append({
+                    "date": int(date_str),
+                    "response_type": "FA Time In Abortions",
+                    "response_time_ms": float(fa_time_in_rt)
+                })
+    
+    if not rows:
+        print("No data found")
+        return None, None
+    
+    df = pd.DataFrame(rows)
+    
+    # Filter by y_limit
+    df_filtered = df[df["response_time_ms"] <= y_limit].copy()
+    
+    if df_filtered.empty:
+        print(f"No data found below y_limit={y_limit}")
+        return None, None
     
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
     
-    # Define colors for different subjects
-    colors = plt.cm.tab10(range(len(subjids)))
+    response_types = ["Completed Sequences", "FA Time In Abortions"]
+    x_positions = [0, 1]
+    colors = ['steelblue', 'coral']
     
-    # Plot each subject
+    for x_pos, resp_type, color in zip(x_positions, response_types, colors):
+        df_subset = df_filtered[df_filtered["response_type"] == resp_type].copy()
+        
+        if not df_subset.empty:
+            values = df_subset["response_time_ms"].values
+            
+            # Scatter with jitter
+            x_jitter = np.random.normal(x_pos, 0.08, size=len(values))
+            ax.scatter(x_jitter, values, alpha=0.4, s=80, color=color, zorder=3)
+            
+            # Calculate mean and std
+            mean_rt = values.mean()
+            std_rt = values.std()
+            
+            # Plot mean point with error bars
+            ax.scatter([x_pos], [mean_rt], color='darkred', s=150, zorder=5, marker='D',
+                      edgecolors='black', linewidth=2, label='Mean ± SD' if x_pos == 0 else "")
+            ax.errorbar([x_pos], [mean_rt], yerr=std_rt, fmt='none', ecolor='darkred',
+                       capsize=8, capthick=2, linewidth=2.5, zorder=4)
+    
+    ax.set_xlim([-0.5, 1.5])
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(response_types, fontsize=12, fontweight='bold')
+    ax.set_ylabel('Response Time (ms)', fontsize=12, fontweight='bold')
+    ax.set_ylim([0, y_limit])
+    ax.set_title(f'Average Response Times Comparison\n(Subject {str(subjid).zfill(3)})',
+                fontsize=14, fontweight='bold')
+    ax.grid(True, alpha=0.3, axis='y')
+    ax.legend(loc='best', fontsize=11)
+    
+    plt.tight_layout()
+    return fig, ax
+
+def plot_fa_ratio_a_over_sessions(
+    subjid,
+    dates=None,
+    figsize=(14, 10),
+    include_noninitiated=True
+):
+    """
+    Plot FA Ratio A/(A+B) over sessions for each odor.
+    One plot per odor, with X-axis as session number and Y-axis as FA Ratio A/(A+B).
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    dates : list, tuple, or None
+        Dates to include. Can be:
+        - None: all available dates
+        - (start_date, end_date): date range (inclusive)
+        - [date1, date2, ...]: specific dates
+    figsize : tuple
+        Figure size
+    include_noninitiated : bool
+        If True, include non-initiated FAs in the ratio calculation.
+        If False, only include aborted FAs.
+    
+    Returns:
+    --------
+    figs : dict
+        Dictionary mapping odor names to matplotlib Figure objects.
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    fa_data = {}  # {odor: [(session_num, ratio, n_a, n_b, n_total), ...]}
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        
+        for session_num, ses in enumerate(ses_dirs, start=1):
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            
+            try:
+                results = load_session_results(subjid, date_str)
+                ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
+                fa_noninit = results.get("non_initiated_FA", pd.DataFrame())
+                
+                # Combine or not based on parameter
+                if include_noninitiated:
+                    fa_ab = ab_det[ab_det["fa_label"].str.startswith("FA_")].copy() if not ab_det.empty else pd.DataFrame()
+                    fa_ni = fa_noninit[fa_noninit["fa_label"].str.startswith("FA_")].copy() if not fa_noninit.empty else pd.DataFrame()
+                    fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True)
+                else:
+                    fa_all = ab_det[ab_det["fa_label"].str.startswith("FA_")].copy() if not ab_det.empty else pd.DataFrame()
+                
+                # Calculate FA port ratio per odor
+                if not fa_all.empty and "fa_port" in fa_all.columns and "last_odor_name" in fa_all.columns:
+                    for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
+                        fa_odor = fa_all[fa_all["last_odor_name"] == odor]
+                        n_a = (fa_odor["fa_port"] == 1).sum()
+                        n_b = (fa_odor["fa_port"] == 2).sum()
+                        n_total = n_a + n_b
+                        ratio_a = n_a / n_total if n_total > 0 else np.nan
+                        
+                        if odor not in fa_data:
+                            fa_data[odor] = []
+                        fa_data[odor].append({
+                            "session_num": session_num,
+                            "date": int(date_str),
+                            "ratio_a": ratio_a,
+                            "n_a": n_a,
+                            "n_b": n_b,
+                            "n_total": n_total
+                        })
+            except Exception as e:
+                print(f"Error processing session {session_num} (date {date_str}): {e}")
+                continue
+    
+    if not fa_data:
+        print("No FA data found")
+        return {}
+    
+    # Create one figure per odor
+    figs = {}
+    odor_list = sorted(fa_data.keys())
+    
+    for odor in odor_list:
+        data = fa_data[odor]
+        
+        # Sort by session number
+        data = sorted(data, key=lambda x: x["session_num"])
+        
+        # Use range(len(data)) for evenly spaced x-axis
+        x_positions = np.arange(len(data))
+        session_nums = [d["session_num"] for d in data]
+        ratios = [d["ratio_a"] for d in data]
+        n_a_list = [d["n_a"] for d in data]
+        n_total_list = [d["n_total"] for d in data]
+        
+        # Create figure
+        fig, ax = plt.subplots(figsize=figsize)
+        
+        # Plot with evenly spaced x-axis
+        ax.plot(x_positions, ratios, color='black', linewidth=1.0, alpha=0.6, zorder=1)
+        ax.scatter(x_positions, ratios, s=40, color='black', alpha=0.8, 
+                  edgecolors='black', linewidth=0.5, zorder=3)
+        
+        # Add horizontal line at 0.5 (chance level) - grey, thin, no label
+        ax.axhline(y=0.5, color='#888888', linestyle='--', linewidth=1.0, alpha=0.5, zorder=0)
+        
+        # Add text annotations for each point showing n_a / n_total
+        # All text at same height above plot
+        y_text = 1.08
+        for x_pos, n_a, n_total in zip(x_positions, n_a_list, n_total_list):
+            ax.text(x_pos, y_text, f"{n_a}/{n_total}", 
+                   ha='center', va='bottom', fontsize=9, fontweight='bold',
+                   transform=ax.get_xaxis_transform())
+        
+        # Set x-axis to fit all data with even spacing
+        ax.set_xlim([-0.5, len(data) - 0.5])
+        ax.set_xticks(x_positions)
+        ax.set_xticklabels([str(sn) for sn in session_nums])
+        
+        ax.set_xlabel('Session Number', fontsize=12, fontweight='bold')
+        ax.set_ylabel('FA Ratio A / (A+B)', fontsize=12, fontweight='bold')
+        ax.set_title(f'FA Ratio Odor {odor}\n(Subject {str(subjid).zfill(3)})',
+                    fontsize=13, fontweight='bold')
+        ax.set_ylim([0, 1.0])
+        ax.grid(False)
+        
+        plt.tight_layout()
+        figs[odor] = fig
+    
+    return figs
+
+
+# =========================================================== Movement & Behavior Plotting Functions ================================================================
+
+
+def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), title=None, save_path=None):
+    # Ensure subjids is a list
+    if not isinstance(subjids, (list, tuple)):
+        subjids = [subjids]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    colors = plt.cm.tab10(range(len(subjids)))
+
     for subj_idx, subjid in enumerate(subjids):
         all_rewarded = []
         session_info = []
-        
-        # Load data for each date
-        for date in dates:
+
+        # Find subject directory
+        base_path = Path(project_root) / "data" / "rawdata"
+        server_root = base_path.resolve().parent
+        derivatives_dir = server_root / "derivatives"
+        subj_str = f"sub-{str(subjid).zfill(3)}"
+        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+        if not subj_dirs:
+            print(f"Warning: No subject directory found for {subj_str}")
+            continue
+        subj_dir = subj_dirs[0]
+
+        # Use _filter_session_dirs to get session directories
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
             try:
-                results = load_session_results(subjid, date)
+                results = load_session_results(subjid, date_str)
                 rewarded_trials = results.get('completed_sequence_rewarded', pd.DataFrame())
                 manifest = results.get('manifest', {})
-                
                 if not rewarded_trials.empty:
                     rewarded_trials = rewarded_trials.copy()
                     rewarded_trials['sequence_start'] = pd.to_datetime(rewarded_trials['sequence_start'])
-                    rewarded_trials['date'] = date
+                    rewarded_trials['date'] = date_str
                     all_rewarded.append(rewarded_trials)
-                    
-                # Store session timing info from manifest
                 runs = manifest.get('session', {}).get('runs', [])
                 if runs:
                     session_info.append({
-                        'date': date,
+                        'date': date_str,
                         'runs': runs,
                         'manifest': manifest
                     })
-                    
             except FileNotFoundError:
-                print(f"Warning: No data found for subject {subjid}, date {date}")
+                print(f"Warning: No data found for subject {subjid}, date {date_str}")
                 continue
         
         if not all_rewarded:
@@ -208,7 +1455,6 @@ def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), t
     plt.show()
     
     return fig, ax
-
 
 
 def plot_movement_trace(subjid, date, smooth_window=10, linewidth=1, alpha=0.5, figsize=(10, 10), 
@@ -648,15 +1894,11 @@ def _load_tracking_and_behavior(subjid, date, tracking_source='auto'):
     
     return tracking, behavior
 
-
-
-
-
 def plot_movement_with_behavior(
     subjid, date,
     mode="simple",                # "simple" | "trial_state" | "last_odor" | "time_windows" | "trial_windows"
     time_windows=None,            # list of ("HH:MM:SS","HH:MM:SS")
-    trial_windows=None,           # list of (start, end). negatives allowed, e.g. (-20, -0) = last 20..last
+    trial_windows=None,           # list of (start, end). negatives allowed, e.g. (-20, None) = last 20..last
     smooth_window=10, linewidth=1, alpha=0.6,
     figsize=(10, 10), xlim=None, ylim=None, invert_y=True,
     last_odor_colors=None,        # {'A':'red','B':'blue','other':'gray'}
@@ -671,8 +1913,7 @@ def plot_movement_with_behavior(
       - trial_windows: plot only trials in provided windows; supports negatives from the end
     Also auto-creates per-condition facet plots when multiple categories/windows exist.
     """
-    assert mode in {"simple", "trial_state", "last_odor", "time_windows", "trial_windows"}
-    import numpy as np
+    assert mode in {"simple", "trial_state", "by_odor", "by_odor_rew", "by_odor_outcome", "time_windows", "trial_windows", "trial_windows_rew"}
     tracking, behavior = _load_tracking_and_behavior(subjid, date)
     def _infer_last_odor_column(trials: pd.DataFrame) -> str | None:
         """
@@ -775,25 +2016,6 @@ def plot_movement_with_behavior(
                            label=(label if first else None))
             first = False
 
-    def _plot_segments_by_category(df, category_series, colors, axes=None, legend_name_func=lambda c: str(c)):
-        target_ax = axes if axes is not None else ax
-        cat = category_series.fillna('other')
-        
-        # Group by consecutive same categories
-        cat_reset = cat.reset_index(drop=True)
-        seg_boundaries = (cat_reset != cat_reset.shift()).cumsum()
-        
-        used = set()
-        for seg_id, seg_idx in seg_boundaries.groupby(seg_boundaries).groups.items():
-            seg_idx = sorted(seg_idx)
-            c = cat_reset.iloc[seg_idx[0]]
-            color = colors.get(c, colors.get('other', 'gray'))
-            segment_df = df.iloc[seg_idx]
-            label = None if c in used else legend_name_func(c)
-            target_ax.plot(segment_df['X_smooth'].values, segment_df['Y_smooth'].values,
-                           color=color, linewidth=linewidth, alpha=alpha, label=label)
-            used.add(c)
-
     facet_plots = []  # collect per-condition masks to facet later
 
     if mode == "simple":
@@ -820,8 +2042,11 @@ def plot_movement_with_behavior(
         ]
 
         
-    elif mode == "last_odor":
-        comps = behavior.get('completed_sequences', pd.DataFrame())
+    elif mode in ["by_odor", "by_odor_rew"]:
+        if mode == "by_odor":
+            comps = behavior.get('completed_sequences', pd.DataFrame())
+        elif mode == "by_odor_rew":
+            comps = behavior.get('completed_sequence_rewarded', pd.DataFrame())
         if comps.empty:
             raise ValueError("No completed_sequences found; last_odor plot requires completed trials.")
         comps = comps.copy()
@@ -850,13 +2075,12 @@ def plot_movement_with_behavior(
         unique_odors = sorted(trial_odor_filtered.unique())
         
         # Plot combined view with all odors
-        _plot_segments_by_category(
-            tracking_in_trial, 
-            trial_odor_filtered, 
-            last_odor_colors, 
-            axes=ax,
-            legend_name_func=lambda c: f"Last odor {c}"
-        )
+        for odor in unique_odors:
+            odor_mask = trial_odor_filtered == odor
+            full_mask = pd.Series(False, index=tracking.index)
+            full_mask.loc[odor_mask.index[odor_mask]] = True
+            color = last_odor_colors.get(odor, last_odor_colors.get('other', 'gray'))
+            _plot_segments_by_mask(tracking, full_mask, color, label=f"Odors: {odor}", axes=ax)
         
         # Create facet plots for individual odors
         facet_plots = []
@@ -865,7 +2089,97 @@ def plot_movement_with_behavior(
             full_mask = pd.Series(False, index=tracking.index)
             full_mask.loc[odor_mask.index[odor_mask]] = True
             color = last_odor_colors.get(odor, last_odor_colors.get('other', 'gray'))
-            facet_plots.append((f"Last odor {odor}", full_mask, color))
+            facet_plots.append((f"{odor}", full_mask, color))
+
+    elif mode == "by_odor_outcome":
+        comps = behavior.get('completed_sequences', pd.DataFrame())
+        if comps.empty:
+            raise ValueError("No completed_sequences found; by_odor_outcome plot requires completed trials.")
+        comps = comps.copy()
+        comps['sequence_start'] = pd.to_datetime(comps['sequence_start'])
+        comps['sequence_end'] = pd.to_datetime(comps['sequence_end'])
+
+        if 'last_odor' not in comps.columns:
+            raise ValueError("The 'last_odor' column is missing in completed_sequences.")
+
+        # Try to infer the rewarded/outcome column
+        rewarded_col = None
+        for cand in ['rewarded', 'is_rewarded', 'outcome', 'correct', 'success']:
+            if cand in comps.columns:
+                rewarded_col = cand
+                break
+        if rewarded_col is None:
+            # Fallback: if completed_sequence_rewarded exists, mark those trials as rewarded
+            rewarded_trials = behavior.get('completed_sequence_rewarded', pd.DataFrame())
+            if not rewarded_trials.empty and 'sequence_start' in rewarded_trials.columns:
+                rewarded_starts = set(pd.to_datetime(rewarded_trials['sequence_start']))
+                comps['__rewarded'] = comps['sequence_start'].isin(rewarded_starts)
+                rewarded_col = '__rewarded'
+            else:
+                raise ValueError("No rewarded/outcome column found in completed_sequences and cannot infer from completed_sequence_rewarded.")
+
+        if last_odor_colors is None:
+            last_odor_colors = {'OdorA': 'red', 'OdorB': 'blue', 'other': 'lightgray'}
+
+        # Map each tracking frame to its odor and outcome category
+        t_time = tracking['time']
+        trial_odor = pd.Series('', index=tracking.index, dtype=object)
+        trial_outcome = pd.Series('', index=tracking.index, dtype=object)
+
+        for _, tr in comps.iterrows():
+            mask = (t_time >= tr['sequence_start']) & (t_time <= tr['sequence_end'])
+            trial_odor.loc[mask] = str(tr['last_odor'])
+            is_rewarded = bool(tr[rewarded_col])
+            trial_outcome.loc[mask] = 'rewarded' if is_rewarded else 'not_rewarded'
+
+        # Filter to only frames within trials
+        in_trial_mask = trial_odor != ''
+        tracking_in_trial = tracking[in_trial_mask].copy()
+        trial_odor_filtered = trial_odor[in_trial_mask]
+        trial_outcome_filtered = trial_outcome[in_trial_mask]
+
+        unique_odors = sorted(trial_odor_filtered.unique())
+
+        # Plot combined view: correct in color, incorrect/timeout in grey
+        for odor in unique_odors:
+            odor_mask = trial_odor_filtered == odor
+            # Rewarded trials for this odor
+            rewarded_mask = odor_mask & (trial_outcome_filtered == 'rewarded')
+            # Not rewarded trials for this odor
+            not_rewarded_mask = odor_mask & (trial_outcome_filtered == 'not_rewarded')
+
+            full_rewarded_mask = pd.Series(False, index=tracking.index)
+            full_rewarded_mask.loc[rewarded_mask.index[rewarded_mask]] = True
+            full_not_rewarded_mask = pd.Series(False, index=tracking.index)
+            full_not_rewarded_mask.loc[not_rewarded_mask.index[not_rewarded_mask]] = True
+
+            color = last_odor_colors.get(odor, last_odor_colors.get('other', 'gray'))
+            _plot_segments_by_mask(tracking, full_rewarded_mask, color, label=f"{odor} (correct)", axes=ax)
+            _plot_segments_by_mask(tracking, full_not_rewarded_mask, 'lightgray', label=f"{odor} (incorrect/timeout)", axes=ax)
+
+        # Create facet plots for each odor/outcome
+        facet_plots = []
+        for odor in unique_odors:
+            odor_mask = trial_odor_filtered == odor
+            rewarded_mask = odor_mask & (trial_outcome_filtered == 'rewarded')
+            not_rewarded_mask = odor_mask & (trial_outcome_filtered == 'not_rewarded')
+
+            full_rewarded_mask = pd.Series(False, index=tracking.index)
+            full_rewarded_mask.loc[rewarded_mask.index[rewarded_mask]] = True
+            full_not_rewarded_mask = pd.Series(False, index=tracking.index)
+            full_not_rewarded_mask.loc[not_rewarded_mask.index[not_rewarded_mask]] = True
+
+            color = last_odor_colors.get(odor, last_odor_colors.get('other', 'gray'))
+            # Use a slightly darker grey for incorrect/timeout
+            dark_grey = '#888888'
+            facet_plots.append((
+                f"{odor} by Outcome",
+                [  # list of (mask, color, label)
+                    (full_rewarded_mask, color, "Correct"),
+                    (full_not_rewarded_mask, dark_grey, "Incorrect/Timeout")
+                ]
+            ))
+
     elif mode == "time_windows":
         if not time_windows:
             raise ValueError("time_windows must be provided for mode='time_windows'.")
@@ -898,11 +2212,13 @@ def plot_movement_with_behavior(
             _plot_segments_by_mask(tracking, mask, color, label=f"Window {i+1}: {ts}-{te}")
             facet_plots.append((f"Window {i+1}: {ts}-{te}", mask, color))
 
-    elif mode == "trial_windows":
-        # Use initiated_sequences as the complete list of trials
-        trials = behavior.get('initiated_sequences', pd.DataFrame())
+    elif mode in ["trial_windows", "trial_windows_rew"]:
+        if mode == "trial_windows":
+            trials = behavior.get('initiated_sequences', pd.DataFrame())
+        elif mode == "trial_windows_rew":
+            trials = behavior.get('completed_sequence_rewarded', pd.DataFrame())
         if trials.empty:
-            raise ValueError("initiated_sequences required for trial_windows.")
+            raise ValueError(f"{mode} requires appropriate trial data.")
         trials = trials.copy()
         trials['sequence_start'] = pd.to_datetime(trials['sequence_start'])
         trials['sequence_end'] = pd.to_datetime(trials['sequence_end'])
@@ -919,8 +2235,11 @@ def plot_movement_with_behavior(
         facet_plots = []
         t_time = tracking['time']
         for i, (start_idx, end_idx) in enumerate(trial_windows):
-            # Use standard Python slicing - negative indices work naturally with iloc
-            sel = trials.iloc[start_idx:end_idx]
+            # If end_idx is 0 or None, select to the end
+            if end_idx in [0, None]:
+                sel = trials.iloc[start_idx:]
+            else:
+                sel = trials.iloc[start_idx:end_idx]
             
             if sel.empty:
                 continue
@@ -961,20 +2280,43 @@ def plot_movement_with_behavior(
         ncols = min(3, n)
         nrows = int(np.ceil(n / ncols))
         facet_fig, facet_axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(figsize[0]*1.2, figsize[1]*1.2))
-        facet_axes = np.array(facet_axes).reshape(-1)  # flatten
-        for i, (label, mask, color) in enumerate(facet_plots):
-            ax_i = facet_axes[i]
-            _plot_segments_by_mask(tracking, mask, color, label=label, axes=ax_i)
+        # Ensure facet_axes is always 2D
+        if nrows == 1 and ncols == 1:
+            facet_axes = np.array([[facet_axes]])
+        elif nrows == 1 or ncols == 1:
+            facet_axes = facet_axes.reshape(nrows, ncols)
+        
+        facet_axes_flat = facet_axes.flatten()
+        
+        for i, facet in enumerate(facet_plots):
+            ax_i = facet_axes_flat[i]
+            label = facet[0]
+            mask_or_list = facet[1]
+            # If mask_or_list is a list, it's the new format (by_odor_outcome)
+            if isinstance(mask_or_list, list):
+                for mask, color, sublabel in mask_or_list:
+                    _plot_segments_by_mask(tracking, mask, color, label=sublabel, axes=ax_i)
+            else:
+                # Old format: (label, mask, color)
+                mask = mask_or_list
+                color = facet[2]
+                _plot_segments_by_mask(tracking, mask, color, label=label, axes=ax_i)
             ax_i.set_title(label)
             ax_i.set_xlabel('X Position (px)')
             ax_i.set_ylabel('Y Position (px)')
+            if xlim:
+                ax_i.set_xlim(xlim)
+            if ylim:
+                ax_i.set_ylim(ylim)
             if invert_y:
                 ax_i.invert_yaxis()
             ax_i.set_aspect('equal', adjustable='box')
             ax_i.grid(True, alpha=0.3)
+        
         # Hide unused axes if any
-        for j in range(len(facet_plots), len(facet_axes)):
-            facet_axes[j].axis('off')
+        for j in range(len(facet_plots), len(facet_axes_flat)):
+            facet_axes_flat[j].axis('off')
+        
         facet_fig.suptitle(f"Per-condition views - Subject {subjid}, {date} ({mode})")
         facet_fig.tight_layout()
 
@@ -1033,7 +2375,6 @@ def get_video_frame_times(root, verbose=True):
         print(f"Time range: {result['time'].min()} to {result['time'].max()}")
     
     return result
-
 
 def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     """
@@ -1221,8 +2562,275 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     
     return combined
 
-
-
+def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_path=None):
+    """
+    Plot choice history over time for one or more sessions.
+    
+    - Y-axis: Choice direction (A=red up, B=blue down)
+    - X-axis: Time
+    - Rewarded trials: solid line with circle marker at end
+    - Completed unrewarded trials: dotted line, no marker
+    - Aborted trials: grey line going up
+    - Multiple sessions: time gaps collapsed, session boundaries marked with grey dotted lines
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    dates : list, tuple, or None
+        Specific dates [20250101, 20250102] or range (20250101, 20250110)
+        If None, plots all available dates
+    figsize : tuple, optional
+        Figure size (default: (16, 8))
+    title : str, optional
+        Plot title. If None, uses default
+    save_path : str or Path, optional
+        If provided, saves the plot to this path
+    
+    Returns:
+    --------
+    fig, ax : matplotlib figure and axis objects
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    subj_str = f"sub-{str(subjid).zfill(3)}"
+    subject_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+    if not subject_dirs:
+        raise FileNotFoundError(f"No subject directory found for {subj_str}")
+    subject_dir = subject_dirs[0]
+    
+    # Get session directories
+    ses_dirs = _filter_session_dirs(subject_dir, dates)
+    if not ses_dirs:
+        raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
+    
+    # Collect all trials across sessions
+    all_trials = []
+    session_boundaries = []  # Store (time_in_plot, date_str) for session starts
+    
+    global_start_time = None
+    time_offset = 0  # Cumulative offset to collapse inter-session gaps
+    
+    for session_idx, ses_dir in enumerate(ses_dirs):
+        date_str = ses_dir.name.split("_date-")[-1]
+        
+        try:
+            results = load_session_results(subjid, date_str)
+        except Exception as e:
+            print(f"Warning: Could not load session {date_str}: {e}")
+            continue
+        
+        # Load completed and aborted trials
+        comp_rew = results.get('completed_sequence_rewarded', pd.DataFrame())
+        comp_unr = results.get('completed_sequence_unrewarded', pd.DataFrame())
+        comp_tmo = results.get('completed_sequence_reward_timeout', pd.DataFrame())
+        aborted = results.get('aborted_sequences', pd.DataFrame())
+        
+        # Process completed rewarded trials
+        if not comp_rew.empty:
+            for idx, row in comp_rew.iterrows():
+                all_trials.append({
+                    'sequence_start': pd.to_datetime(row['sequence_start']),
+                    'last_odor': row.get('last_odor', 'Unknown'),
+                    'trial_type': 'rewarded',
+                    'date_str': date_str,
+                    'session_idx': session_idx
+                })
+        
+        # Process completed unrewarded trials (not timeout)
+        if not comp_unr.empty:
+            for idx, row in comp_unr.iterrows():
+                all_trials.append({
+                    'sequence_start': pd.to_datetime(row['sequence_start']),
+                    'last_odor': row.get('last_odor', 'Unknown'),
+                    'trial_type': 'unrewarded',
+                    'date_str': date_str,
+                    'session_idx': session_idx
+                })
+        
+        # Process timeout trials
+        if not comp_tmo.empty:
+            for idx, row in comp_tmo.iterrows():
+                all_trials.append({
+                    'sequence_start': pd.to_datetime(row['sequence_start']),
+                    'last_odor': row.get('last_odor', 'Unknown'),
+                    'trial_type': 'timeout',
+                    'date_str': date_str,
+                    'session_idx': session_idx
+                })
+        
+        # Process aborted trials
+        if not aborted.empty:
+            for idx, row in aborted.iterrows():
+                all_trials.append({
+                    'sequence_start': pd.to_datetime(row['sequence_start']),
+                    'last_odor': row.get('last_odor_name', 'Unknown'),
+                    'trial_type': 'aborted',
+                    'date_str': date_str,
+                    'session_idx': session_idx
+                })
+    
+    if not all_trials:
+        print(f"No trials found for subject {subjid}")
+        return None, None
+    
+    trials_df = pd.DataFrame(all_trials)
+    trials_df = trials_df.sort_values('sequence_start').reset_index(drop=True)
+    
+    # Set global start time from first trial
+    global_start_time = trials_df['sequence_start'].iloc[0]
+    
+    # Calculate time offsets for each session to collapse inter-session gaps
+    session_time_offsets = {}  # Maps session_idx to cumulative time offset
+    session_boundaries = []  # List of (time_in_plot, session_idx) for drawing lines
+    
+    time_offset = 0
+    prev_session_end = None
+    
+    for session_idx in sorted(trials_df['session_idx'].unique()):
+        session_data = trials_df[trials_df['session_idx'] == session_idx]
+        
+        if session_idx == 0:
+            # First session: no offset
+            session_time_offsets[session_idx] = 0
+        else:
+            # Calculate gap from previous session end to this session start
+            prev_session_data = trials_df[trials_df['session_idx'] == session_idx - 1]
+            
+            if not prev_session_data.empty and not session_data.empty:
+                prev_end = prev_session_data['sequence_start'].max()
+                curr_start = session_data['sequence_start'].min()
+                
+                gap = (curr_start - prev_end).total_seconds()
+                
+                # Add gap to offset (we want to subtract it from timestamps)
+                time_offset += gap
+                session_time_offsets[session_idx] = time_offset
+                
+                # Record boundary: time where this session starts (in plot coordinates)
+                prev_time_in_plot = (prev_end - global_start_time).total_seconds() - session_time_offsets[session_idx - 1]
+                session_boundaries.append((prev_time_in_plot, session_idx))
+    
+    # Calculate plot time for each trial
+    trials_df['time_in_plot'] = trials_df.apply(
+        lambda row: (row['sequence_start'] - global_start_time).total_seconds() - session_time_offsets[row['session_idx']],
+        axis=1
+    )
+    
+    # Extract odor letter (e.g., 'OdorA' -> 'A')
+    def extract_odor_letter(odor_str):
+        if pd.isna(odor_str):
+            return 'Unknown'
+        odor_str = str(odor_str)
+        if odor_str.startswith('Odor'):
+            return odor_str.replace('Odor', '')
+        return odor_str
+    
+    trials_df['odor_letter'] = trials_df['last_odor'].apply(extract_odor_letter)
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=figsize)
+    
+    # Define colors: brighter and more saturated for better distinction
+    odor_colors = {'A': '#E53935', 'B': '#00796B'}  # Brighter red, darker teal
+    
+    odor_direction = {'A': 1, 'B': -1}  # A goes up, B goes down
+    
+    # Plot each trial
+    for idx, trial in trials_df.iterrows():
+        x = trial['time_in_plot']
+        odor = trial['odor_letter']
+        trial_type = trial['trial_type']
+        
+        if odor not in odor_colors:
+            odor = 'Unknown'
+        
+        color = odor_colors.get(odor, '#999999')
+        direction = odor_direction.get(odor, 1)
+        
+        # Determine line style based on reward status
+        if trial_type == 'rewarded':
+            linestyle = '-'
+            linewidth = 2
+            alpha = 0.85
+        else:
+            # unrewarded or timeout: dotted line, less opaque
+            linestyle = ':'
+            linewidth = 2
+            alpha = 0.5
+        
+        # Determine y position and marker based on trial type
+        if trial_type == 'aborted':
+            # Grey line going up (double length = 0.6 instead of 0.3)
+            ax.plot([x, x], [0, 0.6], color='#888888', linewidth=1.5, alpha=0.6, zorder=1)
+            ax.scatter([x], [0.6], color='#888888', s=15, marker='^', alpha=0.6, zorder=2)
+        
+        elif trial_type == 'rewarded':
+            # Solid colored line with small circle at end
+            y_end = 1.0 * direction
+            ax.plot([x, x], [0, y_end], color=color, linewidth=linewidth, 
+                   linestyle=linestyle, alpha=alpha, zorder=1)
+            ax.scatter([x], [y_end], color=color, s=40, marker='o', 
+                      edgecolors='black', linewidth=0.8, zorder=3)
+        
+        else:
+            # Completed unrewarded (timeout or incorrect): dotted line, no marker
+            y_end = 1.0 * direction
+            ax.plot([x, x], [0, y_end], color=color, linewidth=linewidth, 
+                   linestyle=linestyle, alpha=alpha, zorder=1)
+    
+    # Draw session boundaries (grey dotted vertical lines)
+    for boundary_time, session_idx in session_boundaries:
+        ax.axvline(x=boundary_time, color='grey', linestyle=':', linewidth=1.5, alpha=0.7, zorder=0)
+    
+    # Format axes
+    ax.axhline(y=0, color='black', linewidth=2, alpha=0.8)
+    ax.set_ylim([-1.5, 1.5])
+    
+    # Extend x-axis padding
+    x_min = trials_df['time_in_plot'].min()
+    x_max = trials_df['time_in_plot'].max()
+    x_padding = (x_max - x_min) * 0.05  # 5% padding on each side
+    ax.set_xlim([x_min - x_padding, x_max + x_padding])
+    
+    # Custom y-axis labels (A and B only, bold)
+    ax.set_yticks([-1, 1])
+    ax.set_yticklabels(['B', 'A'], fontsize=14, fontweight='bold')
+    
+    ax.set_xlabel('Time (seconds)', fontsize=12, fontweight='bold')
+    ax.set_ylabel('Choice', fontsize=12, fontweight='bold')
+    
+    if title is None:
+        title = f"Choice History - Subject {str(subjid).zfill(3)}"
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    
+    # Create custom legend
+    from matplotlib.lines import Line2D
+    legend_elements = [
+        Line2D([0], [0], color='#E53935', lw=2.5, linestyle='-', label='Odor A'),
+        Line2D([0], [0], color='#00796B', lw=2.5, linestyle='-', label='Odor B'),
+        Line2D([0], [0], color='black', lw=2, linestyle='-', label='Rewarded (solid)'),
+        Line2D([0], [0], color='black', lw=2, linestyle=':', label='Unrewarded (dotted)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='black', 
+               markersize=5, markeredgecolor='black', label='Rewarded marker', linestyle='none'),
+    ]
+    ax.legend(handles=legend_elements, loc='upper left', fontsize=9, ncol=2)
+    
+    ax.grid(True, alpha=0.2, axis='x')
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {save_path}")
+    
+    plt.show()
+    
+    return fig, ax
 
 def annotate_videos_with_sleap_and_trials(subjid, date, base_dir=None, output_suffix="sleap_visualization", 
                                           centroid_radius=8, centroid_color='red', show_fps_counter=True,
