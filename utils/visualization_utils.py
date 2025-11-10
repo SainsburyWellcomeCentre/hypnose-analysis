@@ -1145,28 +1145,9 @@ def plot_fa_ratio_a_over_sessions(
     include_noninitiated=True
 ):
     """
-    Plot FA Ratio A/(A+B) over sessions for each odor.
-    One plot per odor, with X-axis as session number and Y-axis as FA Ratio A/(A+B).
+    Plot FA Ratio A/(A+B) over sessions for each odor (OPTIMIZED).
     
-    Parameters:
-    -----------
-    subjid : int
-        Subject ID
-    dates : list, tuple, or None
-        Dates to include. Can be:
-        - None: all available dates
-        - (start_date, end_date): date range (inclusive)
-        - [date1, date2, ...]: specific dates
-    figsize : tuple
-        Figure size
-    include_noninitiated : bool
-        If True, include non-initiated FAs in the ratio calculation.
-        If False, only include aborted FAs.
-    
-    Returns:
-    --------
-    figs : dict
-        Dictionary mapping odor names to matplotlib Figure objects.
+    Parameters similar to original, but now loads only necessary data.
     """
     base_path = Path(project_root) / "data" / "rawdata"
     server_root = base_path.resolve().parent
@@ -1183,40 +1164,81 @@ def plot_fa_ratio_a_over_sessions(
             if not results_dir.exists():
                 continue
             
+            # OPTIMIZATION: Only load the specific CSVs we need
+            ab_det_path = results_dir / "aborted_sequences_detailed.csv"
+            fa_noninit_path = results_dir / "non_initiated_FA.csv"
+            
+            ab_det = pd.DataFrame()
+            fa_noninit = pd.DataFrame()
+            
+            # Load aborted sequences detailed - handle mixed dtypes gracefully
+            if ab_det_path.exists():
+                try:
+                    ab_det = pd.read_csv(ab_det_path)
+                    # Filter to only columns we need, if they exist
+                    needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
+                    ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
+                except Exception as e:
+                    pass  # Silently skip if columns don't exist
+            
+            # Load non-initiated FA
+            if include_noninitiated and fa_noninit_path.exists():
+                try:
+                    fa_noninit = pd.read_csv(fa_noninit_path)
+                    # Filter to only columns we need, if they exist
+                    needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
+                    fa_noninit = fa_noninit[[col for col in needed_cols if col in fa_noninit.columns]]
+                except Exception as e:
+                    pass  # Silently skip if columns don't exist
+            
+            # Combine only if we have data
+            if ab_det.empty and fa_noninit.empty:
+                continue
+            
+            # Filter and combine FA data
             try:
-                results = load_session_results(subjid, date_str)
-                ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-                fa_noninit = results.get("non_initiated_FA", pd.DataFrame())
+                fa_list = []
                 
-                # Combine or not based on parameter
-                if include_noninitiated:
-                    fa_ab = ab_det[ab_det["fa_label"].str.startswith("FA_")].copy() if not ab_det.empty else pd.DataFrame()
-                    fa_ni = fa_noninit[fa_noninit["fa_label"].str.startswith("FA_")].copy() if not fa_noninit.empty else pd.DataFrame()
-                    fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True)
-                else:
-                    fa_all = ab_det[ab_det["fa_label"].str.startswith("FA_")].copy() if not ab_det.empty else pd.DataFrame()
+                if not ab_det.empty and 'fa_label' in ab_det.columns:
+                    fa_ab = ab_det[ab_det['fa_label'].astype(str).str.startswith('FA_', na=False)]
+                    if not fa_ab.empty:
+                        fa_list.append(fa_ab)
                 
-                # Calculate FA port ratio per odor
-                if not fa_all.empty and "fa_port" in fa_all.columns and "last_odor_name" in fa_all.columns:
-                    for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
-                        fa_odor = fa_all[fa_all["last_odor_name"] == odor]
-                        n_a = (fa_odor["fa_port"] == 1).sum()
-                        n_b = (fa_odor["fa_port"] == 2).sum()
-                        n_total = n_a + n_b
-                        ratio_a = n_a / n_total if n_total > 0 else np.nan
-                        
-                        if odor not in fa_data:
-                            fa_data[odor] = []
-                        fa_data[odor].append({
-                            "session_num": session_num,
-                            "date": int(date_str),
-                            "ratio_a": ratio_a,
-                            "n_a": n_a,
-                            "n_b": n_b,
-                            "n_total": n_total
-                        })
+                if not fa_noninit.empty and 'fa_label' in fa_noninit.columns:
+                    fa_ni = fa_noninit[fa_noninit['fa_label'].astype(str).str.startswith('FA_', na=False)]
+                    if not fa_ni.empty:
+                        fa_list.append(fa_ni)
+                
+                if not fa_list:
+                    continue
+                
+                fa_all = pd.concat(fa_list, ignore_index=True)
             except Exception as e:
-                print(f"Error processing session {session_num} (date {date_str}): {e}")
+                continue
+            
+            if fa_all.empty or 'fa_port' not in fa_all.columns or 'last_odor_name' not in fa_all.columns:
+                continue
+            
+            # Calculate FA port ratio per odor
+            try:
+                for odor in sorted(fa_all['last_odor_name'].dropna().unique()):
+                    fa_odor = fa_all[fa_all['last_odor_name'] == odor]
+                    n_a = (fa_odor['fa_port'] == 1).sum()
+                    n_b = (fa_odor['fa_port'] == 2).sum()
+                    n_total = n_a + n_b
+                    ratio_a = n_a / n_total if n_total > 0 else np.nan
+                    
+                    if odor not in fa_data:
+                        fa_data[odor] = []
+                    fa_data[odor].append({
+                        'session_num': session_num,
+                        'date': int(date_str),
+                        'ratio_a': ratio_a,
+                        'n_a': n_a,
+                        'n_b': n_b,
+                        'n_total': n_total
+                    })
+            except Exception as e:
                 continue
     
     if not fa_data:
@@ -1229,37 +1251,28 @@ def plot_fa_ratio_a_over_sessions(
     
     for odor in odor_list:
         data = fa_data[odor]
-        
-        # Sort by session number
         data = sorted(data, key=lambda x: x["session_num"])
         
-        # Use range(len(data)) for evenly spaced x-axis
         x_positions = np.arange(len(data))
         session_nums = [d["session_num"] for d in data]
         ratios = [d["ratio_a"] for d in data]
         n_a_list = [d["n_a"] for d in data]
         n_total_list = [d["n_total"] for d in data]
         
-        # Create figure
         fig, ax = plt.subplots(figsize=figsize)
         
-        # Plot with evenly spaced x-axis
         ax.plot(x_positions, ratios, color='black', linewidth=1.0, alpha=0.6, zorder=1)
         ax.scatter(x_positions, ratios, s=40, color='black', alpha=0.8, 
                   edgecolors='black', linewidth=0.5, zorder=3)
         
-        # Add horizontal line at 0.5 (chance level) - grey, thin, no label
         ax.axhline(y=0.5, color='#888888', linestyle='--', linewidth=1.0, alpha=0.5, zorder=0)
         
-        # Add text annotations for each point showing n_a / n_total
-        # All text at same height above plot
         y_text = 1.08
         for x_pos, n_a, n_total in zip(x_positions, n_a_list, n_total_list):
             ax.text(x_pos, y_text, f"{n_a}/{n_total}", 
                    ha='center', va='bottom', fontsize=9, fontweight='bold',
                    transform=ax.get_xaxis_transform())
         
-        # Set x-axis to fit all data with even spacing
         ax.set_xlim([-0.5, len(data) - 0.5])
         ax.set_xticks(x_positions)
         ax.set_xticklabels([str(sn) for sn in session_nums])
