@@ -3174,7 +3174,7 @@ def build_classification_index(classification: dict) -> dict: # Classification f
 
     return idx
 
-def classify_and_analyze_with_response_times(data, events, trial_counts, odor_map, stage, root, verbose=True):# Wrapper function to fully classify all trials. 
+def classify_and_analyze_with_response_times(data, events, trial_counts, odor_map, stage, root, verbose=True, run_id=None):# Wrapper function to fully classify all trials. 
     """
     Orchestrates classification + valve/poke timing + response-time augmentation.
 
@@ -3213,6 +3213,10 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
     aborted_detailed = abortion_classification(
         data, events, classification, odor_map, root, verbose=verbose
     )
+    if run_id is not None and isinstance(aborted_detailed, pd.DataFrame) and not aborted_detailed.empty:
+        if 'run_id' not in aborted_detailed.columns:
+            aborted_detailed = aborted_detailed.copy()
+            aborted_detailed['run_id'] = run_id
     classification['aborted_sequences_detailed'] = aborted_detailed
 
     # 3) Build fast lookup indices for downstream use
@@ -3413,7 +3417,7 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         "paths": info,
         "tables": {},
         "artifacts": {},
-        "notes": "DataFrames saved as CSV; object columns JSON-encoded. See *.schema.json.",
+        "notes": "DataFrames saved as CSV; object columns JSON-encoded. See *.schema.json. Per-run parameters stored in session.runs[].parameters.",
     }
 
     saved_any = False
@@ -3556,7 +3560,19 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         "aborted_sequences","aborted_sequences_detailed",
     ]:
         counts[k] = _n(k)
+    # Attach per-run parameters to manifest runs
+    per_run_params = classification.get('per_run_parameters', [])
+    if per_run_params and 'runs' in manifest['session']:
+        for run_info in manifest['session']['runs']:
+            run_id = run_info.get('run_id')
+            matching_params = next((p for p in per_run_params if p.get('run_id') == run_id), None)
+            if matching_params:
+                run_info['parameters'] = matching_params
 
+    # Save manifest
+    with open(out_dir / "manifest.json", "w", encoding="utf-8") as f:
+        json.dump(_json_safe(manifest), f, indent=2)
+        
     # Add combined non-initiated total (baseline + pos1 attempts)
     counts["non_initiated_total"] = (
         counts.get("non_initiated_sequences", 0)
@@ -3647,23 +3663,21 @@ def _with_run_id(df: pd.DataFrame, run_id: int) -> pd.DataFrame:
 
 def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict:
     """
-    Robust multi-run merger.
-    - Accepts either:
-        * the full return of classify_and_analyze_with_response_times (dict with 'classification', etc.), or
-        * a classification dict itself (legacy)
-    - Concatenates tables directly with run_id; no parent-child re-alignment.
-    - Uses completed_sequences_with_response_times as the authoritative completed-trials table.
-    - Aggregates response_time_analysis lists safely.
-    - Rebuilds 'index' with build_classification_index on the merged dict.
+    Robust multi-run merger that preserves per-run parameters.
+    - Concatenates tables directly with run_id
+    - **Keeps parameters per-run** (not collapsed to single values)
+    - Stores per-run metadata (stage, parameters, timings)
+    - Rebuilds 'index' with build_classification_index on merged dict
     """
 
     if not run_results:
         raise ValueError("merge_classifications: no run results provided")
 
-    # Normalize inputs to classification dicts and collect aux data
+    # Normalize inputs to classification dicts
     per_run_cls = []
     per_run_rta = []
-    per_run_params = []
+    per_run_metadata = []  # NEW: track all per-run info
+    
     for ridx, r in enumerate(run_results, start=1):
         if r is None:
             continue
@@ -3677,23 +3691,23 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
         per_run_cls.append((ridx, cls))
         per_run_rta.append((ridx, rta))
 
-        # collect params
-        per_run_params.append({
+        # Collect per-run parameters and metadata
+        per_run_metadata.append({
             'run_id': ridx,
             'sample_offset_time_ms': cls.get('sample_offset_time_ms'),
             'minimum_sampling_time_ms': cls.get('minimum_sampling_time_ms'),
             'response_time_window_sec': cls.get('response_time_window_sec'),
             'hidden_rule_position': cls.get('hidden_rule_position'),
+            'hidden_rule_odors': cls.get('hidden_rule_odors'),
         })
 
-    # Keys we will merge if present
-    # Keep completed_sequences_with_response_times as authoritative (has all columns of completed_sequences + RT cols)
+    # Keys we will merge
     preferred_tables = [
         'initiated_sequences',
         'non_initiated_sequences',
         'non_initiated_odor1_attempts',
-        'completed_sequences',  # keep it too for compatibility
-        'completed_sequences_with_response_times',  # authoritative for RT-based summary
+        'completed_sequences',
+        'completed_sequences_with_response_times',
         'completed_sequence_rewarded',
         'completed_sequence_unrewarded',
         'completed_sequence_reward_timeout',
@@ -3720,6 +3734,7 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
             return s
     
     merged: dict = {}
+    
     # Concatenate tables
     for key in preferred_tables:
         parts = []
@@ -3727,13 +3742,12 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
             df = cls.get(key)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 df2 = _with_run_id(df, ridx)
-                # Normalize known ID columns to int-like (but don't force if incompatible)
                 if 'trial_id' in df2.columns:
                     df2['trial_id'] = df2['trial_id'].apply(_normalize_trial_id)
                 parts.append(df2)
         merged[key] = pd.concat(parts, axis=0, ignore_index=True, sort=False) if parts else pd.DataFrame()
 
-    # Invariant sanity: if RT table is missing, synthesize minimally
+    # Synthesize RT table if missing
     if merged['completed_sequences_with_response_times'].empty and not merged['completed_sequences'].empty:
         tmp = merged['completed_sequences'].copy()
         if 'response_time_ms' not in tmp.columns:
@@ -3742,7 +3756,7 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
             tmp['response_time_category'] = np.nan
         merged['completed_sequences_with_response_times'] = tmp
 
-    # Sort time-based tables by sequence_start if present (stabilizes summaries)
+    # Sort time-based tables by sequence_start
     for key in preferred_tables:
         df = merged.get(key)
         if isinstance(df, pd.DataFrame) and not df.empty and 'sequence_start' in df.columns:
@@ -3759,24 +3773,22 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
                 rta_agg[k].extend(list(vals))
     merged['response_time_analysis'] = dict(rta_agg)
 
-    # Carry session/global params; warn if heterogeneous
-    def _pick_param(name):
-        vals = [p.get(name) for p in per_run_params if p.get(name) is not None]
-        if not vals:
-            return None
-        same = all(v == vals[0] for v in vals)
-        if not same and verbose:
-            print(f"[merge_classifications] WARNING: parameter '{name}' differs across runs; using first value: {vals[0]} (found: {sorted(set(vals))})")
-        return vals[0]
+    # ============ NEW: Store per-run metadata instead of collapsing ============
+    merged['per_run_parameters'] = per_run_metadata
 
-    merged['sample_offset_time_ms'] = _pick_param('sample_offset_time_ms')
-    merged['minimum_sampling_time_ms'] = _pick_param('minimum_sampling_time_ms')
-    merged['response_time_window_sec'] = _pick_param('response_time_window_sec')
-    merged['hidden_rule_position'] = _pick_param('hidden_rule_position')
-
+    # For backward compatibility, expose the first run's parameters as defaults
+    # (but downstream code should prefer per_run_parameters[run_id])
+    if per_run_metadata:
+        first = per_run_metadata[0]
+        merged['sample_offset_time_ms'] = first['sample_offset_time_ms']
+        merged['minimum_sampling_time_ms'] = first['minimum_sampling_time_ms']
+        merged['response_time_window_sec'] = first['response_time_window_sec']
+        merged['hidden_rule_position'] = first['hidden_rule_position']
+    
+    # Aggregate unique hidden rule odors across all runs
     hr_odors_all: list[str] = []
-    for _, cls in per_run_cls:
-        od = cls.get('hidden_rule_odors')
+    for meta in per_run_metadata:
+        od = meta.get('hidden_rule_odors')
         if isinstance(od, (list, tuple)):
             hr_odors_all.extend([str(x) for x in od if isinstance(x, str) and x])
     if hr_odors_all:
@@ -3790,7 +3802,7 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
     else:
         merged.setdefault('hidden_rule_odors', [])
 
-    # Per-run counts (sanity)
+    # Per-run counts
     runs_meta = []
     for ridx, cls in per_run_cls:
         def _n(k):
@@ -3805,25 +3817,32 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
                 'completed_sequences': _n('completed_sequences'),
                 'completed_sequences_with_response_times': _n('completed_sequences_with_response_times'),
                 'aborted_sequences': _n('aborted_sequences'),
+                'aborted_sequences_detailed': _n('aborted_sequences_detailed'), 
             }
         })
     merged['runs'] = runs_meta
 
-    # Rebuild index for convenience
+    # Rebuild index
     try:
         merged['index'] = build_classification_index(merged)
     except Exception:
         merged['index'] = {}
 
     if verbose:
-        # Simple sanity: comp vs comp_rt lengths
-        comp = merged.get('completed_sequences', pd.DataFrame())
-        comp_rt = merged.get('completed_sequences_with_response_times', pd.DataFrame())
-        if isinstance(comp, pd.DataFrame) and isinstance(comp_rt, pd.DataFrame) and not comp.empty:
-            if len(comp) != len(comp_rt):
-                print(f"[merge_classifications] NOTE: completed_sequences ({len(comp)}) != completed_sequences_with_response_times ({len(comp_rt)}). Using the RT table for RT summaries.")
-
-        # Additional sanity: merged counts vs per-run sums
+        # Warn if parameters differ across runs
+        params_differ = False
+        if per_run_metadata and len(per_run_metadata) > 1:
+            first_params = per_run_metadata[0]
+            for meta in per_run_metadata[1:]:
+                for key in ['sample_offset_time_ms', 'minimum_sampling_time_ms', 'response_time_window_sec', 'hidden_rule_position']:
+                    if meta.get(key) != first_params.get(key):
+                        if not params_differ:
+                            print("[merge_classifications] WARNING: Parameters differ across runs:")
+                            params_differ = True
+                        print(f"  Run {first_params['run_id']}: {key}={first_params.get(key)}")
+                        print(f"  Run {meta['run_id']}: {key}={meta.get(key)}")
+        
+        # Sanity check: merged counts vs per-run sums
         try:
             total_non_ini = int(len(merged.get('non_initiated_sequences', [])))
             total_pos1 = int(len(merged.get('non_initiated_odor1_attempts', [])))
@@ -3833,31 +3852,47 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
             sum_initiated = sum(r['counts']['initiated_sequences'] for r in merged.get('runs', []))
             if (total_non_ini != sum_non_ini) or (total_pos1 != sum_pos1) or (total_initiated != sum_initiated):
                 print("[merge_classifications] WARNING: count mismatch after merge")
-                print(f"  non_initiated total: merged={total_non_ini} vs per-run sum={sum_non_ini}")
-                print(f"  pos1 total:          merged={total_pos1} vs per-run sum={sum_pos1}")
-                print(f"  initiated total:     merged={total_initiated} vs per-run sum={sum_initiated}")
         except Exception:
             pass
+    
     return merged
 
 
 def print_merged_session_summary(merged_classification: dict, subjid=None, date=None, save=False, out_dir=None) -> None:
     """
-    Summary for merged multi-run results.
-    Uses completed_sequences_with_response_times as the authoritative completed table,
-    avoiding re-merging that can drop RT rows.
+    Summary for merged multi-run results, now showing per-run parameters.
     """
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-
         cls = merged_classification or {}
 
-        # Parameters
+        # ============ NEW: Show per-run parameter summary ============
+        per_run_params = cls.get('per_run_parameters', [])
+        if per_run_params and len(per_run_params) > 1:
+            print("=" * 80)
+            print("PER-RUN PARAMETERS")
+            print("=" * 80)
+            for meta in per_run_params:
+                run_id = meta.get('run_id')
+                print(f"\nRun {run_id}:")
+                print(f"  Sample Offset Time: {meta.get('sample_offset_time_ms')} ms")
+                print(f"  Minimum Sampling Time: {meta.get('minimum_sampling_time_ms')} ms")
+                print(f"  Response Time Window: {meta.get('response_time_window_sec')} s")
+                print(f"  Hidden Rule Position: {meta.get('hidden_rule_position')}")
+                print(f"  Hidden Rule Odors: {meta.get('hidden_rule_odors')}")
+            print()
+
+        # Rest of summary output (use first run's params or show per-run note)
         sample_offset_time_ms = cls.get("sample_offset_time_ms")
         minimum_sampling_time_ms = cls.get("minimum_sampling_time_ms")
         response_time_window_sec = cls.get("response_time_window_sec")
         hr_pos = cls.get("hidden_rule_position")
         hr_idx = (hr_pos - 1) if isinstance(hr_pos, (int, np.integer)) else None
+
+        
+        if per_run_params and len(per_run_params) > 1:
+            print(f"[Using parameters from Run 1 for summary; see per-run parameters above]\n")
+
 
         # Tables
         def get_df(key):
@@ -4284,9 +4319,9 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
 def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verbose: bool = True, max_runs: int = 32, save: bool = True, print_summary: bool = True):
     """
     Analyze all experiment files for a subject on a given date, then merge and (optionally) save.
-    Now builds data/events/odor_map/trial_counts/stage from the root returned by load_experiment().
+    Now passes full per-run stage/parameter info to save_session_analysis_results.
     """
-
+    
     subject_id = str(subject_id)
     date_str = str(date_str)
 
@@ -4298,7 +4333,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
         with contextlib.redirect_stdout(buf):
             return callable_(*args, **kwargs)
     
-    # Discover unique experiment files for this subject/date
+    # Discover experiment roots
     session_roots: list[Path] = []
     visited: set[Path] = set()
     le = globals().get("load_experiment")
@@ -4317,10 +4352,11 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
             except (IndexError, FileNotFoundError) as e:
                 vprint(verbose, f"[analyze_session_multi_run] Stopping at index {i}: {e}")
                 break
+    
     if not session_roots:
         raise RuntimeError(f"No experiment runs found for subject={subject_id} date={date_str}")
 
-    # Sort oldest -> newest (or reverse=True for newest first)
+    # Sort oldest -> newest
     def _parse_ts(p: Path):
         from datetime import datetime
         try:
@@ -4331,6 +4367,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
         session_roots.sort(key=_parse_ts)
     except Exception:
         session_roots.sort(key=lambda p: str(p))
+
     per_run = []
     merge_inputs = []
     roots: list[Optional[Path]] = []
@@ -4340,7 +4377,6 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
         """Extract the latest timestamp from data and events for a single run"""
         all_timestamps = []
         
-        # Collect timestamps from data streams
         for key, stream in data.items():
             if isinstance(stream, pd.DataFrame) and "Time" in stream.columns:
                 timestamps = pd.to_datetime(stream["Time"], errors="coerce").dropna()
@@ -4348,23 +4384,20 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
             elif isinstance(stream, pd.Series) and hasattr(stream.index, 'dtype') and pd.api.types.is_datetime64_any_dtype(stream.index):
                 all_timestamps.extend(stream.index)
         
-        # Collect timestamps from events
         for key, event in events.items():
             if isinstance(event, pd.DataFrame) and "Time" in event.columns:
                 timestamps = pd.to_datetime(event["Time"], errors="coerce").dropna()
                 all_timestamps.extend(timestamps)
         
-        # Find the latest timestamp
         if all_timestamps:
             return max(all_timestamps)
         return None
-
 
     for i, root in enumerate(session_roots[:max_runs]):
         try:
             vprint(verbose, f"[analyze_session_multi_run] Loaded run index {i}: root={root}")
 
-            # Detect stage (best-effort)
+            # Detect stage for THIS run
             try:
                 import src.processing.detect_stage as detect_stage_module
                 stage = detect_stage_module.detect_stage(root)
@@ -4380,15 +4413,36 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
 
             out = _maybe_silent(
                 classify_and_analyze_with_response_times,
-                data, events, trial_counts, odor_map, stage, root, verbose=verbose
+                data, events, trial_counts, odor_map, stage, root, verbose=verbose, run_id=i+1
             )
 
+            # ============ NEW: Build comprehensive run metadata ============
             if isinstance(stage, dict):
                 stage['run_end_time'] = run_end_time
+                stage['root'] = str(root)
+                # Extract start_time from folder name
+                try:
+                    from datetime import datetime, timezone
+                    import zoneinfo
+                    m = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', root.name)
+                    if m:
+                        ts_str = m.group(0)
+                        ts_utc = datetime.strptime(ts_str, '%Y-%m-%dT%H-%M-%S').replace(tzinfo=timezone.utc)
+                        uk_tz = zoneinfo.ZoneInfo("Europe/London")
+                        ts_london = ts_utc.astimezone(uk_tz)
+                        stage['start_time'] = ts_london.isoformat()
+                except Exception:
+                    pass
             else:
-                stage = {'stage_name': str(stage), 'run_end_time': run_end_time}
+                stage = {
+                    'stage_name': str(stage),
+                    'run_end_time': run_end_time,
+                    'root': str(root)
+                }
 
             cls = out['classification'] if isinstance(out, dict) and 'classification' in out else out
+            
+            # Classify non-initiated FAs
             DIP0 = data['digital_input_data'].get('DIPort0', pd.Series(dtype=bool))
             DIP1 = data['digital_input_data'].get('DIPort1', pd.Series(dtype=bool))
             DIP2 = data['digital_input_data'].get('DIPort2', pd.Series(dtype=bool))
@@ -4398,19 +4452,20 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
             fa_input_data = pd.concat([non_init, pos_1_attempt], ignore_index=True)
             response_time = cls.get('response_time_window_sec') 
             fa_noninit_df = classify_noninitiated_FA(fa_input_data, DIP0, DIP1, DIP2, response_time, hr_odors=hr_odors)
+            if isinstance(fa_noninit_df, pd.DataFrame) and not fa_noninit_df.empty and 'run_id' not in fa_noninit_df.columns:
+                fa_noninit_df = fa_noninit_df.copy()
+                fa_noninit_df['run_id'] = i + 1
+
             cls['non_initiated_FA'] = fa_noninit_df
             out['classification'] = cls
 
             # Normalize outputs for merging
             if isinstance(out, dict) and 'classification' in out:
-                cls = out['classification'] or {}
-                merge_inputs.append(out)  # keep full dict so RT tables survive merge
+                merge_inputs.append(out)
             elif isinstance(out, dict):
-                cls = out or {}
-                merge_inputs.append(cls)
+                merge_inputs.append({'classification': out})
             else:
-                cls = out or {}
-                merge_inputs.append({'classification': cls})
+                merge_inputs.append({'classification': out or {}})
 
             if not isinstance(cls, dict) or not cls:
                 raise RuntimeError("Empty classification output")
@@ -4421,11 +4476,14 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
 
         except Exception as e:
             vprint(verbose, f"[analyze_session_multi_run] Skipping run index {i} due to error: {e}")
+            #import traceback #--> Will print where inidvidual run failed, useful, but cluttering. Commented out for now.
+            #traceback.print_exc()
             continue
 
     if not per_run:
         raise RuntimeError(f"No runs analyzed for subject={subject_id} date={date_str}")
 
+    # Merge classifications (now preserves per-run params)
     merged = merge_classifications(merge_inputs, verbose=verbose)
     merged['aborted_index'] = merged.get('index', {}).get('aborted', {})
     merged['non_initiated_FA'] = merged.get('non_initiated_FA', pd.DataFrame())
@@ -4434,6 +4492,8 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
     save_err: Exception | None = None
     if save:
         first_root = roots[0] if roots and roots[0] is not None else None
+        
+        # ============ NEW: Build session metadata with per-run stage info ============
         session_meta = {
             'multi_run': True,
             'subject_id': subject_id,
@@ -4442,11 +4502,17 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
                 {
                     'run_id': ridx + 1,
                     'root': str(r) if r is not None else None,
-                    'stage': stages[ridx] if ridx < len(stages) else None
+                    'stage': stages[ridx] if ridx < len(stages) else None,
+                    'parameters': (
+                        merged['per_run_parameters'][ridx] 
+                        if 'per_run_parameters' in merged and ridx < len(merged['per_run_parameters']) 
+                        else {}
+                    )
                 }
                 for ridx, r in enumerate(roots)
             ]
         }
+        
         try:
             save_dir = save_session_analysis_results(merged, first_root, session_meta, data, events, verbose=verbose)
         except Exception as e:
@@ -4474,7 +4540,6 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
         "stages": stages,
         "save_dir": save_dir,
 
-        # convenience shortcuts to common tables
         "completed_sequences_with_response_times": cls.get("completed_sequences_with_response_times", pd.DataFrame()),
         "completed_sequences": cls.get("completed_sequences", pd.DataFrame()),
         "completed_sequence_rewarded": cls.get("completed_sequence_rewarded", pd.DataFrame()),
@@ -4694,6 +4759,9 @@ def batch_analyze_sessions(
                 results[(subjid, date)] = res
             except Exception as e:
                 print(f"[batch_analyze_sessions] WARNING: Failed to analyze subject {subjid}, date {date}: {e}")
+                if verbose:
+                    import traceback
+                    traceback.print_exc()
                 continue
     
     # Return summary of analyzed sessions
