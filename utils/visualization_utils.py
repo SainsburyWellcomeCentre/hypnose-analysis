@@ -2703,6 +2703,9 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     - Rewarded trials: solid line with circle marker at end
     - Completed unrewarded trials: dotted line, no marker
     - Aborted trials: grey line going up
+    - Hidden Rule trials: yellow line
+      - HR rewarded: solid yellow line with circle marker
+      - HR missed/unrewarded: dotted yellow line, no marker
     - Multiple sessions: time gaps collapsed, session boundaries marked with grey dotted lines
     
     Parameters:
@@ -2740,10 +2743,6 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     
     # Collect all trials across sessions
     all_trials = []
-    session_boundaries = []  # Store (time_in_plot, date_str) for session starts
-    
-    global_start_time = None
-    time_offset = 0  # Cumulative offset to collapse inter-session gaps
     
     for session_idx, ses_dir in enumerate(ses_dirs):
         date_str = ses_dir.name.split("_date-")[-1]
@@ -2760,6 +2759,13 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
         comp_tmo = results.get('completed_sequence_reward_timeout', pd.DataFrame())
         aborted = results.get('aborted_sequences', pd.DataFrame())
         
+        # Load Hidden Rule trials
+        hr_rewarded = results.get('completed_sequence_HR_rewarded', pd.DataFrame())
+        hr_unrewarded = results.get('completed_sequence_HR_unrewarded', pd.DataFrame())
+        hr_timeout = results.get('completed_sequence_HR_reward_timeout', pd.DataFrame())
+        hr_missed = results.get('completed_sequences_HR_missed', pd.DataFrame())
+        aborted_hr = results.get('aborted_sequences_HR', pd.DataFrame())
+        
         # Process completed rewarded trials
         if not comp_rew.empty:
             for idx, row in comp_rew.iterrows():
@@ -2767,17 +2773,19 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
                     'sequence_start': pd.to_datetime(row['sequence_start']),
                     'last_odor': row.get('last_odor', 'Unknown'),
                     'trial_type': 'rewarded',
+                    'is_hr': False,
                     'date_str': date_str,
                     'session_idx': session_idx
                 })
         
-        # Process completed unrewarded trials (not timeout)
+        # Process completed unrewarded trials
         if not comp_unr.empty:
             for idx, row in comp_unr.iterrows():
                 all_trials.append({
                     'sequence_start': pd.to_datetime(row['sequence_start']),
                     'last_odor': row.get('last_odor', 'Unknown'),
                     'trial_type': 'unrewarded',
+                    'is_hr': False,
                     'date_str': date_str,
                     'session_idx': session_idx
                 })
@@ -2789,6 +2797,7 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
                     'sequence_start': pd.to_datetime(row['sequence_start']),
                     'last_odor': row.get('last_odor', 'Unknown'),
                     'trial_type': 'timeout',
+                    'is_hr': False,
                     'date_str': date_str,
                     'session_idx': session_idx
                 })
@@ -2800,6 +2809,67 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
                     'sequence_start': pd.to_datetime(row['sequence_start']),
                     'last_odor': row.get('last_odor_name', 'Unknown'),
                     'trial_type': 'aborted',
+                    'is_hr': False,
+                    'date_str': date_str,
+                    'session_idx': session_idx
+                })
+        
+        # Process HR rewarded trials
+        if not hr_rewarded.empty:
+            for idx, row in hr_rewarded.iterrows():
+                all_trials.append({
+                    'sequence_start': pd.to_datetime(row['sequence_start']),
+                    'last_odor': row.get('last_odor', 'Unknown'),
+                    'trial_type': 'hr_rewarded',
+                    'is_hr': True,
+                    'date_str': date_str,
+                    'session_idx': session_idx
+                })
+        
+        # Process HR unrewarded trials
+        if not hr_unrewarded.empty:
+            for idx, row in hr_unrewarded.iterrows():
+                all_trials.append({
+                    'sequence_start': pd.to_datetime(row['sequence_start']),
+                    'last_odor': row.get('last_odor', 'Unknown'),
+                    'trial_type': 'hr_unrewarded',
+                    'is_hr': True,
+                    'date_str': date_str,
+                    'session_idx': session_idx
+                })
+        
+        # Process HR timeout trials
+        if not hr_timeout.empty:
+            for idx, row in hr_timeout.iterrows():
+                all_trials.append({
+                    'sequence_start': pd.to_datetime(row['sequence_start']),
+                    'last_odor': row.get('last_odor', 'Unknown'),
+                    'trial_type': 'hr_timeout',
+                    'is_hr': True,
+                    'date_str': date_str,
+                    'session_idx': session_idx
+                })
+        
+        # Process HR missed trials
+        if not hr_missed.empty:
+            for idx, row in hr_missed.iterrows():
+                all_trials.append({
+                    'sequence_start': pd.to_datetime(row['sequence_start']),
+                    'last_odor': row.get('last_odor', 'Unknown'),
+                    'trial_type': 'hr_missed',
+                    'is_hr': True,
+                    'date_str': date_str,
+                    'session_idx': session_idx
+                })
+        
+        # Process aborted HR trials
+        if not aborted_hr.empty:
+            for idx, row in aborted_hr.iterrows():
+                all_trials.append({
+                    'sequence_start': pd.to_datetime(row['sequence_start']),
+                    'last_odor': row.get('last_odor', 'Unknown'),
+                    'trial_type': 'hr_aborted',
+                    'is_hr': True,
                     'date_str': date_str,
                     'session_idx': session_idx
                 })
@@ -2815,20 +2885,17 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     global_start_time = trials_df['sequence_start'].iloc[0]
     
     # Calculate time offsets for each session to collapse inter-session gaps
-    session_time_offsets = {}  # Maps session_idx to cumulative time offset
-    session_boundaries = []  # List of (time_in_plot, session_idx) for drawing lines
+    session_time_offsets = {}
+    session_boundaries = []
     
     time_offset = 0
-    prev_session_end = None
     
     for session_idx in sorted(trials_df['session_idx'].unique()):
         session_data = trials_df[trials_df['session_idx'] == session_idx]
         
         if session_idx == 0:
-            # First session: no offset
             session_time_offsets[session_idx] = 0
         else:
-            # Calculate gap from previous session end to this session start
             prev_session_data = trials_df[trials_df['session_idx'] == session_idx - 1]
             
             if not prev_session_data.empty and not session_data.empty:
@@ -2836,12 +2903,9 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
                 curr_start = session_data['sequence_start'].min()
                 
                 gap = (curr_start - prev_end).total_seconds()
-                
-                # Add gap to offset (we want to subtract it from timestamps)
                 time_offset += gap
                 session_time_offsets[session_idx] = time_offset
                 
-                # Record boundary: time where this session starts (in plot coordinates)
                 prev_time_in_plot = (prev_end - global_start_time).total_seconds() - session_time_offsets[session_idx - 1]
                 session_boundaries.append((prev_time_in_plot, session_idx))
     
@@ -2865,8 +2929,12 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     # Create figure
     fig, ax = plt.subplots(figsize=figsize)
     
-    # Define colors: brighter and more saturated for better distinction
-    odor_colors = {'A': '#E53935', 'B': '#00796B'}  # Brighter red, darker teal
+    # Define colors
+    odor_colors = {
+        'A': '#E53935',      # Bright red
+        'B': '#00796B',      # Darker teal
+        'HR': '#FFD700'      # Gold/yellow
+    }
     
     odor_direction = {'A': 1, 'B': -1}  # A goes up, B goes down
     
@@ -2875,45 +2943,66 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
         x = trial['time_in_plot']
         odor = trial['odor_letter']
         trial_type = trial['trial_type']
+        is_hr = trial['is_hr']
         
-        if odor not in odor_colors:
+        if odor not in odor_colors and odor != 'Unknown':
             odor = 'Unknown'
         
-        color = odor_colors.get(odor, '#999999')
+        # Determine color based on trial type
+        if is_hr:
+            color = odor_colors['HR']
+        else:
+            color = odor_colors.get(odor, '#999999')
+        
+        # Determine direction from odor
         direction = odor_direction.get(odor, 1)
         
-        # Determine line style based on reward status
-        if trial_type == 'rewarded':
+        # Determine line style and marker based on reward status
+        if trial_type == 'rewarded' or trial_type == 'hr_rewarded':
             linestyle = '-'
             linewidth = 2
             alpha = 0.85
-        else:
-            # unrewarded or timeout: dotted line, less opaque
+            has_marker = True
+        elif trial_type in ['unrewarded', 'timeout', 'hr_unrewarded', 'hr_timeout', 'hr_missed']:
             linestyle = ':'
             linewidth = 2
             alpha = 0.5
+            has_marker = False
+        else:
+            # aborted or hr_aborted
+            linestyle = '-'
+            linewidth = 1.5
+            alpha = 0.6
+            has_marker = False
         
-        # Determine y position and marker based on trial type
+        # Plot the trial
         if trial_type == 'aborted':
-            # Grey line going up (double length = 0.6 instead of 0.3)
-            ax.plot([x, x], [0, 0.6], color='#888888', linewidth=1.5, alpha=0.6, zorder=1)
-            ax.scatter([x], [0.6], color='#888888', s=15, marker='^', alpha=0.6, zorder=2)
+            # Regular aborted: grey line
+            ax.plot([x, x], [0, 0.6], color='#888888', linewidth=linewidth, alpha=alpha, zorder=1)
+            ax.scatter([x], [0.6], color='#888888', s=15, marker='^', alpha=alpha, zorder=2)
         
-        elif trial_type == 'rewarded':
-            # Solid colored line with small circle at end
+        elif trial_type == 'hr_aborted':
+            # HR aborted: yellow line with direction from odor
             y_end = 1.0 * direction
-            ax.plot([x, x], [0, y_end], color=color, linewidth=linewidth, 
-                   linestyle=linestyle, alpha=alpha, zorder=1)
-            ax.scatter([x], [y_end], color=color, s=40, marker='o', 
-                      edgecolors='black', linewidth=0.8, zorder=3)
+            ax.plot([x, x], [0, y_end], color=color, linewidth=linewidth, alpha=alpha, zorder=1, linestyle=linestyle)
+            ax.scatter([x], [y_end], color=color, s=15, marker='^', alpha=alpha, zorder=2)
         
         else:
-            # Completed unrewarded (timeout or incorrect): dotted line, no marker
+            # Completed trials (regular or HR)
             y_end = 1.0 * direction
+            
+            # HR trials on top
+            line_zorder = 2 if is_hr else 1
+            marker_zorder = 4 if is_hr else 3
+            
             ax.plot([x, x], [0, y_end], color=color, linewidth=linewidth, 
-                   linestyle=linestyle, alpha=alpha, zorder=1)
+                   linestyle=linestyle, alpha=alpha, zorder=line_zorder)
+            
+            if has_marker:
+                ax.scatter([x], [y_end], color=color, s=40, marker='o', 
+                          edgecolors='black', linewidth=0.8, zorder=marker_zorder)
     
-    # Draw session boundaries (grey dotted vertical lines)
+    # Draw session boundaries
     for boundary_time, session_idx in session_boundaries:
         ax.axvline(x=boundary_time, color='grey', linestyle=':', linewidth=1.5, alpha=0.7, zorder=0)
     
@@ -2921,13 +3010,11 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     ax.axhline(y=0, color='black', linewidth=2, alpha=0.8)
     ax.set_ylim([-1.5, 1.5])
     
-    # Extend x-axis padding
     x_min = trials_df['time_in_plot'].min()
     x_max = trials_df['time_in_plot'].max()
-    x_padding = (x_max - x_min) * 0.05  # 5% padding on each side
+    x_padding = (x_max - x_min) * 0.05
     ax.set_xlim([x_min - x_padding, x_max + x_padding])
     
-    # Custom y-axis labels (A and B only, bold)
     ax.set_yticks([-1, 1])
     ax.set_yticklabels(['B', 'A'], fontsize=14, fontweight='bold')
     
@@ -2941,10 +3028,11 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     # Create custom legend
     from matplotlib.lines import Line2D
     legend_elements = [
-        Line2D([0], [0], color='#E53935', lw=2.5, linestyle='-', label='Odor A'),
-        Line2D([0], [0], color='#00796B', lw=2.5, linestyle='-', label='Odor B'),
+        Line2D([0], [0], color='#E53935', lw=2.5, linestyle='-', label='Odor A (regular)'),
+        Line2D([0], [0], color='#00796B', lw=2.5, linestyle='-', label='Odor B (regular)'),
+        Line2D([0], [0], color='#FFD700', lw=2.5, linestyle='-', label='Hidden Rule (HR)'),
         Line2D([0], [0], color='black', lw=2, linestyle='-', label='Rewarded (solid)'),
-        Line2D([0], [0], color='black', lw=2, linestyle=':', label='Unrewarded (dotted)'),
+        Line2D([0], [0], color='black', lw=2, linestyle=':', label='Unrewarded/Missed (dotted)'),
         Line2D([0], [0], marker='o', color='w', markerfacecolor='black', 
                markersize=5, markeredgecolor='black', label='Rewarded marker', linestyle='none'),
     ]
