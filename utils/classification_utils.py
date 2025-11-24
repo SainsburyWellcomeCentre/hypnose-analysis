@@ -91,6 +91,56 @@ def vprint(verbose: bool, *args, **kwargs):
         print(*args, **kwargs)
 
 
+def _resolve_hidden_rule_from_stage(stage) -> tuple[int | None, str | None]:
+    """Infer hidden-rule index and stage name from stage metadata."""
+    sequence_name = None
+    hidden_rule_location = None
+
+    if isinstance(stage, Mapping):
+        sequence_name = stage.get('stage_name') or stage.get('name')
+
+        idx_candidate = stage.get('hidden_rule_index')
+        if idx_candidate is None:
+            idxs = stage.get('hidden_rule_indices')
+            if isinstance(idxs, (list, tuple)):
+                for val in idxs:
+                    if val is not None:
+                        idx_candidate = val
+                        break
+            elif idxs is not None:
+                idx_candidate = idxs
+
+        if idx_candidate is None:
+            pos_candidate = stage.get('hidden_rule_position')
+            if pos_candidate is not None:
+                try:
+                    pos_int = int(pos_candidate)
+                    idx_candidate = pos_int - 1
+                except (TypeError, ValueError):
+                    idx_candidate = None
+
+        if idx_candidate is not None:
+            try:
+                hidden_rule_location = int(idx_candidate)
+            except (TypeError, ValueError):
+                hidden_rule_location = None
+
+        if sequence_name is None:
+            sequence_name = stage.get('name') or str(stage)
+    else:
+        sequence_name = str(stage)
+
+    if sequence_name and hidden_rule_location is None:
+        match = re.search(r'location(\d+)', sequence_name, re.IGNORECASE)
+        if match:
+            try:
+                hidden_rule_location = int(match.group(1))
+            except ValueError:
+                hidden_rule_location = None
+
+    return hidden_rule_location, sequence_name
+
+
 def load_json(reader: SessionData, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(root.name)}_*.{reader.extension}"
@@ -795,7 +845,7 @@ def load_odor_mapping(root, *, data=None, verbose: bool = True, **kwargs):
 # ================= Functions for Trial Analysis and Classification ========================
 
 
-def detect_trials(data, events, root, verbose=True):
+def detect_trials(data, events, root, odor_map, verbose=True):
     """
     Trial Detection Function     
     Parameters:
@@ -804,6 +854,8 @@ def detect_trials(data, events, root, verbose=True):
         Data dictionary containing poke information
     events : dict
         Events dictionary containing initiation sequences
+    odor_map : dict
+        Mapping produced by load_odor_mapping containing valve and odor data
     verbose : bool, default=True
         Whether to print detailed progress information
     
@@ -816,15 +868,71 @@ def detect_trials(data, events, root, verbose=True):
     """
     
     # Get experimental parameters automatically
-    sample_offset_time, minimum_sampling_time, _ = get_experiment_parameters(root)
+    sample_offset_time, minimum_sampling_time_by_odor, _ = get_experiment_parameters(root)
     # Convert to milliseconds for consistency with existing logic
     sample_offset_time_ms = sample_offset_time * 1000
-    minimum_sampling_time_ms = minimum_sampling_time * 1000
+
+    minimum_sampling_time_ms_by_odor = {
+        str(odor): float(threshold) * 1000.0
+        for odor, threshold in (minimum_sampling_time_by_odor or {}).items()
+        if threshold is not None
+    }
+
+    if not minimum_sampling_time_ms_by_odor:
+        raise ValueError("minimumSamplingTime_by_odor missing or empty in schema; cannot detect trials without per-odor thresholds")
+
+    default_minimum_sampling_time_ms = max(minimum_sampling_time_ms_by_odor.values())
+
+    olfactometer_valves = (odor_map or {}).get('olfactometer_valves', {}) if odor_map is not None else {}
+    valve_to_odor = (odor_map or {}).get('valve_to_odor', {}) if odor_map is not None else {}
+
+    valve_events = []
+    for olf_id, valve_df in (olfactometer_valves or {}).items():
+        if valve_df is None or getattr(valve_df, 'empty', True):
+            continue
+        for valve_idx, valve_col in enumerate(valve_df.columns):
+            valve_key = f"{olf_id}{valve_idx}"
+            odor_name = valve_to_odor.get(valve_key)
+            if not odor_name or str(odor_name).lower() == 'purge':
+                continue
+            valve_series = valve_df[valve_col].astype(bool)
+            activation_edges = valve_series & ~valve_series.shift(1, fill_value=False)
+            deactivation_edges = ~valve_series & valve_series.shift(1, fill_value=False)
+            activation_times = list(valve_series.index[activation_edges])
+            deactivation_times = list(valve_series.index[deactivation_edges])
+            j = 0
+            for activation_time in activation_times:
+                while j < len(deactivation_times) and deactivation_times[j] <= activation_time:
+                    j += 1
+                if j >= len(deactivation_times):
+                    break
+                valve_events.append({
+                    'start_time': activation_time,
+                    'end_time': deactivation_times[j],
+                    'odor_name': str(odor_name)
+                })
+    valve_events.sort(key=lambda ev: ev['start_time'])
+
+    def resolve_required_threshold_ms(window_start, window_end):
+        odor_candidate = None
+        for event in valve_events:
+            if event['start_time'] >= window_end:
+                break
+            if event['end_time'] <= window_start:
+                continue
+            odor_candidate = event['odor_name']
+            break
+        odor_key = str(odor_candidate) if odor_candidate is not None else None
+        threshold = minimum_sampling_time_ms_by_odor.get(odor_key, default_minimum_sampling_time_ms)
+        return threshold, odor_candidate
 
     if verbose:
         print("TRIAL DETECTION")
         print("=" * 60)
-        print(f"Parameters: minimum_sampling_time={minimum_sampling_time_ms}ms, sample_offset_time={sample_offset_time_ms}ms")
+        print(f"Parameters: sample_offset_time={sample_offset_time_ms}ms")
+        print("Per-odor minimum sampling times (ms):")
+        for odor_name, threshold in sorted(minimum_sampling_time_ms_by_odor.items()):
+            print(f"  - {odor_name}: {threshold:.1f}")
     
     initiation_events = events['combined_initiation_sequence_df'].copy()
     cue_pokes = data['digital_input_data']['DIPort0'].copy()
@@ -885,9 +993,12 @@ def detect_trials(data, events, root, verbose=True):
         while i < len(poke_periods) and not trial_found:
             attempt_num += 1
             sequence_start = poke_periods[i][0]
+
+            required_minimum_ms, attempt_odor = resolve_required_threshold_ms(sequence_start, next_initiation_time)
             
             if verbose:
-                print(f"    Starting attempt {attempt_num} at {sequence_start}")
+                odor_msg = f", odor={attempt_odor}" if attempt_odor else ""
+                print(f"    Starting attempt {attempt_num} at {sequence_start} (min={required_minimum_ms:.1f}ms{odor_msg})")
             
             # Build continuous sequence starting from poke i
             continuous_time = 0
@@ -925,10 +1036,10 @@ def detect_trials(data, events, root, verbose=True):
                             print(f"      Poke {j+1}: gap {gap:.1f}ms + {poke_duration:.1f}ms (total: {continuous_time:.1f}ms)")
                 
                 # Check if we've reached minimum_sampling_time
-                if continuous_time >= minimum_sampling_time_ms:
+                if continuous_time >= required_minimum_ms:
                     # SUCCESS! Stop here
                     if verbose:
-                        print(f"      SUCCESS: {continuous_time:.1f}ms continuous poke (≥{minimum_sampling_time_ms}ms)")
+                        print(f"      SUCCESS: {continuous_time:.1f}ms continuous poke (≥{required_minimum_ms:.1f}ms)")
                     
                     # Add to trials
                     trial_entry = {
@@ -937,7 +1048,9 @@ def detect_trials(data, events, root, verbose=True):
                         'trial_end': next_initiation_time,
                         'continuous_poke_time_ms': continuous_time,
                         'trial_id': len(trials),
-                        'attempt_number': attempt_num
+                        'attempt_number': attempt_num,
+                        'required_min_sampling_time_ms': required_minimum_ms,
+                        'odor_name': attempt_odor
                     }
                     trials.append(trial_entry)
                     
@@ -949,7 +1062,9 @@ def detect_trials(data, events, root, verbose=True):
                         'continuous_poke_time_ms': continuous_time,
                         'trial_id': len(trials) - 1,
                         'attempt_number': attempt_num,
-                        'timestamp': sequence_start
+                        'timestamp': sequence_start,
+                        'required_min_sampling_time_ms': required_minimum_ms,
+                        'odor_name': attempt_odor
                     }
                     initiated_sequences.append(initiated_sequence_entry)
                     
@@ -961,7 +1076,7 @@ def detect_trials(data, events, root, verbose=True):
             if not trial_found:
                 # This sequence failed
                 if verbose:
-                    print(f"      FAILED: {continuous_time:.1f}ms continuous poke (<{minimum_sampling_time_ms}ms)")
+                    print(f"      FAILED: {continuous_time:.1f}ms continuous poke (<{required_minimum_ms:.1f}ms)")
                 
                 # Add to non_initiated_sequences
                 non_initiated_sequence_entry = {
@@ -971,7 +1086,9 @@ def detect_trials(data, events, root, verbose=True):
                     'continuous_poke_time_ms': continuous_time,
                     'attempt_number': attempt_num,
                     'timestamp': sequence_start,
-                    'failure_reason': 'insufficient_continuous_poke_time'
+                    'failure_reason': 'insufficient_continuous_poke_time',
+                    'required_min_sampling_time_ms': required_minimum_ms,
+                    'odor_name': attempt_odor
                 }
                 non_initiated_sequences.append(non_initiated_sequence_entry)
                 
@@ -1006,22 +1123,74 @@ def detect_trials(data, events, root, verbose=True):
 
 def get_experiment_parameters(root):
     """
-    Simple function to extract sampleOffsetTime and minimumSamplingTime
-    
+    Extract parameters from schema, including per-odor minimum sampling times.
+
     Returns:
-        tuple: (sampleOffsetTime, minimumSamplingTime)
+        tuple: (sampleOffsetTime, minimumSamplingTime_by_odor, responseTime)
     """
     session_settings, session_schema = detect_settings.detect_settings(root)
-    
-    # Get sampleOffsetTime from SessionSettings
-    sample_offset_time = session_settings.metadata.iloc[0].metadata.sampleOffsetTime
-    
-    # Get minimumSamplingTime from Schema  
-    minimum_sampling_time = session_schema['minimumSamplingTime']
-    
-    response_time = session_schema['responseTime']
 
-    return sample_offset_time, minimum_sampling_time, response_time
+    def _coerce_to_float(value):
+        """Best-effort conversion of nested DotMap/dict/list structures to a float."""
+        if value is None:
+            return None
+        # Handle numpy scalars
+        if isinstance(value, (np.floating, np.integer)):
+            return float(value)
+        # Primitive numbers
+        if isinstance(value, (int, float)):
+            return float(value)
+        # DotMap behaves like a dict; convert to plain dict first
+        if isinstance(value, DotMap):
+            value = value.toDict()
+        if isinstance(value, dict):
+            # Prefer common scalar keys if present
+            for key in ('value', 'seconds', 'Seconds', 'ms', 'milliseconds'):
+                if key in value:
+                    coerced = _coerce_to_float(value[key])
+                    if coerced is not None:
+                        return coerced
+            # Fall back to any single numeric value stored in the mapping
+            numeric_vals = [v for v in value.values() if isinstance(v, (int, float, np.integer, np.floating))]
+            if len(numeric_vals) == 1:
+                return float(numeric_vals[0])
+            if len(numeric_vals) > 1:
+                # Ambiguous but still try first value deterministically
+                return float(numeric_vals[0])
+            # Walk nested structures if needed
+            for nested in value.values():
+                coerced = _coerce_to_float(nested)
+                if coerced is not None:
+                    return coerced
+            return None
+        if isinstance(value, (list, tuple)):
+            for item in value:
+                coerced = _coerce_to_float(item)
+                if coerced is not None:
+                    return coerced
+            return None
+        return None
+
+    # Get sampleOffsetTime from SessionSettings (handle nested metadata DotMaps)
+    session_meta = session_settings.iloc[0]['metadata']
+    sample_offset_time = _coerce_to_float(getattr(session_meta, 'sampleOffsetTime', None))
+    if sample_offset_time is None:
+        nested_meta = getattr(session_meta, 'metadata', None)
+        sample_offset_time = _coerce_to_float(getattr(nested_meta, 'sampleOffsetTime', None)) if nested_meta else None
+    if sample_offset_time is None:
+        raise ValueError("sampleOffsetTime missing or invalid in SessionSettings metadata")
+
+    # Get per-odor minimumSamplingTime dict and ensure scalar values
+    raw_minimums = session_schema.get('minimumSamplingTime_by_odor', {}) or {}
+    minimumSamplingTime_by_odor = {}
+    for odor, threshold in raw_minimums.items():
+        coerced = _coerce_to_float(threshold)
+        if coerced is not None:
+            minimumSamplingTime_by_odor[str(odor)] = coerced
+
+    response_time = _coerce_to_float(session_schema.get('responseTime'))
+
+    return sample_offset_time, minimumSamplingTime_by_odor, response_time
 
 def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=True):# Classify trials and get valve/poke times. Part of wrapper function
     """
@@ -1030,10 +1199,23 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
       - summary printouts for poke/valve time ranges by position and by odor
     Response-time analysis is removed.
     """
-    sample_offset_time, minimum_sampling_time, response_time = get_experiment_parameters(root)
+    sample_offset_time, minimum_sampling_time_by_odor, response_time = get_experiment_parameters(root)
     # Convert to milliseconds for consistency with existing logic
     sample_offset_time_ms = sample_offset_time * 1000
-    minimum_sampling_time_ms = minimum_sampling_time * 1000
+    minimum_sampling_time_ms_by_odor = {
+        str(odor): float(threshold) * 1000.0
+        for odor, threshold in (minimum_sampling_time_by_odor or {}).items()
+        if threshold is not None
+    }
+    if not minimum_sampling_time_ms_by_odor:
+        raise ValueError("minimumSamplingTime_by_odor missing or empty in schema; cannot classify trials without per-odor thresholds")
+    default_minimum_sampling_time_ms = max(minimum_sampling_time_ms_by_odor.values())
+
+    def resolve_min_sampling_time_ms(odor_name):
+        if odor_name is None:
+            return default_minimum_sampling_time_ms
+        return minimum_sampling_time_ms_by_odor.get(str(odor_name), default_minimum_sampling_time_ms)
+
     response_time_sec = response_time 
     if response_time_sec is None:
         raise ValueError("Response time parameter cannot be extracted from Schema file. Check detect_settings function.")
@@ -1043,30 +1225,35 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         print("CLASSIFYING TRIAL OUTCOMES WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS")
         print("=" * 80)
         print(f"Sample offset time: {sample_offset_time_ms} ms")
-        print(f"Minimum sampling time: {minimum_sampling_time_ms} ms")
+        print("Minimum sampling times (ms) by odor:")
+        for odor_name, threshold in sorted(minimum_sampling_time_ms_by_odor.items()):
+            print(f"  - {odor_name}: {threshold:.1f}")
         print(f"Response time window: {response_time_sec} s")
 
-    # Hidden rule location from stage
-    hidden_rule_location = None
-    sequence_name = None
-    if isinstance(stage, dict):
-        sequence_name = stage.get('stage_name') or str(stage)
-        if stage.get('hidden_rule_index') is not None:
-            try:
-                hidden_rule_location = int(stage['hidden_rule_index'])
-            except Exception:
-                hidden_rule_location = None
+    hidden_rule_location, sequence_name = _resolve_hidden_rule_from_stage(stage)
+    schema_settings = {}
+    schema_err: Exception | None = None
+    try:
+        _, schema_settings = detect_settings.detect_settings(root)
+    except Exception as exc:
+        schema_err = exc
+        schema_settings = {}
+
     if hidden_rule_location is None:
-        sequence_name = sequence_name or str(stage)
-        m = re.search(r'Location(\d+)', sequence_name)
-        if m:
-            hidden_rule_location = int(m.group(1))
+        inferred_idx = schema_settings.get('hiddenRuleIndexInferred')
+        if inferred_idx is not None:
+            try:
+                hidden_rule_location = int(inferred_idx)
+            except (TypeError, ValueError):
+                hidden_rule_location = None
+
     hidden_rule_position = hidden_rule_location + 1 if isinstance(hidden_rule_location, int) else None
     if verbose:
         if hidden_rule_location is not None:
             print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_position})")
         else:
-            print(f"No Hidden Rule Location found in sequence name: {sequence_name}. Proceeding without Hidden Rule analysis.")
+            seq_label = sequence_name or str(stage)
+            print(f"No Hidden Rule Location found in sequence name: {seq_label}. Proceeding without Hidden Rule analysis.")
 
     # Base trial data
     initiated_trials = trial_counts['initiated_sequences'].copy()
@@ -1108,7 +1295,6 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         first_fall = next((t for t in _ends if t > poke_series_full.index[0]), None)
         if first_fall is not None:
             poke_intervals.insert(0, (poke_series_full.index[0], first_fall))
-
 
     # Build valve activation list
     olfactometer_valves = odor_map['olfactometer_valves']
@@ -1191,10 +1377,11 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     hr_odor_set = None
     if hidden_rule_location is not None:
         try:
-            _, schema_settings = detect_settings.detect_settings(root)
+            if schema_err is not None and 'hiddenRuleOdorsInferred' not in schema_settings:
+                raise ValueError(str(schema_err))
             odors = (schema_settings.get('hiddenRuleOdorsInferred') or [])
             if len(odors) < 2:
-                raise ValueError("Hidden Rule Odor Identities could not be inferred from Schema.")
+                raise ValueError("found fewer than two rewarded odors at inferred hidden rule position.")
             hr_odor_set = set(map(str, odors))
             if verbose:
                 print(f"Hidden Rule Odors inferred: {sorted(hr_odor_set)}")
@@ -1355,6 +1542,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                         'odor_name': e['odor_name'],
                         'valve_start': e['start_time'],
                         'valve_end': e['end_time'],
+                        'required_min_sampling_time_ms': resolve_min_sampling_time_ms(e['odor_name'])
                     }
                     for e in first_odor_activations[:-1]
                 ]
@@ -1389,7 +1577,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 'odor_name': loc['odor_name'],
                 'valve_start': valve_start,
                 'valve_end': valve_end,
-                'valve_duration_ms': valve_duration_ms
+                'valve_duration_ms': valve_duration_ms,
+                'required_min_sampling_time_ms': resolve_min_sampling_time_ms(loc['odor_name'])
             }
             if position == 1:
                 entry['prior_presentations'] = prior_presentations
@@ -1458,6 +1647,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                     'poke_odor_start': odor_start,
                     'poke_odor_end': odor_end,
                     'poke_first_in': first_poke_in,
+                    'required_min_sampling_time_ms': resolve_min_sampling_time_ms(loc['odor_name'])
                 }
 
         return position_valve_times, position_poke_times
@@ -1494,6 +1684,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 'valve_duration_ms': float(vdur_ms),
                 'poke_time_ms': float(psum.get('poke_time_ms', 0.0)),
                 'poke_first_in': psum.get('poke_first_in'),
+                'required_min_sampling_time_ms': resolve_min_sampling_time_ms(ev['odor_name']),
             })
 
         # Last relevant odor index (ignore valve durations < sample_offset_time_ms)
@@ -1523,6 +1714,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 'odor_name': attempt.get('odor_name'),
                 'attempt_first_poke_in': first_in,
                 'attempt_poke_time_ms': dur_ms,
+                'required_min_sampling_time_ms': attempt.get('required_min_sampling_time_ms', resolve_min_sampling_time_ms(attempt.get('odor_name'))),
             })
 
         # Compute corrected trial start = first poke-in within last Pos1 window (existing local window logic)
@@ -1544,6 +1736,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_dict['position_poke_times'] = position_poke_times
         trial_dict['presentations'] = presentations
         trial_dict['last_event_index'] = last_event_index
+        trial_dict['minimum_sampling_time_ms_by_odor'] = dict(minimum_sampling_time_ms_by_odor)
         if corrected_start is not None:
             trial_dict['sequence_start_corrected'] = corrected_start
 
@@ -1703,6 +1896,9 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         'completed_sequences': pd.DataFrame(completed_sequences),
         'aborted_sequences': pd.DataFrame(aborted_sequences),
         'non_initiated_odor1_attempts': pd.DataFrame(non_initiated_odor1_attempts),
+        'minimum_sampling_time_ms_by_odor': dict(minimum_sampling_time_ms_by_odor),
+        'default_minimum_sampling_time_ms': float(default_minimum_sampling_time_ms),
+        'minimum_sampling_time_ms': float(default_minimum_sampling_time_ms),
 
         'aborted_sequences_HR': pd.DataFrame(aborted_sequences_hr),
         'completed_sequences_HR': pd.DataFrame(completed_hr),
@@ -1858,7 +2054,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
     return result
 
-def analyze_response_times(data, trial_counts, events, odor_map, stage, root, verbose=True):# Analyze response times for all completed trials. Part of wrapper function
+def analyze_response_times(data, trial_counts, events, odor_map, stage, root, verbose=True):
     """
     Analyze response times for all completed trials (clean version).
     Behavior and prints match analyze_response_times_all_trials_fixed.
@@ -1872,10 +2068,25 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
       - failed_calculations
     """
 
-    sample_offset_time, minimum_sampling_time, response_time = get_experiment_parameters(root)
+    # Get per-odor thresholds from schema
+    sample_offset_time, minimum_sampling_time_by_odor, response_time = get_experiment_parameters(root)
     sample_offset_time_ms = sample_offset_time * 1000
-    minimum_sampling_time_ms = minimum_sampling_time * 1000
-    response_time_sec = response_time 
+    minimum_sampling_time_ms_by_odor = {
+        str(odor): float(threshold) * 1000.0
+        for odor, threshold in (minimum_sampling_time_by_odor or {}).items()
+        if threshold is not None
+    }
+    if not minimum_sampling_time_ms_by_odor:
+        raise ValueError("minimumSamplingTime_by_odor missing or empty in schema; cannot analyze response times without per-odor thresholds")
+    default_minimum_sampling_time_ms = max(minimum_sampling_time_ms_by_odor.values())
+
+    def resolve_min_sampling_time_ms(odor_name):
+        """Return minimum sampling time in ms for a given odor, fallback to default if unknown"""
+        if odor_name is None:
+            return default_minimum_sampling_time_ms
+        return minimum_sampling_time_ms_by_odor.get(str(odor_name), default_minimum_sampling_time_ms)
+
+    response_time_sec = response_time
     if response_time_sec is None:
         raise ValueError("Response time parameter cannot be extracted from Schema file. Check detect_settings function.")
 
@@ -1884,27 +2095,36 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         print("RESPONSE TIME ANALYSIS - ALL COMPLETED TRIALS")
         print("=" * 80)
 
-    # Extract hidden rule location
-    hidden_rule_location = None
-    sequence_name = None
-    if isinstance(stage, dict):
-        sequence_name = stage.get('stage_name') or str(stage)
-        if stage.get('hidden_rule_index') is not None:
-            try:
-                hidden_rule_location = int(stage['hidden_rule_index'])
-            except Exception:
-                hidden_rule_location = None
+    hidden_rule_location, sequence_name = _resolve_hidden_rule_from_stage(stage)
+    schema_settings = {}
+    schema_err: Exception | None = None
+    try:
+        _, schema_settings = detect_settings.detect_settings(root)
+    except Exception as exc:
+        schema_err = exc
+        schema_settings = {}
+
     if hidden_rule_location is None:
-        sequence_name = sequence_name or str(stage)
-        m = re.search(r'Location(\d+)', sequence_name)
-        if m:
-            hidden_rule_location = int(m.group(1))
+        inferred_idx = schema_settings.get('hiddenRuleIndexInferred')
+        if inferred_idx is not None:
+            try:
+                hidden_rule_location = int(inferred_idx)
+            except (TypeError, ValueError):
+                hidden_rule_location = None
+
     hidden_rule_position = hidden_rule_location + 1 if isinstance(hidden_rule_location, int) else None
+
     if verbose:
+        print(f"Sample offset time: {sample_offset_time_ms} ms")
+        print("Minimum sampling times (ms) by odor:")
+        for odor_name, threshold in sorted(minimum_sampling_time_ms_by_odor.items()):
+            print(f"  - {odor_name}: {threshold:.1f}")
+        print(f"Response time window: {response_time_sec} s")
         if hidden_rule_location is not None:
-            print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_position})")
+            print(f"Hidden rule location extracted: Location {hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_position})")
         else:
-            print(f"No Hidden Rule Location found in sequence name: {sequence_name}. Proceeding without Hidden Rule analysis.")
+            seq_label = sequence_name or str(stage)
+            print(f"No Hidden Rule Location found in sequence name: {seq_label}. Proceeding without Hidden Rule analysis.")
 
     # Get initiated trials and events (same as main function)
     initiated_trials = trial_counts['initiated_sequences']
@@ -1983,10 +2203,11 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
     hr_odor_set = None
     if hidden_rule_location is not None:
         try:
-            _, schema_settings = detect_settings.detect_settings(root)
+            if schema_err is not None and 'hiddenRuleOdorsInferred' not in schema_settings:
+                raise ValueError(str(schema_err))
             odors = (schema_settings.get('hiddenRuleOdorsInferred') or [])
             if len(odors) < 2:
-                raise ValueError("Hidden Rule Odor Identities could not be inferred from Schema.")
+                raise ValueError("found fewer than two rewarded odors at inferred hidden rule position.")
             hr_odor_set = set(map(str, odors))
             if verbose:
                 print(f"Hidden Rule Odors inferred: {sorted(hr_odor_set)}")
@@ -2021,6 +2242,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         trial_start = trial_dict['sequence_start']
         trial_end = trial_dict['sequence_end']
         await_reward_time = trial_dict['await_reward_time']
+        target_odor_name = None
+        target_required_min_ms = float('nan')
 
         # Get valve sequence
         odor_sequence, trial_valve_events = get_trial_valve_sequence(trial_start, trial_end)
@@ -2112,8 +2335,12 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                 'trial_id': trial_id,
                 'response_time_ms': np.nan,
                 'response_time_category': None,
+                'target_odor_name': target_odor_name,
+                'target_required_min_sampling_time_ms': target_required_min_ms,
             })
             continue
+        target_odor_name = target_valve_event.get('odor_name')
+        target_required_min_ms = resolve_min_sampling_time_ms(target_odor_name)
 
         # Find last poke out in extended window around target odor
         odor_start = target_valve_event['start_time']
@@ -2127,6 +2354,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                 'trial_id': trial_id,
                 'response_time_ms': np.nan,
                 'response_time_category': None,
+                'target_odor_name': target_odor_name,
+                'target_required_min_sampling_time_ms': target_required_min_ms,
             })
             continue
 
@@ -2143,6 +2372,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                 'trial_id': trial_id,
                 'response_time_ms': np.nan,
                 'response_time_category': None,
+                'target_odor_name': target_odor_name,
+                'target_required_min_sampling_time_ms': target_required_min_ms,
             })
             continue
 
@@ -2186,6 +2417,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                     'trial_id': trial_id,
                     'response_time_ms': float(response_time_ms),
                     'response_time_category': 'rewarded',
+                    'target_odor_name': target_odor_name,
+                    'target_required_min_sampling_time_ms': target_required_min_ms,
                 })
             else:
                 failed_calculations += 1
@@ -2193,6 +2426,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                     'trial_id': trial_id,
                     'response_time_ms': np.nan,
                     'response_time_category': None,
+                    'target_odor_name': target_odor_name,
+                    'target_required_min_sampling_time_ms': target_required_min_ms,
                 })
         else:
             # Check full window from await_reward for unrewarded vs timeout
@@ -2215,6 +2450,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                         'trial_id': trial_id,
                         'response_time_ms': float(response_time_ms),
                         'response_time_category': 'unrewarded',
+                        'target_odor_name': target_odor_name,
+                        'target_required_min_sampling_time_ms': target_required_min_ms,
                     })
                 else:
                     failed_calculations += 1
@@ -2222,6 +2459,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                         'trial_id': trial_id,
                         'response_time_ms': np.nan,
                         'response_time_category': None,
+                        'target_odor_name': target_odor_name,
+                        'target_required_min_sampling_time_ms': target_required_min_ms,
                     })
             else:
                 # Timeout: look for delayed responses until next completed trial start
@@ -2252,6 +2491,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                         'trial_id': trial_id,
                         'response_time_ms': float(response_time_ms),
                         'response_time_category': 'timeout_delayed',
+                        'target_odor_name': target_odor_name,
+                        'target_required_min_sampling_time_ms': target_required_min_ms,
                     })
                 else:
                     failed_calculations += 1
@@ -2259,6 +2500,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
                         'trial_id': trial_id,
                         'response_time_ms': np.nan,
                         'response_time_category': None,
+                        'target_odor_name': target_odor_name,
+                        'target_required_min_sampling_time_ms': target_required_min_ms,
                     })
 
     # Print results
@@ -2330,6 +2573,11 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         'all_response_times': all_response_times,
         'failed_calculations': failed_calculations,
         'per_trial': per_trial_df,  # NEW
+        'sample_offset_time_ms': sample_offset_time_ms,
+        'minimum_sampling_time_ms_by_odor': minimum_sampling_time_ms_by_odor,
+        'default_minimum_sampling_time_ms': default_minimum_sampling_time_ms,
+        'minimum_sampling_time_ms': default_minimum_sampling_time_ms,
+        'response_time_window_sec': response_time_sec,
     }
 
 def abortion_classification(data, events, classification, odor_map, root, verbose=True): # Classify aborted trials with response times, poke times, FA etc. Part of wrapper function
@@ -2340,7 +2588,7 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
       - Compute poke time for that last odor (from poke-in that covers/starts at valve_start,
         merging gaps <= sample_offset_time_ms, ends at first large gap)
       - Abortion type:
-          * reinitiation_abortion if last-odor poke >= minimum_sampling_time_ms
+          * reinitiation_abortion if last-odor poke >= required min sampling time for that odor
           * initiation_abortion otherwise
       - Abortion time = last cue-port poke-out within the trial window
       - False alarm (FA) detection window = (abortion_time, next cue-port poke after next InitiationSequence)
@@ -2369,9 +2617,37 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
     reward_rises = sorted(dip1_rises + dip2_rises)
 
     # Parameters
-    sample_offset_time, minimum_sampling_time, response_time = get_experiment_parameters(root)
+    sample_offset_time, minimum_sampling_time_by_odor, response_time = get_experiment_parameters(root)
     sample_offset_time_ms = float(sample_offset_time) * 1000.0
-    minimum_sampling_time_ms = float(minimum_sampling_time) * 1000.0
+    minimum_sampling_time_ms_by_odor = {
+        str(odor): float(threshold) * 1000.0
+        for odor, threshold in (minimum_sampling_time_by_odor or {}).items()
+        if threshold is not None
+    }
+
+    cls_minimums = classification.get('minimum_sampling_time_ms_by_odor') if isinstance(classification, dict) else None
+    if isinstance(cls_minimums, dict):
+        for odor, threshold in cls_minimums.items():
+            if threshold is None:
+                continue
+            try:
+                minimum_sampling_time_ms_by_odor[str(odor)] = float(threshold)
+            except (TypeError, ValueError):
+                continue
+
+    if not minimum_sampling_time_ms_by_odor:
+        raise ValueError("minimumSamplingTime_by_odor missing or empty; cannot classify aborted trials without per-odor thresholds")
+
+    default_minimum_sampling_time_ms = classification.get('default_minimum_sampling_time_ms') if isinstance(classification, dict) else None
+    if default_minimum_sampling_time_ms is None:
+        default_minimum_sampling_time_ms = max(minimum_sampling_time_ms_by_odor.values())
+
+    def resolve_min_sampling_time_ms(odor_name):
+        if odor_name is None:
+            return default_minimum_sampling_time_ms
+        return minimum_sampling_time_ms_by_odor.get(str(odor_name), default_minimum_sampling_time_ms)
+
+    minimum_sampling_time_ms = float(default_minimum_sampling_time_ms)
     response_time_ms = float(response_time) * 1000.0
 
     # Inputs
@@ -2583,6 +2859,7 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
             valve_start = e['start_time']
             valve_end = e['end_time']
             valve_dur_ms = (valve_end - valve_start).total_seconds() * 1000.0
+            required_min_ms = float(resolve_min_sampling_time_ms(e['odor_name']))
 
             # Poke summary within valve window (merge gaps ≤ sample_offset_time_ms)
             psum = window_poke_summary(valve_start, valve_end)
@@ -2597,6 +2874,7 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
                 'valve_duration_ms': float(valve_dur_ms),
                 'poke_time_ms': float(psum.get('poke_time_ms', 0.0)),
                 'poke_first_in': psum.get('poke_first_in'),
+                'required_min_sampling_time_ms': required_min_ms,
             })
 
             # Keep last presentation per position for backward-compatibility
@@ -2606,9 +2884,11 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
                 'valve_start': valve_start,
                 'valve_end': valve_end,
                 'valve_duration_ms': float(valve_dur_ms),
+                'required_min_sampling_time_ms': required_min_ms,
             }
             psum_pos = dict(psum)
             psum_pos['odor_name'] = e['odor_name']
+            psum_pos['required_min_sampling_time_ms'] = required_min_ms
             position_poke_times[int(pos)] = psum_pos
 
         # Last relevant odor (ignore < sample_offset_time_ms)
@@ -2638,16 +2918,19 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
                 continue
             valve_start = e['start_time']; valve_end = e['end_time']
             valve_dur_ms = (valve_end - valve_start).total_seconds() * 1000.0
+            required_min_ms = float(resolve_min_sampling_time_ms(e['odor_name']))
             # keep the last presentation per position
             position_valve_times[pos] = {
                 'position': pos,
                 'odor_name': e['odor_name'],
                 'valve_start': valve_start,
                 'valve_end': valve_end,
-                'valve_duration_ms': valve_dur_ms
+                'valve_duration_ms': valve_dur_ms,
+                'required_min_sampling_time_ms': required_min_ms
             }
             psum = window_poke_summary(valve_start, valve_end)
             psum['odor_name'] = e['odor_name']
+            psum['required_min_sampling_time_ms'] = required_min_ms
             position_poke_times[pos] = psum
 
         # Last relevant odor (ignore < sample_offset_time_ms)
@@ -2662,19 +2945,25 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
         last_odor_pos = None
         last_valve_dur_ms = 0.0
         last_odor_poke_ms = 0.0
+        last_required_min_ms = float('nan')
 
         if last_idx is not None:
             last_ev = evs[last_idx]
             last_odor_name = last_ev['odor_name']
             last_odor_pos = positions[last_idx]
             last_valve_dur_ms = (last_ev['end_time'] - last_ev['start_time']).total_seconds() * 1000.0
+            last_required_min_ms = float(resolve_min_sampling_time_ms(last_odor_name))
 
             # Authoritative: poke time strictly within [valve_start, valve_end]
             psum_last = window_poke_summary(last_ev['start_time'], last_ev['end_time'])
             last_odor_poke_ms = float(psum_last.get('poke_time_ms', 0.0))
 
         # Abortion type
-        abortion_type = 'reinitiation_abortion' if last_odor_poke_ms >= minimum_sampling_time_ms else 'initiation_abortion'
+        abortion_type = (
+            'reinitiation_abortion'
+            if (not np.isnan(last_required_min_ms) and last_odor_poke_ms >= last_required_min_ms)
+            else 'initiation_abortion'
+        )
 
         # Abortion time = last cue-port poke-out in [t_start, t_end]
         abortion_time = None
@@ -2746,6 +3035,7 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
             'last_odor_name': last_odor_name,
             'last_odor_valve_duration_ms': float(last_valve_dur_ms),
             'last_odor_poke_time_ms': float(last_odor_poke_ms),
+            'last_required_min_sampling_time_ms': float(last_required_min_ms) if not np.isnan(last_required_min_ms) else np.nan,
             'abortion_type': abortion_type,
             'abortion_time': abortion_time,
             'fa_label': fa_label,
@@ -2887,7 +3177,7 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
             else:
                 print(f"{label}: n={len(s)} | avg={s.mean():.1f} ms | range={s.min():.1f}-{s.max():.1f} ms")
 
-        # Non-last odor poke times (>= minimum_sampling_time_ms), requires 'presentations'
+        # Non-last odor poke times (>= odor-specific minimum sampling time), requires 'presentations'
         if 'presentations' in aborted_detailed.columns and 'last_event_index' in aborted_detailed.columns:
             pres_df = aborted_detailed[['trial_id', 'presentations', 'last_event_index']].explode('presentations')
             pres_df = pres_df.dropna(subset=['presentations']).copy()
@@ -2901,9 +3191,15 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
                 pres['is_last'] = pres['index_in_trial'] == pres['last_event_index']
                 pres = pres[~pres['is_last']].copy()
 
-                # Only pokes >= minimum_sampling_time_ms
+                # Only count pokes meeting the odor-specific minimum sampling time
                 pres['poke_time_ms'] = pd.to_numeric(pres['poke_time_ms'], errors='coerce')
-                pres_valid = pres[pres['poke_time_ms'] >= minimum_sampling_time_ms].copy()
+                pres['required_min_sampling_time_ms'] = pd.to_numeric(
+                    pres.get('required_min_sampling_time_ms'), errors='coerce'
+                )
+                pres_valid = pres.dropna(subset=['required_min_sampling_time_ms']).copy()
+                pres_valid = pres_valid[
+                    pres_valid['poke_time_ms'] >= pres_valid['required_min_sampling_time_ms']
+                ]
 
                 print("\nNon-last Odor Pokes:")
                 stats_line(pres_valid['poke_time_ms'], "  - All non-last odors")
@@ -3185,16 +3481,26 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
         'completed_sequences_with_response_times': <DataFrame of completed trials with RT columns>
       }
     """
-    sample_offset_time, minimum_sampling_time, response_time = get_experiment_parameters(root)
+    sample_offset_time, minimum_sampling_time_by_odor, response_time = get_experiment_parameters(root)
     sample_offset_time_ms = sample_offset_time * 1000
-    minimum_sampling_time_ms = minimum_sampling_time * 1000
+    minimum_sampling_time_ms_by_odor = {
+        str(odor): float(threshold) * 1000.0
+        for odor, threshold in (minimum_sampling_time_by_odor or {}).items()
+        if threshold is not None
+    }
+    if not minimum_sampling_time_ms_by_odor:
+        raise ValueError("minimumSamplingTime_by_odor missing or empty in schema; cannot run classification without per-odor thresholds")
+    default_minimum_sampling_time_ms = max(minimum_sampling_time_ms_by_odor.values())
+
     response_time_sec = response_time
     if response_time_sec is None:
         raise ValueError("Response time parameter cannot be extracted from Schema file. Check detect_settings function.")
 
     params = {
         'sample_offset_time_ms': sample_offset_time_ms,
-        'minimum_sampling_time_ms': minimum_sampling_time_ms,
+        'minimum_sampling_time_ms_by_odor': dict(minimum_sampling_time_ms_by_odor),
+        'default_minimum_sampling_time_ms': float(default_minimum_sampling_time_ms),
+        'minimum_sampling_time_ms': float(default_minimum_sampling_time_ms),
         'response_time_window_sec': response_time_sec
     }
 
@@ -3222,28 +3528,31 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
     # 3) Build fast lookup indices for downstream use
     classification['index'] = build_classification_index(classification)
 
-    # 4) Hidden rule position from stage name/index 
-    sequence_name = None
-    hidden_rule_location = None
-    if isinstance(stage, dict):
-        sequence_name = stage.get('stage_name') or str(stage)
-        if stage.get('hidden_rule_index') is not None:
-            try:
-                hidden_rule_location = int(stage['hidden_rule_index'])
-            except Exception:
-                hidden_rule_location = None
+    # 4) Hidden rule position from stage name/index
+    hidden_rule_location, sequence_name = _resolve_hidden_rule_from_stage(stage)
+    schema_settings = {}
+    try:
+        _, schema_settings = detect_settings.detect_settings(root)
+    except Exception:
+        schema_settings = {}
+
     if hidden_rule_location is None:
-        sequence_name = sequence_name or str(stage)
-        m = re.search(r'Location(\d+)', sequence_name)
-        if m:
-            hidden_rule_location = int(m.group(1))
+        inferred_idx = schema_settings.get('hiddenRuleIndexInferred')
+        if inferred_idx is not None:
+            try:
+                hidden_rule_location = int(inferred_idx)
+            except (TypeError, ValueError):
+                hidden_rule_location = None
+
     hidden_rule_pos = hidden_rule_location + 1 if isinstance(hidden_rule_location, int) else None
     if hidden_rule_location is not None:
         print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_pos})")
     else:
-        print(f"No Hidden Rule Location found in sequence name: {sequence_name}. Proceeding without Hidden Rule analysis.")
+        seq_label = sequence_name or str(stage)
+        print(f"No Hidden Rule Location found in sequence name: {seq_label}. Proceeding without Hidden Rule analysis.")
 
 # 5) Attach params and RT summary to classification
+    classification['hidden_rule_location'] = hidden_rule_location
     classification['hidden_rule_position'] = hidden_rule_pos
     classification.update(params)
     classification['response_time_analysis'] = rt_summary
@@ -3582,6 +3891,8 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
     params = {
         "sample_offset_time_ms": classification.get("sample_offset_time_ms"),
         "minimum_sampling_time_ms": classification.get("minimum_sampling_time_ms"),
+        "default_minimum_sampling_time_ms": classification.get("default_minimum_sampling_time_ms"),
+        "minimum_sampling_time_ms_by_odor": classification.get("minimum_sampling_time_ms_by_odor"),
         "response_time_window_sec": classification.get("response_time_window_sec"),
         "hidden_rule_position": classification.get("hidden_rule_position"),
         "hidden_rule_odors": classification.get("hidden_rule_odors"),
@@ -3696,6 +4007,8 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
             'run_id': ridx,
             'sample_offset_time_ms': cls.get('sample_offset_time_ms'),
             'minimum_sampling_time_ms': cls.get('minimum_sampling_time_ms'),
+            'default_minimum_sampling_time_ms': cls.get('default_minimum_sampling_time_ms'),
+            'minimum_sampling_time_ms_by_odor': cls.get('minimum_sampling_time_ms_by_odor'),
             'response_time_window_sec': cls.get('response_time_window_sec'),
             'hidden_rule_position': cls.get('hidden_rule_position'),
             'hidden_rule_odors': cls.get('hidden_rule_odors'),
@@ -3782,6 +4095,11 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
         first = per_run_metadata[0]
         merged['sample_offset_time_ms'] = first['sample_offset_time_ms']
         merged['minimum_sampling_time_ms'] = first['minimum_sampling_time_ms']
+        merged['default_minimum_sampling_time_ms'] = first.get('default_minimum_sampling_time_ms')
+        if isinstance(first.get('minimum_sampling_time_ms_by_odor'), dict):
+            merged['minimum_sampling_time_ms_by_odor'] = dict(first['minimum_sampling_time_ms_by_odor'])
+        else:
+            merged['minimum_sampling_time_ms_by_odor'] = {}
         merged['response_time_window_sec'] = first['response_time_window_sec']
         merged['hidden_rule_position'] = first['hidden_rule_position']
     
@@ -3834,7 +4152,7 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
         if per_run_metadata and len(per_run_metadata) > 1:
             first_params = per_run_metadata[0]
             for meta in per_run_metadata[1:]:
-                for key in ['sample_offset_time_ms', 'minimum_sampling_time_ms', 'response_time_window_sec', 'hidden_rule_position']:
+                for key in ['sample_offset_time_ms', 'minimum_sampling_time_ms', 'default_minimum_sampling_time_ms', 'minimum_sampling_time_ms_by_odor', 'response_time_window_sec', 'hidden_rule_position']:
                     if meta.get(key) != first_params.get(key):
                         if not params_differ:
                             print("[merge_classifications] WARNING: Parameters differ across runs:")
@@ -3876,7 +4194,13 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
                 run_id = meta.get('run_id')
                 print(f"\nRun {run_id}:")
                 print(f"  Sample Offset Time: {meta.get('sample_offset_time_ms')} ms")
-                print(f"  Minimum Sampling Time: {meta.get('minimum_sampling_time_ms')} ms")
+                default_min_ms = meta.get('default_minimum_sampling_time_ms', meta.get('minimum_sampling_time_ms'))
+                print(f"  Default Minimum Sampling Time: {default_min_ms} ms")
+                ms_map = meta.get('minimum_sampling_time_ms_by_odor') or {}
+                if ms_map:
+                    print("  Minimum Sampling Time by Odor (ms):")
+                    for odor_name, threshold in sorted(ms_map.items()):
+                        print(f"    - {odor_name}: {threshold}")
                 print(f"  Response Time Window: {meta.get('response_time_window_sec')} s")
                 print(f"  Hidden Rule Position: {meta.get('hidden_rule_position')}")
                 print(f"  Hidden Rule Odors: {meta.get('hidden_rule_odors')}")
@@ -3885,6 +4209,8 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
         # Rest of summary output (use first run's params or show per-run note)
         sample_offset_time_ms = cls.get("sample_offset_time_ms")
         minimum_sampling_time_ms = cls.get("minimum_sampling_time_ms")
+        default_minimum_sampling_time_ms = cls.get("default_minimum_sampling_time_ms")
+        minimum_sampling_time_ms_by_odor = cls.get("minimum_sampling_time_ms_by_odor") or {}
         response_time_window_sec = cls.get("response_time_window_sec")
         hr_pos = cls.get("hidden_rule_position")
         hr_idx = (hr_pos - 1) if isinstance(hr_pos, (int, np.integer)) else None
@@ -3935,8 +4261,17 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
         print("=" * 80)
         if sample_offset_time_ms is not None:
             print(f"Sample offset time: {fmt_ms(sample_offset_time_ms)} ms")
-        if minimum_sampling_time_ms is not None:
+        if default_minimum_sampling_time_ms is not None:
+            print(f"Minimum sampling time (default): {fmt_ms(default_minimum_sampling_time_ms)} ms")
+        elif minimum_sampling_time_ms is not None:
             print(f"Minimum sampling time: {fmt_ms(minimum_sampling_time_ms)} ms")
+        if minimum_sampling_time_ms_by_odor:
+            print("Minimum sampling times (ms) by odor:")
+            for odor_name, threshold in sorted(minimum_sampling_time_ms_by_odor.items()):
+                try:
+                    print(f"  - {odor_name}: {fmt_ms(threshold)}")
+                except Exception:
+                    print(f"  - {odor_name}: {threshold}")
         if response_time_window_sec is not None:
             print(f"Response time window: {float(response_time_window_sec):.2f} s")
 
@@ -4229,7 +4564,7 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
                 else:
                     print(f"{label}: n={len(s)} | median={s.median():.1f} ms | avg={s.mean():.1f} ms | range={s.min():.1f}-{s.max():.1f} ms")
 
-            # Non-last Odor Pokes (exclude last_event_index per trial), only >= minimum_sampling_time_ms
+            # Non-last Odor Pokes (exclude last_event_index per trial), only >= odor-specific thresholds
             if {'presentations', 'last_event_index'}.issubset(ab_det.columns):
                 pres_df = ab_det[['trial_id', 'presentations', 'last_event_index']].explode('presentations').dropna(subset=['presentations']).copy()
                 if not pres_df.empty:
@@ -4237,7 +4572,13 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
                     pres['is_last'] = pres['index_in_trial'] == pres['last_event_index']
                     pres = pres[~pres['is_last']].copy()
                     pres['poke_time_ms'] = pd.to_numeric(pres.get('poke_time_ms'), errors='coerce')
-                    pres_valid = pres[(pres['poke_time_ms'] >= (minimum_sampling_time_ms or 0))].copy()
+                    pres['required_min_sampling_time_ms'] = pd.to_numeric(
+                        pres.get('required_min_sampling_time_ms'), errors='coerce'
+                    )
+                    pres_valid = pres.dropna(subset=['required_min_sampling_time_ms']).copy()
+                    pres_valid = pres_valid[
+                        pres_valid['poke_time_ms'] >= pres_valid['required_min_sampling_time_ms']
+                    ]
 
                     print("\nPoke Times for all Odors (Except aborted Odor):")
                     _stats_line(pres_valid['poke_time_ms'], "  - All Odors (except aborted)")
@@ -4409,7 +4750,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
             events = _maybe_silent(load_experiment_events, root, verbose=verbose)
             run_end_time = extract_run_end_time(data, events)
             odor_map = _maybe_silent(load_odor_mapping, root, data=data, verbose=verbose)
-            trial_counts = detect_trials(data, events, root, verbose=verbose)
+            trial_counts = detect_trials(data, events, root, odor_map, verbose=verbose)
 
             out = _maybe_silent(
                 classify_and_analyze_with_response_times,

@@ -16,60 +16,85 @@ def detect_settings(root):
     """
     Handles structure of settings and schema files.
     Extracts parameters from schema settings.
-
-    # TODO currently the script assumes the schema settings are the same for all odours and sequences
     """
 
     path_root = Path(root)
     metadata_reader = utils.SessionData()
     session_settings = utils.load_json(metadata_reader, path_root/"SessionSettings")
-    minimumSamplingTime = None
+    
     metadata = session_settings.iloc[0]['metadata']
 
     # Handle schema and session settings format
     schema_settings = {}
-    sequence_obj = None
-    if not hasattr(metadata, 'sequences') or (hasattr(metadata, 'sequences') and not metadata.sequences):  # separate files
-        try: 
-            sequence_schema = utils.load_json(metadata_reader, path_root/"Schema") # TODO
-            sequence_metadata = sequence_schema['metadata'].iloc[0]
-            
-            minimumSamplingTime = sequence_metadata['sequences'][0][0]['rewardConditions'][0]['definition'][0][0]['minimumSamplingTime']
-            completionRequiresEngagement = sequence_metadata['sequences'][0][0]['completionRequiresEngagement']
-            responseTime = sequence_metadata['sequences'][0][0].get('responseTime') 
-            sequences_obj = sequence_metadata.get('sequences', None)
-
-        except:
-            try:
-                schema_filename = metadata.metadata.initialSequence.split("/")[-1]
-                with open(path_root/"Schema"/schema_filename, 'r') as file:
-                    sequence_schema = yaml.load(file, Loader=yaml.SafeLoader)
+    
+    # Extract minimum sampling times per odor and other parameters
+    minimumSamplingTime_by_odor = {}
+    completionRequiresEngagement = None
+    responseTime = None
+    sequences_obj = None
+    
+    if not hasattr(metadata, 'sequences') or (hasattr(metadata, 'sequences') and not metadata.sequences):
+        # Separate Schema files case
+        sequence_schema = utils.load_json(metadata_reader, path_root/"Schema")
+        sequence_metadata = sequence_schema['metadata'].iloc[0]
+        sequences_obj = sequence_metadata.get('sequences', None)
+    else:
+        # Inline sequences case
+        sequences_obj = metadata.sequences
+    
+    # Extract parameters from first segment (same for all)
+    try:
+        first_segment = sequences_obj[0][0] if sequences_obj else None
+        if first_segment:
+            completionRequiresEngagement = first_segment.get('completionRequiresEngagement')
+            responseTime = first_segment.get('responseTime')
+    except:
+        pass
+    
+    # Extract minimum sampling time per odor by iterating through all definitions
+    target_odors = {'OdorA', 'OdorB', 'OdorC', 'OdorD', 'OdorE', 'OdorF', 'OdorG'}
+    found_odors = set()
+    
+    try:
+        if sequences_obj:
+            for block in sequences_obj:
+                segs = block if isinstance(block, list) else [block]
+                for seg in segs:
+                    if not isinstance(seg, dict):
+                        continue
                     
-                    minimumSamplingTime = sequence_schema['sequences'][0][0]['rewardConditions'][0]['definition'][0][0]['minimumSamplingTime']
-                    completionRequiresEngagement = sequence_schema['sequences'][0][0]['completionRequiresEngagement']
-                    responseTime = sequence_schema['sequences'][0][0].get('responseTime') 
-                    sequences_obj = sequence_schema.get('sequences', None)
-            except Exception as e:
-                print(f"Error loading session schema: {e}")
-    else:  
-        try:
-            minimumSamplingTime = metadata.sequences[0][0]['rewardConditions'][0]['definition'][0][0]['minimumSamplingTime']
-            completionRequiresEngagement = metadata.sequences[0][0]['completionRequiresEngagement']
-            responseTime = metadata.sequences[0][0].get('responseTime')
-            sequences_obj = metadata.sequences
-        except Exception as e:
-            print(f"minimumSamplingTime was not a parameter in this session: {e}")
-            try:
-                minimumSamplingTime = metadata.sequences[0][0]['minimumEngagementTime']
-                completionRequiresEngagement = metadata.sequences[0][0]['completionRequiresEngagement']
-            except Exception as e:
-                print(f"minimumEngagementTime was not a parameter in this session either: {e}")
-            
-                minimumSamplingTime = 0 
-                completionRequiresEngagement = None
+                    rc = seg.get('rewardConditions')
+                    if isinstance(rc, list) and rc and isinstance(rc[0], dict):
+                        definition = rc[0].get('definition')
+                        if isinstance(definition, list):
+                            # definition is a list of position lists
+                            for position_choices in definition:
+                                items = position_choices if isinstance(position_choices, list) else [position_choices]
+                                for item in items:
+                                    if isinstance(item, dict):
+                                        odor = item.get('command')
+                                        if odor in target_odors and odor not in found_odors:
+                                            mst = item.get('minimumSamplingTime')
+                                            if mst is not None:
+                                                minimumSamplingTime_by_odor[odor] = mst
+                                                found_odors.add(odor)
+                                
+                                # Early exit if all odors found
+                                if len(found_odors) == len(target_odors):
+                                    break
+                            
+                            if len(found_odors) == len(target_odors):
+                                break
+                    
+                    if len(found_odors) == len(target_odors):
+                        break
+                
+                if len(found_odors) == len(target_odors):
+                    break
+    except Exception as e:
+        print(f"Error extracting minimum sampling times: {e}")
     
-    
-    schema_settings['minimumSamplingTime'] = minimumSamplingTime
+    schema_settings['minimumSamplingTime_by_odor'] = minimumSamplingTime_by_odor
     schema_settings['sampleOffsetTime'] = metadata.metadata.sampleOffsetTime
     schema_settings['completionRequiresEngagement'] = completionRequiresEngagement
     schema_settings['responseTime'] = responseTime
@@ -138,24 +163,35 @@ def detect_settings(root):
     hidden_rule_index_inferred = None
     hidden_rule_odors_inferred = []
     try:
-        # Accumulate rewarded odors per position across all blocks
+        # Find the maximum position index across all definitions
+        max_position = -1
+        for definition in _iter_definitions(sequences_obj):
+            max_position = max(max_position, len(definition) - 1)
+        
+        # Accumulate rewarded odors per position, excluding the last position
         rewarded_by_pos = defaultdict(set)
         for definition in _iter_definitions(sequences_obj):
             for pos_idx, choices in enumerate(definition):
+                # Skip the last position
+                if pos_idx >= max_position:
+                    continue
+                    
                 items = _flatten_list(choices) if isinstance(choices, list) else [choices]
                 for it in items:
                     if _is_rewarded(it):
                         name = _command_name(it)
                         if name:
                             rewarded_by_pos[pos_idx].add(name)
-        # Choose position(s) with >= 2 rewarded odors as Hidden Rule candidates
-        candidates = [(idx, sorted(list(odors))) for idx, odors in rewarded_by_pos.items() if len(odors) >= 2]
+        
+        # Find all positions with exactly 2 rewarded odors (hidden rule candidates)
+        candidates = [(idx, sorted(list(odors))) for idx, odors in rewarded_by_pos.items() if len(odors) == 2]
+        
         if candidates:
-            # Prefer the first candidate deterministically
+            # Prefer the earliest position deterministically
             candidates.sort(key=lambda x: x[0])
             hidden_rule_index_inferred, hidden_rule_odors_inferred = candidates[0]
     except Exception as e:
-        # Silent fallback; leave as None / []
+        # Silent fallback; leave as empty list
         pass
 
     schema_settings['hiddenRuleIndexInferred'] = hidden_rule_index_inferred
@@ -165,10 +201,6 @@ def detect_settings(root):
 
 if __name__ == "__main__":
     # Deal with inputs
-    if len(sys.argv) == 1:
-        # sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-025_id-076/ses-81_date-20250715")
-        sys.argv.append("/Volumes/harris/hypnose/rawdata/sub-020_id-072/ses-36_date-20250513")
-
     parser = argparse.ArgumentParser(description="Get stage of a behavioral session")
     parser.add_argument("session_folder", help="Path to the session folder (e.g., sub-XXX/ses-YYY_date-YYYYMMDD)")
     
