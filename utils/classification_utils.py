@@ -1,15 +1,32 @@
 import sys
 import os
-project_root = os.path.abspath("")
+from pathlib import Path
+
+def _discover_project_root() -> str:
+    env_override = os.environ.get("HYPNOSE_PROJECT_ROOT")
+    if env_override:
+        return os.path.abspath(env_override)
+
+    current = Path(__file__).resolve().parent
+    for candidate in [current] + list(current.parents):
+        if (candidate / "data" / "rawdata").exists():
+            return str(candidate)
+    return os.path.abspath("")
+
+
+project_root = _discover_project_root()
 if project_root not in sys.path:
     sys.path.append(project_root)
-import os
+
+SCHEMA_DIR = Path(project_root) / "device_schemas"
+BEHAVIOR_SCHEMA_PATH = SCHEMA_DIR / "behavior.yml"
+OLFACTOMETER_SCHEMA_PATH = SCHEMA_DIR / "olfactometer.yml"
+
 import json
 from dotmap import DotMap
 import pandas as pd
 import numpy as np
 import math
-from pathlib import Path
 from glob import glob
 from aeon.io.reader import Reader, Csv
 import aeon.io.api as api
@@ -91,54 +108,57 @@ def vprint(verbose: bool, *args, **kwargs):
         print(*args, **kwargs)
 
 
-def _resolve_hidden_rule_from_stage(stage) -> tuple[int | None, str | None]:
-    """Infer hidden-rule index and stage name from stage metadata."""
+def _ensure_int_list(value, *, subtract_one: bool = False) -> list[int]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        candidates = value
+    else:
+        candidates = [value]
+    out: list[int] = []
+    for item in candidates:
+        if item is None:
+            continue
+        try:
+            number = int(item)
+            if subtract_one:
+                number -= 1
+            out.append(number)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _resolve_hidden_rule_from_stage(stage) -> tuple[list[int], str | None]:
+    """Infer hidden-rule indices (possibly multiple) and stage name from metadata."""
     sequence_name = None
-    hidden_rule_location = None
+    indices: list[int] = []
 
     if isinstance(stage, Mapping):
         sequence_name = stage.get('stage_name') or stage.get('name')
 
-        idx_candidate = stage.get('hidden_rule_index')
-        if idx_candidate is None:
-            idxs = stage.get('hidden_rule_indices')
-            if isinstance(idxs, (list, tuple)):
-                for val in idxs:
-                    if val is not None:
-                        idx_candidate = val
-                        break
-            elif idxs is not None:
-                idx_candidate = idxs
-
-        if idx_candidate is None:
-            pos_candidate = stage.get('hidden_rule_position')
-            if pos_candidate is not None:
-                try:
-                    pos_int = int(pos_candidate)
-                    idx_candidate = pos_int - 1
-                except (TypeError, ValueError):
-                    idx_candidate = None
-
-        if idx_candidate is not None:
-            try:
-                hidden_rule_location = int(idx_candidate)
-            except (TypeError, ValueError):
-                hidden_rule_location = None
+        indices = _ensure_int_list(stage.get('hidden_rule_indices'))
+        if not indices:
+            indices = _ensure_int_list(stage.get('hidden_rule_index'))
+        if not indices:
+            indices = _ensure_int_list(stage.get('hidden_rule_positions'), subtract_one=True)
+        if not indices:
+            indices = _ensure_int_list(stage.get('hidden_rule_position'), subtract_one=True)
 
         if sequence_name is None:
             sequence_name = stage.get('name') or str(stage)
     else:
         sequence_name = str(stage)
 
-    if sequence_name and hidden_rule_location is None:
-        match = re.search(r'location(\d+)', sequence_name, re.IGNORECASE)
+    if sequence_name and not indices:
+        match = re.search(r'location([0-9]+)', sequence_name, re.IGNORECASE)
         if match:
-            try:
-                hidden_rule_location = int(match.group(1))
-            except ValueError:
-                hidden_rule_location = None
+            digits = match.group(1)
+            if digits:
+                indices = [int(ch) for ch in digits if ch.isdigit()]
 
-    return hidden_rule_location, sequence_name
+    indices = sorted({idx for idx in indices if isinstance(idx, int)})
+    return indices, sequence_name
 
 
 def load_json(reader: SessionData, root: Path) -> pd.DataFrame:
@@ -348,8 +368,8 @@ def load_all_streams(root, apply_corrections = True, *args, verbose: bool = True
     vprint(verbose, f"Loading data streams from: {root}")
     
     # Create readers
-    behavior_reader = harp.create_reader('device_schemas/behavior.yml', epoch=harp.REFERENCE_EPOCH)
-    olfactometer_reader = harp.create_reader('device_schemas/olfactometer.yml', epoch=harp.REFERENCE_EPOCH)
+    behavior_reader = harp.create_reader(str(BEHAVIOR_SCHEMA_PATH), epoch=harp.REFERENCE_EPOCH)
+    olfactometer_reader = harp.create_reader(str(OLFACTOMETER_SCHEMA_PATH), epoch=harp.REFERENCE_EPOCH)
     
     data = {}
     
@@ -569,7 +589,7 @@ def load_experiment_events(root, *args, verbose: bool = True, **kwargs):
     
     # === LOAD TIMING DATA ===
     try:
-        behavior_reader = harp.create_reader('device_schemas/behavior.yml', epoch=harp.REFERENCE_EPOCH)
+        behavior_reader = harp.create_reader(str(BEHAVIOR_SCHEMA_PATH), epoch=harp.REFERENCE_EPOCH)
         heartbeat = load(behavior_reader.TimestampSeconds, root/"Behavior")
         if not heartbeat.empty:
             heartbeat.reset_index(inplace=True)
@@ -744,7 +764,7 @@ def load_odor_mapping(root, *, data=None, verbose: bool = True, **kwargs):
     else:
         # Load valve data if not provided
         try:
-            olfactometer_reader = harp.create_reader('device_schemas/olfactometer.yml', epoch=harp.REFERENCE_EPOCH)
+            olfactometer_reader = harp.create_reader(str(OLFACTOMETER_SCHEMA_PATH), epoch=harp.REFERENCE_EPOCH)
             olfactometer_valves_0 = load(olfactometer_reader.OdorValveState, root/"Olfactometer0")
             olfactometer_valves_1 = load(olfactometer_reader.OdorValveState, root/"Olfactometer1")
         except Exception as e:
@@ -1230,7 +1250,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             print(f"  - {odor_name}: {threshold:.1f}")
         print(f"Response time window: {response_time_sec} s")
 
-    hidden_rule_location, sequence_name = _resolve_hidden_rule_from_stage(stage)
+    hidden_rule_indices, sequence_name = _resolve_hidden_rule_from_stage(stage)
     schema_settings = {}
     schema_err: Exception | None = None
     try:
@@ -1239,20 +1259,28 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         schema_err = exc
         schema_settings = {}
 
-    if hidden_rule_location is None:
-        inferred_idx = schema_settings.get('hiddenRuleIndexInferred')
-        if inferred_idx is not None:
-            try:
-                hidden_rule_location = int(inferred_idx)
-            except (TypeError, ValueError):
-                hidden_rule_location = None
+    if not hidden_rule_indices:
+        inferred_indices = schema_settings.get('hiddenRuleIndicesInferred')
+        if inferred_indices is None:
+            inferred_indices = schema_settings.get('hiddenRuleIndexInferred')
+        hidden_rule_indices = _ensure_int_list(inferred_indices)
 
-    hidden_rule_position = hidden_rule_location + 1 if isinstance(hidden_rule_location, int) else None
+    hidden_rule_indices = sorted({idx for idx in hidden_rule_indices if isinstance(idx, int)})
+    hidden_rule_positions = [idx + 1 for idx in hidden_rule_indices]
+    hidden_rule_location = hidden_rule_indices[0] if hidden_rule_indices else None
+    hidden_rule_position = hidden_rule_positions[0] if hidden_rule_positions else None
+    multiple_hidden_rule_locations = len(hidden_rule_positions) > 1
+
     if verbose:
-        if hidden_rule_location is not None:
-            print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_position})")
+        seq_label = sequence_name or str(stage)
+        if hidden_rule_indices:
+            if multiple_hidden_rule_locations:
+                pos_str = ", ".join(str(p) for p in hidden_rule_positions)
+                idx_str = ", ".join(str(idx) for idx in hidden_rule_indices)
+                print(f"Hidden rule locations extracted: Positions {pos_str} (indices {idx_str})")
+            else:
+                print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_position})")
         else:
-            seq_label = sequence_name or str(stage)
             print(f"No Hidden Rule Location found in sequence name: {seq_label}. Proceeding without Hidden Rule analysis.")
 
     # Base trial data
@@ -1375,7 +1403,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
 
     hr_odor_set = None
-    if hidden_rule_location is not None:
+    if hidden_rule_indices:
         try:
             if schema_err is not None and 'hiddenRuleOdorsInferred' not in schema_settings:
                 raise ValueError(str(schema_err))
@@ -1388,14 +1416,16 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         except Exception as e:
             raise ValueError(f"Hidden Rule Odor Identities could not be inferred from Schema: {e}")
 
-    def check_hidden_rule(odor_sequence, idx):
-        if idx is None or hr_odor_set is None:
-            return False, False
-        if idx < 0 or idx >= len(odor_sequence):
-            return False, False
-        odor_at_location = odor_sequence[idx]
-        hit_hidden_rule = odor_at_location in hr_odor_set
-        return True, hit_hidden_rule
+    def check_hidden_rule(odor_sequence, candidate_indices, odor_set):
+        if not candidate_indices or odor_set is None:
+            return False, False, []
+
+        valid_indices = [idx for idx in candidate_indices if 0 <= idx < len(odor_sequence)]
+        if not valid_indices:
+            return False, False, []
+
+        matching_indices = sorted({idx for idx in valid_indices if odor_sequence[idx] in odor_set})
+        return True, bool(matching_indices), matching_indices
     
     def window_poke_summary(window_start, window_end):
         if window_start is None or window_end is None or window_start >= window_end:
@@ -1731,6 +1761,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_dict['num_odors'] = len(odor_sequence)
         trial_dict['last_odor'] = odor_sequence[-1] if odor_sequence else None
         trial_dict['hidden_rule_location'] = hidden_rule_location
+        trial_dict['hidden_rule_locations'] = list(hidden_rule_indices)
+        trial_dict['hidden_rule_positions'] = list(hidden_rule_positions)
         trial_dict['sequence_name'] = sequence_name
         trial_dict['position_valve_times'] = position_valve_times
         trial_dict['position_poke_times'] = position_poke_times
@@ -1740,9 +1772,17 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         if corrected_start is not None:
             trial_dict['sequence_start_corrected'] = corrected_start
 
-        enough_odors, hit_hidden_rule = check_hidden_rule(odor_sequence, hidden_rule_location)
+        enough_odors, hit_hidden_rule, hr_hit_indices = check_hidden_rule(
+            odor_sequence, hidden_rule_indices, hr_odor_set
+        )
+        hr_hit_positions = [idx + 1 for idx in hr_hit_indices]
         trial_dict['enough_odors_for_hr'] = enough_odors
         trial_dict['hit_hidden_rule'] = hit_hidden_rule
+        trial_dict['hidden_rule_hit_indices'] = hr_hit_indices
+        trial_dict['hidden_rule_hit_positions'] = hr_hit_positions
+        hr_success = len(odor_sequence) in hr_hit_positions if hr_hit_positions else False
+        trial_dict['hidden_rule_success'] = hr_success
+        trial_dict['hidden_rule_success_position'] = len(odor_sequence) if hr_success else None
 
         initiated_trials_list.append(trial_dict)
         if trial_await_rewards:
@@ -1766,7 +1806,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             trial_dict['await_reward_time'] = await_reward_time
 
             if hit_hidden_rule:
-                if len(odor_sequence) == hidden_rule_position:
+                if hr_success:
                     completed_hr.append(trial_dict.copy())
                     hr_category = 'completed_hr'
                 else:
@@ -1930,12 +1970,23 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     result['completed_sequences_HR_missed_unrewarded'] = result['completed_sequence_HR_missed_unrewarded']
     result['completed_sequences_HR_missed_reward_timeout'] = result['completed_sequence_HR_missed_reward_timeout']
 
+    result['hidden_rule_location'] = hidden_rule_location
+    result['hidden_rule_positions'] = list(hidden_rule_positions)
+    result['hidden_rule_locations'] = list(hidden_rule_indices)
     result['hidden_rule_position'] = hidden_rule_position
     result['hidden_rule_odors'] = sorted(list(hr_odor_set)) if hr_odor_set is not None else []
 
     if verbose:
         print(f"\nTRIAL CLASSIFICATION RESULTS WITH HIDDEN RULE AND VALVE/POKE TIME ANALYSIS:")
-        print(f"Hidden Rule Location: Position {hidden_rule_position} (index {hidden_rule_location})\n")
+        if hidden_rule_positions:
+            if multiple_hidden_rule_locations:
+                pos_str = ", ".join(str(pos) for pos in hidden_rule_positions)
+                idx_str = ", ".join(str(idx) for idx in hidden_rule_indices)
+                print(f"Hidden Rule Locations: Positions {pos_str} (indices {idx_str})\n")
+            else:
+                print(f"Hidden Rule Location: Position {hidden_rule_position} (index {hidden_rule_location})\n")
+        else:
+            print("Hidden Rule Location: None detected\n")
         print(f"Hidden Rule Odors: {', '.join(result['hidden_rule_odors']) if result['hidden_rule_odors'] else 'None'}\n")
 
         # safe percent helper
@@ -2095,7 +2146,7 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         print("RESPONSE TIME ANALYSIS - ALL COMPLETED TRIALS")
         print("=" * 80)
 
-    hidden_rule_location, sequence_name = _resolve_hidden_rule_from_stage(stage)
+    hidden_rule_indices, sequence_name = _resolve_hidden_rule_from_stage(stage)
     schema_settings = {}
     schema_err: Exception | None = None
     try:
@@ -2104,15 +2155,17 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         schema_err = exc
         schema_settings = {}
 
-    if hidden_rule_location is None:
-        inferred_idx = schema_settings.get('hiddenRuleIndexInferred')
-        if inferred_idx is not None:
-            try:
-                hidden_rule_location = int(inferred_idx)
-            except (TypeError, ValueError):
-                hidden_rule_location = None
+    if not hidden_rule_indices:
+        inferred_indices = schema_settings.get('hiddenRuleIndicesInferred')
+        if inferred_indices is None:
+            inferred_indices = schema_settings.get('hiddenRuleIndexInferred')
+        hidden_rule_indices = _ensure_int_list(inferred_indices)
 
-    hidden_rule_position = hidden_rule_location + 1 if isinstance(hidden_rule_location, int) else None
+    hidden_rule_indices = sorted({idx for idx in hidden_rule_indices if isinstance(idx, int)})
+    hidden_rule_positions = [idx + 1 for idx in hidden_rule_indices]
+    hidden_rule_location = hidden_rule_indices[0] if hidden_rule_indices else None
+    hidden_rule_position = hidden_rule_positions[0] if hidden_rule_positions else None
+    multiple_hidden_rule_locations = len(hidden_rule_positions) > 1
 
     if verbose:
         print(f"Sample offset time: {sample_offset_time_ms} ms")
@@ -2120,10 +2173,15 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         for odor_name, threshold in sorted(minimum_sampling_time_ms_by_odor.items()):
             print(f"  - {odor_name}: {threshold:.1f}")
         print(f"Response time window: {response_time_sec} s")
-        if hidden_rule_location is not None:
-            print(f"Hidden rule location extracted: Location {hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_position})")
+        seq_label = sequence_name or str(stage)
+        if hidden_rule_positions:
+            if multiple_hidden_rule_locations:
+                pos_str = ", ".join(str(pos) for pos in hidden_rule_positions)
+                idx_str = ", ".join(str(idx) for idx in hidden_rule_indices)
+                print(f"Hidden rule locations extracted: Positions {pos_str} (indices {idx_str})")
+            else:
+                print(f"Hidden rule location extracted: Location {hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_position})")
         else:
-            seq_label = sequence_name or str(stage)
             print(f"No Hidden Rule Location found in sequence name: {seq_label}. Proceeding without Hidden Rule analysis.")
 
     # Get initiated trials and events (same as main function)
@@ -2201,7 +2259,7 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         return odor_sequence, trial_valve_activations
 
     hr_odor_set = None
-    if hidden_rule_location is not None:
+    if hidden_rule_indices:
         try:
             if schema_err is not None and 'hiddenRuleOdorsInferred' not in schema_settings:
                 raise ValueError(str(schema_err))
@@ -2215,14 +2273,16 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
             raise ValueError(f"Hidden Rule Odor Identities could not be inferred from Schema: {e}")
 
 
-    def check_hidden_rule(odor_sequence, idx):
-        if idx is None or hr_odor_set is None:
-            return False, False
-        if idx < 0 or idx >= len(odor_sequence):
-            return False, False
-        odor_at_location = odor_sequence[idx]
-        hit_hidden_rule = odor_at_location in hr_odor_set
-        return True, hit_hidden_rule
+    def check_hidden_rule(odor_sequence, candidate_indices, odor_set):
+        if not candidate_indices or odor_set is None:
+            return False, False, []
+
+        valid_indices = [idx for idx in candidate_indices if 0 <= idx < len(odor_sequence)]
+        if not valid_indices:
+            return False, False, []
+
+        matching_indices = sorted({idx for idx in valid_indices if odor_sequence[idx] in odor_set})
+        return True, bool(matching_indices), matching_indices
 
     def find_next_trial_start(current_trial_end, all_trials):
         next_starts = [t['sequence_start'] for t in all_trials if t['sequence_start'] > current_trial_end]
@@ -2257,13 +2317,14 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
             continue
 
         # Check hidden rule
-        _, hit_hidden_rule = check_hidden_rule(odor_sequence, hidden_rule_location)
+        _, hit_hidden_rule, hr_hit_indices = check_hidden_rule(
+            odor_sequence, hidden_rule_indices, hr_odor_set
+        )
+        hr_hit_positions = [idx + 1 for idx in hr_hit_indices]
+        hr_success = len(odor_sequence) in hr_hit_positions if hr_hit_positions else False
 
-        # Determine target odor position
-        if hit_hidden_rule and len(odor_sequence) == hidden_rule_position:
-            target_position = hidden_rule_location
-        else:
-            target_position = len(odor_sequence) - 1
+        # Determine target odor position (0-based)
+        target_position = len(odor_sequence) - 1
 
         # Find target valve event
         target_valve_event = None
@@ -2411,7 +2472,7 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
             if response_time_ms is not None:
                 rewarded_response_times.append(response_time_ms)
                 # optional: HR subset if you track it
-                if hit_hidden_rule and len(odor_sequence) == hidden_rule_position:
+                if hr_success:
                     hr_rewarded_response_times.append(response_time_ms)
                 per_trial_rows.append({
                     'trial_id': trial_id,
@@ -3112,7 +3173,12 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
             if len(s_late):
                 print(f"          - Response Time: avg={s_late.mean():.1f} ms, range: {s_late.min():.1f} - {s_late.max():.1f} ms")
 
-            hr_pos = int(classification.get('hidden_rule_position', 1))
+            hr_positions = classification.get('hidden_rule_positions') or []
+            if not hr_positions:
+                fallback_pos = classification.get('hidden_rule_position')
+                if fallback_pos is not None:
+                    hr_positions = [fallback_pos]
+            hr_positions = [int(pos) for pos in hr_positions if pos is not None]
 
             # Normalize FA labels
             def _norm_fa(val):
@@ -3128,7 +3194,10 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
                 return 'nFA'
             aborted_detailed['fa_label'] = aborted_detailed['fa_label'].apply(_norm_fa)
 
-            abortions_at_hr_pos = aborted_detailed[aborted_detailed['last_odor_position'] == hr_pos].copy()
+            if hr_positions:
+                abortions_at_hr_pos = aborted_detailed[aborted_detailed['last_odor_position'].isin(hr_positions)].copy()
+            else:
+                abortions_at_hr_pos = aborted_detailed.iloc[0:0].copy()
 
             # Resolve HR-aborted trial IDs from classification (robust to key naming)
             hr_ab_df = None
@@ -3157,7 +3226,8 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
                     print(f"{indent}{lbl}: {v} ({pct:.1f}%)")
 
             total_at_hr = int(len(abortions_at_hr_pos))
-            print(f"\n  Abortions at Hidden Rule Position {hr_pos}: n={total_at_hr}")
+            hr_pos_display = ", ".join(str(pos) for pos in hr_positions) if hr_positions else "None"
+            print(f"\n  Abortions at Hidden Rule Positions {hr_pos_display}: n={total_at_hr}")
 
             total_in_hr = int(len(in_hr_trials))
             print(f"    Of which in Hidden Rule Trials: n={total_in_hr}")
@@ -3529,24 +3599,31 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
     classification['index'] = build_classification_index(classification)
 
     # 4) Hidden rule position from stage name/index
-    hidden_rule_location, sequence_name = _resolve_hidden_rule_from_stage(stage)
+    hidden_rule_indices, sequence_name = _resolve_hidden_rule_from_stage(stage)
     schema_settings = {}
     try:
         _, schema_settings = detect_settings.detect_settings(root)
     except Exception:
         schema_settings = {}
 
-    if hidden_rule_location is None:
-        inferred_idx = schema_settings.get('hiddenRuleIndexInferred')
-        if inferred_idx is not None:
-            try:
-                hidden_rule_location = int(inferred_idx)
-            except (TypeError, ValueError):
-                hidden_rule_location = None
+    if not hidden_rule_indices:
+        inferred_indices = schema_settings.get('hiddenRuleIndicesInferred')
+        if inferred_indices is None:
+            inferred_indices = schema_settings.get('hiddenRuleIndexInferred')
+        hidden_rule_indices = _ensure_int_list(inferred_indices)
 
-    hidden_rule_pos = hidden_rule_location + 1 if isinstance(hidden_rule_location, int) else None
-    if hidden_rule_location is not None:
-        print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_pos})")
+    hidden_rule_indices = sorted({idx for idx in hidden_rule_indices if isinstance(idx, int)})
+    hidden_rule_positions = [idx + 1 for idx in hidden_rule_indices]
+    hidden_rule_location = hidden_rule_indices[0] if hidden_rule_indices else None
+    hidden_rule_pos = hidden_rule_positions[0] if hidden_rule_positions else None
+
+    if hidden_rule_positions:
+        if len(hidden_rule_positions) > 1:
+            pos_str = ", ".join(str(pos) for pos in hidden_rule_positions)
+            idx_str = ", ".join(str(idx) for idx in hidden_rule_indices)
+            print(f"Hidden rule locations extracted: Positions {pos_str} (indices {idx_str})")
+        else:
+            print(f"Hidden rule location extracted: Location{hidden_rule_location} (index {hidden_rule_location}, position {hidden_rule_pos})")
     else:
         seq_label = sequence_name or str(stage)
         print(f"No Hidden Rule Location found in sequence name: {seq_label}. Proceeding without Hidden Rule analysis.")
@@ -3554,6 +3631,8 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
 # 5) Attach params and RT summary to classification
     classification['hidden_rule_location'] = hidden_rule_location
     classification['hidden_rule_position'] = hidden_rule_pos
+    classification['hidden_rule_locations'] = list(hidden_rule_indices)
+    classification['hidden_rule_positions'] = list(hidden_rule_positions)
     classification.update(params)
     classification['response_time_analysis'] = rt_summary
     
@@ -3894,7 +3973,10 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         "default_minimum_sampling_time_ms": classification.get("default_minimum_sampling_time_ms"),
         "minimum_sampling_time_ms_by_odor": classification.get("minimum_sampling_time_ms_by_odor"),
         "response_time_window_sec": classification.get("response_time_window_sec"),
+        "hidden_rule_location": classification.get("hidden_rule_location"),
         "hidden_rule_position": classification.get("hidden_rule_position"),
+        "hidden_rule_locations": classification.get("hidden_rule_locations"),
+        "hidden_rule_positions": classification.get("hidden_rule_positions"),
         "hidden_rule_odors": classification.get("hidden_rule_odors"),
     }
     summary = {
@@ -4010,7 +4092,10 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
             'default_minimum_sampling_time_ms': cls.get('default_minimum_sampling_time_ms'),
             'minimum_sampling_time_ms_by_odor': cls.get('minimum_sampling_time_ms_by_odor'),
             'response_time_window_sec': cls.get('response_time_window_sec'),
+            'hidden_rule_location': cls.get('hidden_rule_location'),
             'hidden_rule_position': cls.get('hidden_rule_position'),
+            'hidden_rule_locations': cls.get('hidden_rule_locations'),
+            'hidden_rule_positions': cls.get('hidden_rule_positions'),
             'hidden_rule_odors': cls.get('hidden_rule_odors'),
         })
 
@@ -4101,14 +4186,40 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
         else:
             merged['minimum_sampling_time_ms_by_odor'] = {}
         merged['response_time_window_sec'] = first['response_time_window_sec']
-        merged['hidden_rule_position'] = first['hidden_rule_position']
+        merged['hidden_rule_location'] = first.get('hidden_rule_location')
+        merged['hidden_rule_position'] = first.get('hidden_rule_position')
+        merged['hidden_rule_locations'] = list(first.get('hidden_rule_locations') or [])
+        merged['hidden_rule_positions'] = list(first.get('hidden_rule_positions') or [])
     
     # Aggregate unique hidden rule odors across all runs
     hr_odors_all: list[str] = []
+    hr_positions_all: list[int] = []
+    hr_locations_all: list[int] = []
     for meta in per_run_metadata:
         od = meta.get('hidden_rule_odors')
         if isinstance(od, (list, tuple)):
             hr_odors_all.extend([str(x) for x in od if isinstance(x, str) and x])
+        pos_list = meta.get('hidden_rule_positions')
+        if isinstance(pos_list, (list, tuple)):
+            hr_positions_all.extend([
+                int(pos) for pos in pos_list
+                if isinstance(pos, (int, np.integer))
+            ])
+        else:
+            pos_value = meta.get('hidden_rule_position')
+            if isinstance(pos_value, (int, np.integer)):
+                hr_positions_all.append(int(pos_value))
+
+        loc_list = meta.get('hidden_rule_locations')
+        if isinstance(loc_list, (list, tuple)):
+            hr_locations_all.extend([
+                int(idx) for idx in loc_list
+                if isinstance(idx, (int, np.integer))
+            ])
+        else:
+            loc_value = meta.get('hidden_rule_location')
+            if isinstance(loc_value, (int, np.integer)):
+                hr_locations_all.append(int(loc_value))
     if hr_odors_all:
         seen = set()
         uniq = []
@@ -4119,6 +4230,24 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
         merged['hidden_rule_odors'] = uniq
     else:
         merged.setdefault('hidden_rule_odors', [])
+
+    if hr_positions_all:
+        seen_pos: set[int] = set()
+        ordered_pos: list[int] = []
+        for pos in hr_positions_all:
+            if pos not in seen_pos:
+                seen_pos.add(pos)
+                ordered_pos.append(pos)
+        merged['hidden_rule_positions'] = ordered_pos
+
+    if hr_locations_all:
+        seen_loc: set[int] = set()
+        ordered_loc: list[int] = []
+        for loc in hr_locations_all:
+            if loc not in seen_loc:
+                seen_loc.add(loc)
+                ordered_loc.append(loc)
+        merged['hidden_rule_locations'] = ordered_loc
 
     # Per-run counts
     runs_meta = []
@@ -4152,7 +4281,17 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
         if per_run_metadata and len(per_run_metadata) > 1:
             first_params = per_run_metadata[0]
             for meta in per_run_metadata[1:]:
-                for key in ['sample_offset_time_ms', 'minimum_sampling_time_ms', 'default_minimum_sampling_time_ms', 'minimum_sampling_time_ms_by_odor', 'response_time_window_sec', 'hidden_rule_position']:
+                for key in [
+                    'sample_offset_time_ms',
+                    'minimum_sampling_time_ms',
+                    'default_minimum_sampling_time_ms',
+                    'minimum_sampling_time_ms_by_odor',
+                    'response_time_window_sec',
+                    'hidden_rule_location',
+                    'hidden_rule_position',
+                    'hidden_rule_locations',
+                    'hidden_rule_positions',
+                ]:
                     if meta.get(key) != first_params.get(key):
                         if not params_differ:
                             print("[merge_classifications] WARNING: Parameters differ across runs:")
@@ -4202,7 +4341,16 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
                     for odor_name, threshold in sorted(ms_map.items()):
                         print(f"    - {odor_name}: {threshold}")
                 print(f"  Response Time Window: {meta.get('response_time_window_sec')} s")
-                print(f"  Hidden Rule Position: {meta.get('hidden_rule_position')}")
+                hr_positions = meta.get('hidden_rule_positions') or []
+                hr_locations = meta.get('hidden_rule_locations') or []
+                if hr_positions:
+                    print(f"  Hidden Rule Positions: {hr_positions}")
+                else:
+                    print(f"  Hidden Rule Position: {meta.get('hidden_rule_position')}")
+                if hr_locations:
+                    print(f"  Hidden Rule Indices: {hr_locations}")
+                else:
+                    print(f"  Hidden Rule Index: {meta.get('hidden_rule_location')}")
                 print(f"  Hidden Rule Odors: {meta.get('hidden_rule_odors')}")
             print()
 
@@ -4212,8 +4360,14 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
         default_minimum_sampling_time_ms = cls.get("default_minimum_sampling_time_ms")
         minimum_sampling_time_ms_by_odor = cls.get("minimum_sampling_time_ms_by_odor") or {}
         response_time_window_sec = cls.get("response_time_window_sec")
-        hr_pos = cls.get("hidden_rule_position")
-        hr_idx = (hr_pos - 1) if isinstance(hr_pos, (int, np.integer)) else None
+        hr_pos_single = cls.get("hidden_rule_position")
+        hr_positions = cls.get("hidden_rule_positions") or []
+        hr_locations = cls.get("hidden_rule_locations") or []
+        if not hr_positions and hr_pos_single is not None:
+            hr_positions = [hr_pos_single]
+        hr_positions = [int(pos) for pos in hr_positions if pos is not None]
+        if not hr_locations and hr_positions:
+            hr_locations = [pos - 1 for pos in hr_positions]
 
         
         if per_run_params and len(per_run_params) > 1:
@@ -4281,7 +4435,9 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
         non_ini_total = baseline_n + pos1_n
         total_attempts = int(len(ini)) + non_ini_total
         print("\nTRIAL CLASSIFICATIONs:")
-        print(f"Hidden Rule Location: Position {hr_pos if hr_pos is not None else 'None'} (index {hr_idx if hr_idx is not None else 'None'})\n")
+        hr_pos_display = ", ".join(str(pos) for pos in hr_positions) if hr_positions else "None"
+        hr_idx_display = ", ".join(str(idx) for idx in hr_locations) if hr_locations else "None"
+        print(f"Hidden Rule Locations: Positions {hr_pos_display} (indices {hr_idx_display})\n")
         hr_odors = merged_classification.get('hidden_rule_odors') or []
         print(f"Hidden Rule Odors: {', '.join(hr_odors) if hr_odors else 'None'}\n")
         print(f"Total attempts: {total_attempts}")
@@ -4507,17 +4663,21 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
                 if len(s_late):
                     print(f"          - Response Time: median={s_late.median():.1f} ms, avg={s_late.mean():.1f} ms, range: {s_late.min():.1f} - {s_late.max():.1f} ms")
 
-            # Abortions at Hidden Rule position: split into HR vs non-HR trials, with FA breakdown
-            if hr_pos is not None and 'last_odor_position' in ab_det.columns:
-                abortions_at_hr_pos = ab_det[ab_det['last_odor_position'] == hr_pos].copy()
+            # Abortions at Hidden Rule positions: split into HR vs non-HR trials, with FA breakdown
+            if hr_positions and 'last_odor_position' in ab_det.columns:
+                abortions_at_hr_pos = ab_det[ab_det['last_odor_position'].isin(hr_positions)].copy()
                 # Resolve HR-aborted trial IDs from merged classification
                 hr_ab_df = cls.get('aborted_sequences_HR')
                 if isinstance(hr_ab_df, pd.DataFrame) and not hr_ab_df.empty and 'trial_id' in hr_ab_df.columns:
                     hr_aborted_ids = set(hr_ab_df['trial_id'].dropna().tolist())
                 else:
                     hr_aborted_ids = set()
-                in_hr_trials = abortions_at_hr_pos[abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy() if 'trial_id' in abortions_at_hr_pos.columns else pd.DataFrame()
-                non_hr_trials = abortions_at_hr_pos[~abortions_at_hr_pos.get('trial_id', pd.Series([])).isin(hr_aborted_ids)].copy() if 'trial_id' in abortions_at_hr_pos.columns else abortions_at_hr_pos.copy()
+                if 'trial_id' in abortions_at_hr_pos.columns:
+                    in_hr_trials = abortions_at_hr_pos[abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy()
+                    non_hr_trials = abortions_at_hr_pos[~abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy()
+                else:
+                    in_hr_trials = pd.DataFrame()
+                    non_hr_trials = abortions_at_hr_pos.copy()
 
                 def _print_fa_counts(df, indent="        "):
                     order = ['nFA', 'FA_time_in', 'FA_time_out', 'FA_late']
@@ -4537,7 +4697,8 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
                         print(f"{indent}- {lbl}: {v} ({p:.1f}%)")
 
                 total_at_hr = int(len(abortions_at_hr_pos))
-                print(f"\n  Abortions at Hidden Rule Position {hr_pos}: n={total_at_hr}")
+                hr_pos_summary = ", ".join(str(pos) for pos in hr_positions) if hr_positions else "None"
+                print(f"\n  Abortions at Hidden Rule Positions {hr_pos_summary}: n={total_at_hr}")
                 print(f"    Of which in Hidden Rule Trials: n={int(len(in_hr_trials))}")
                 _print_fa_counts(in_hr_trials)
                 print(f"    Non-Hidden Rule Abortions at HR Location: n={int(len(non_hr_trials))}")
@@ -5193,8 +5354,8 @@ def cut_video(subjid, date, start_time, end_time, index=None, fps=30, show_odor_
     
     if show_odor_overlay:
         try:
-            behavior_reader = harp.create_reader('device_schemas/behavior.yml', epoch=harp.REFERENCE_EPOCH)
-            olf_reader = harp.create_reader('device_schemas/olfactometer.yml', epoch=harp.REFERENCE_EPOCH)
+            behavior_reader = harp.create_reader(str(BEHAVIOR_SCHEMA_PATH), epoch=harp.REFERENCE_EPOCH)
+            olf_reader = harp.create_reader(str(OLFACTOMETER_SCHEMA_PATH), epoch=harp.REFERENCE_EPOCH)
             
             # Compute the real-time offset
             offset = pd.Timedelta(0)
@@ -5462,8 +5623,8 @@ def plot_valve_and_poke_events(
         end_dt = None
 
     # --- Readers and minimal loader (only needed registers) ---
-    behavior_reader = harp.create_reader('device_schemas/behavior.yml', epoch=harp.REFERENCE_EPOCH)
-    olf_reader = harp.create_reader('device_schemas/olfactometer.yml', epoch=harp.REFERENCE_EPOCH)
+    behavior_reader = harp.create_reader(str(BEHAVIOR_SCHEMA_PATH), epoch=harp.REFERENCE_EPOCH)
+    olf_reader = harp.create_reader(str(OLFACTOMETER_SCHEMA_PATH), epoch=harp.REFERENCE_EPOCH)
 
     registers = dict(
         odor_valve_state_0=("olfactometer_valves_0", olf_reader.OdorValveState, "Olfactometer0"),

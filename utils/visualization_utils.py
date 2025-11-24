@@ -1,8 +1,24 @@
 import sys
 import os
-project_root = os.path.abspath("")
+from pathlib import Path
+
+
+def _discover_project_root() -> str:
+    env_override = os.environ.get("HYPNOSE_PROJECT_ROOT")
+    if env_override:
+        return os.path.abspath(env_override)
+
+    current = Path(__file__).resolve().parent
+    for candidate in [current] + list(current.parents):
+        if (candidate / "data" / "rawdata").exists():
+            return str(candidate)
+    return os.path.abspath("")
+
+
+project_root = _discover_project_root()
 if project_root not in sys.path:
     sys.path.append(project_root)
+
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -11,7 +27,6 @@ from typing import Iterable, Optional, Union
 from utils.metrics_utils import load_session_results, run_all_metrics, parse_json_column
 from datetime import timedelta, datetime
 from utils.classification_utils import load_all_streams, load_experiment
-from pathlib import Path
 import re
 import numpy as np
 import json

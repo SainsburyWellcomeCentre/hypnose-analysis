@@ -160,7 +160,7 @@ def detect_settings(root):
             return v != 0
         return False
 
-    hidden_rule_index_inferred = None
+    hidden_rule_indices_inferred = []
     hidden_rule_odors_inferred = []
     try:
         # Find the maximum position index across all definitions
@@ -187,14 +187,22 @@ def detect_settings(root):
         candidates = [(idx, sorted(list(odors))) for idx, odors in rewarded_by_pos.items() if len(odors) == 2]
         
         if candidates:
-            # Prefer the earliest position deterministically
             candidates.sort(key=lambda x: x[0])
-            hidden_rule_index_inferred, hidden_rule_odors_inferred = candidates[0]
+            hidden_rule_indices_inferred = [idx for idx, _ in candidates]
+            odors_union = []
+            seen = set()
+            for _, odors in candidates:
+                for odor in odors:
+                    if odor not in seen:
+                        seen.add(odor)
+                        odors_union.append(odor)
+            hidden_rule_odors_inferred = odors_union
     except Exception as e:
         # Silent fallback; leave as empty list
         pass
 
-    schema_settings['hiddenRuleIndexInferred'] = hidden_rule_index_inferred
+    schema_settings['hiddenRuleIndicesInferred'] = hidden_rule_indices_inferred
+    schema_settings['hiddenRuleIndexInferred'] = hidden_rule_indices_inferred[0] if hidden_rule_indices_inferred else None
     schema_settings['hiddenRuleOdorsInferred'] = hidden_rule_odors_inferred
      
     return session_settings, schema_settings
