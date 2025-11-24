@@ -89,6 +89,38 @@ def load_session_results(subjid, date):
 
     return results
 
+
+def _filter_session_dirs(subj_dir: Path, dates: Optional[Union[Iterable[Union[int,str]], tuple]]):
+    ses_dirs = sorted(subj_dir.glob("ses-*_date-*"))
+    if dates is None:
+        return ses_dirs
+    # dates can be list/iterable or (start, end) tuple
+    def norm_date(d):
+        s = str(d)
+        return int(s) if s.isdigit() else None
+    if isinstance(dates, tuple) and len(dates) == 2:
+        start = norm_date(dates[0]); end = norm_date(dates[1])
+        out = []
+        for d in ses_dirs:
+            try:
+                ds = int(d.name.split("_date-")[-1])
+                if (start is None or ds >= start) and (end is None or ds <= end):
+                    out.append(d)
+            except Exception:
+                pass
+        return out
+    # iterable of dates
+    wanted = {norm_date(d) for d in dates}
+    out = []
+    for d in ses_dirs:
+        try:
+            ds = int(d.name.split("_date-")[-1])
+            if ds in wanted:
+                out.append(d)
+        except Exception:
+            pass
+    return out
+
 def parse_json_column(val):
     if isinstance(val, str):
         try:
