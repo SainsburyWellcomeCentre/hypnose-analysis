@@ -4780,12 +4780,10 @@ def batch_analyze_sessions(
 # ========================= Further functions / miscillaneous =========================
 
 
-def cut_video(subjid, date, start_time, end_time, index=None, fps=30):
+def cut_video(subjid, date, start_time, end_time, index=None, fps=30, show_odor_overlay=True):
     """
     Cut a video snippet for a subject and date, given start and end time (HH:MM:SS.s).
-    Automatically finds the correct experiment folder whose video covers the requested time window.
     """
-    from utils.classification_utils import load_all_streams
     base_path = Path(project_root) / "data" / "rawdata"
     subjid_str = f"sub-{str(subjid).zfill(3)}"
     date_str = str(date)
@@ -4795,107 +4793,234 @@ def cut_video(subjid, date, start_time, end_time, index=None, fps=30):
     subject_dir = subject_dirs[0]
     session_dirs = list(subject_dir.glob(f"ses-*_date-{date_str}"))
     if not session_dirs:
-        all_sessions = list(subject_dir.glob("ses-*"))
-        session_names = [d.name for d in all_sessions]
-        raise FileNotFoundError(f"No session found for date {date_str} in {subject_dir}.\nAvailable sessions: {session_names}")
+        raise FileNotFoundError(f"No session found for date {date_str}")
     session_dir = session_dirs[0]
     behav_dir = session_dir / "behav"
-    if not behav_dir.exists():
-        raise FileNotFoundError(f"No behav directory found in {session_dir}")
-    experiment_dirs = [d for d in behav_dir.iterdir() if d.is_dir() and re.match(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', d.name)]
-    if not experiment_dirs:
-        all_dirs = [d.name for d in behav_dir.iterdir() if d.is_dir()]
-        raise FileNotFoundError(f"No experiment directories found in {behav_dir}.\nAvailable directories: {all_dirs}")
-    experiment_dirs.sort(key=lambda x: x.name)
+    experiment_dirs = sorted([d for d in behav_dir.iterdir() if d.is_dir() and re.match(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', d.name)])
 
-    # Parse times
     start_dt = pd.to_datetime(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]} {start_time}")
     end_dt = pd.to_datetime(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]} {end_time}")
+    uk_tz = zoneinfo.ZoneInfo("Europe/London")
+    
+    # Localize start and end times to UK timezone
+    if start_dt.tz is None:
+        start_dt = start_dt.tz_localize(uk_tz)
+    if end_dt.tz is None:
+        end_dt = end_dt.tz_localize(uk_tz)
 
-    # If index is given, use it directly
+    # Find experiment folder
     if index is not None:
         if index >= len(experiment_dirs) or index < 0:
-            raise IndexError(f"Index {index} out of range. Available indices: 0-{len(experiment_dirs)-1}")
+            raise IndexError(f"Index {index} out of range")
         root = experiment_dirs[index]
-        video_dir = root / "VideoData"
-        streams = load_all_streams(root, verbose=False)
-        video_meta = streams['video_data']
-        frames_in_window = video_meta[(video_meta.index >= start_dt) & (video_meta.index <= end_dt)]
-        if frames_in_window.empty:
-            print("No frames found in the requested time window for the specified index.")
-            return None
     else:
-        # Search all experiment folders for matching frames
         root = None
-        frames_in_window = None
-        video_meta = None
-        video_dir = None
         for exp_dir in experiment_dirs:
             streams = load_all_streams(exp_dir, verbose=False)
             vm = streams['video_data']
+            # Ensure video_meta is tz-aware for comparison
+            if vm.index.tz is None:
+                vm.index = vm.index.tz_localize(uk_tz)
             fiw = vm[(vm.index >= start_dt) & (vm.index <= end_dt)]
             if not fiw.empty:
                 root = exp_dir
-                video_meta = vm
-                frames_in_window = fiw
-                video_dir = exp_dir / "VideoData"
                 break
-        if frames_in_window is None or frames_in_window.empty:
-            print("No frames found in the requested time window in any experiment folder.")
+        if root is None:
+            print("No frames found in the requested time window")
             return None
 
-    # Detect frame column
+    video_dir = root / "VideoData"
+    streams = load_all_streams(root, verbose=False)
+    video_meta = streams['video_data']
+    
+    # Ensure video_meta index is tz-aware
+    if video_meta.index.tz is None:
+        video_meta.index = video_meta.index.tz_localize(uk_tz)
+    
+    frames_in_window = video_meta[(video_meta.index >= start_dt) & (video_meta.index <= end_dt)]
+    
     frame_col = [c for c in frames_in_window.columns if 'frame' in c.lower()][0]
     frame_indices = frames_in_window[frame_col].tolist()
     
-    # Filter out macOS resource fork files (files starting with ._)
     avi_files = sorted([f for f in video_dir.glob("*.avi") if not f.name.startswith("._")])
-    
     if not avi_files:
-        print("No valid AVI files found in video directory.")
+        print("No valid AVI files found")
         return None
     
-    images = []
-    for video_file in avi_files:
-        print(f"Attempting to read from: {video_file}")
-        cap = cv2.VideoCapture(str(video_file))
-        
-        if not cap.isOpened():
-            print(f"Failed to open {video_file}")
-            continue
+    # ============ Load and offset odor valve data ============
+    odor_valve_times = {}
+    
+    if show_odor_overlay:
+        try:
+            behavior_reader = harp.create_reader('device_schemas/behavior.yml', epoch=harp.REFERENCE_EPOCH)
+            olf_reader = harp.create_reader('device_schemas/olfactometer.yml', epoch=harp.REFERENCE_EPOCH)
             
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        print(f"Video has {total_frames} total frames, requesting frames: {frame_indices[0]} to {frame_indices[-1]}")
+            # Compute the real-time offset
+            offset = pd.Timedelta(0)
+            try:
+                heartbeat_df = load(behavior_reader.TimestampSeconds, root / "Behavior")
+                if not heartbeat_df.empty:
+                    heartbeat_df = heartbeat_df.reset_index()
+                
+                m = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', root.name)
+                if m:
+                    real_time_str = m.group(0)
+                    real_time_ref_utc = datetime.strptime(real_time_str, '%Y-%m-%dT%H-%M-%S')
+                    real_time_ref_utc = real_time_ref_utc.replace(tzinfo=timezone.utc)
+                    real_time_ref = real_time_ref_utc.astimezone(uk_tz)
+                    
+                    if 'Time' in heartbeat_df.columns and len(heartbeat_df) > 0:
+                        heartbeat_df['Time'] = pd.to_datetime(heartbeat_df['Time'], errors='coerce')
+                        start_time_dt = heartbeat_df['Time'].iloc[0]
+                        if isinstance(start_time_dt, pd.Timestamp):
+                            start_time_dt = start_time_dt.to_pydatetime()
+                        if start_time_dt.tzinfo is None:
+                            start_time_dt = start_time_dt.replace(tzinfo=uk_tz)
+                        offset = real_time_ref - start_time_dt
+                        print(f"[Odor Overlay] Computed offset: {offset}")
+            except Exception as e:
+                print(f"[Odor Overlay] Warning: Could not compute offset: {e}")
+            
+            # Load valves with offset
+            def _load_and_offset(reader, subfolder):
+                try:
+                    df = load(reader, root / subfolder)
+                    if df is None or df.empty:
+                        return None
+                    if 'Time' in df.columns:
+                        df = df.set_index('Time')
+                    # Apply offset
+                    df.index = df.index + offset
+                    # Localize to UK timezone
+                    if df.index.tz is None:
+                        df.index = df.index.tz_localize(uk_tz)
+                    else:
+                        df.index = df.index.tz_convert(uk_tz)
+                    return df
+                except Exception as e:
+                    print(f"[Odor Overlay] Error loading {subfolder}: {e}")
+                    return None
+            
+            valves_0 = _load_and_offset(olf_reader.OdorValveState, "Olfactometer0")
+            valves_1 = _load_and_offset(olf_reader.OdorValveState, "Olfactometer1")
+            
+            odor_map = load_odor_mapping(root, verbose=False)
+            valve_to_odor = odor_map.get('valve_to_odor', {})
+            
+            # Build active_odors_by_time
+            active_odors_by_time = {}
+            
+            for olf_id, valve_df in [(0, valves_0), (1, valves_1)]:
+                if valve_df is None or valve_df.empty:
+                    continue
+                
+                for i, valve_col in enumerate(valve_df.columns):
+                    valve_key = f"{olf_id}{i}"
+                    odor_name = valve_to_odor.get(valve_key)
+                    
+                    if not odor_name or odor_name.lower() == 'purge':
+                        continue
+                    
+                    valve_series = valve_df[valve_col].astype(bool)
+                    rises = valve_series & ~valve_series.shift(1, fill_value=False)
+                    falls = ~valve_series & valve_series.shift(1, fill_value=False)
+                    
+                    rise_times = valve_series.index[rises].tolist()
+                    fall_times = valve_series.index[falls].tolist()
+                    
+                    j = 0
+                    for rise_t in rise_times:
+                        while j < len(fall_times) and fall_times[j] <= rise_t:
+                            j += 1
+                        fall_t = fall_times[j] if j < len(fall_times) else video_meta.index[-1]
+                        
+                        interval_times = video_meta.index[(video_meta.index >= rise_t) & (video_meta.index <= fall_t)]
+                        for t in interval_times:
+                            if t not in active_odors_by_time:
+                                active_odors_by_time[t] = []
+                            if odor_name not in active_odors_by_time[t]:
+                                active_odors_by_time[t].append(odor_name)
+            
+            print(f"[Odor Overlay] Built map with {len(active_odors_by_time)} odor time points")
+            
+            # Map frames to odors
+            for frame_idx, frame_time in zip(frames_in_window[frame_col].tolist(), frames_in_window.index):
+                if active_odors_by_time:
+                    closest_time = min(active_odors_by_time.keys(), 
+                                     key=lambda t: abs((t - frame_time).total_seconds()),
+                                     default=None)
+                    
+                    if closest_time and abs((closest_time - frame_time).total_seconds()) < 1.0:
+                        odor_valve_times[frame_idx] = active_odors_by_time[closest_time]
+            
+            print(f"[Odor Overlay] Mapped {len(odor_valve_times)} frames to odor data")
+        
+        except Exception as e:
+            print(f"[Odor Overlay] ERROR: {e}")
+            traceback.print_exc()
+            show_odor_overlay = False
+    
+    # ============ Load video frames ============
+    images = []
+    frame_numbers = []
+    
+    for video_file in avi_files:
+        print(f"Reading from: {video_file}")
+        cap = cv2.VideoCapture(str(video_file))
+        if not cap.isOpened():
+            continue
         
         images = []
+        frame_numbers = []
         for idx in frame_indices:
             cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
             ret, frame = cap.read()
             if ret:
                 images.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            else:
-                print(f"Failed to read frame {idx}")
+                frame_numbers.append(idx)
         
         cap.release()
         
         if images:
-            print(f"Successfully read {len(images)} frames from {video_file}")
+            print(f"Successfully read {len(images)} frames")
             break
-        else:
-            print(f"No frames could be read from {video_file}")
     
     if not images:
-        print("No frames extracted from any video file.")
+        print("No frames extracted")
         return None
+    
+    # ============ Add odor overlay ============
+    if show_odor_overlay and odor_valve_times:
+        print(f"Adding odor overlay to {len(images)} frames")
+        font = cv2.FONT_HERSHEY_SIMPLEX
         
-    # Output folder (derivatives/video_analysis)
+        for i, (frame, frame_num) in enumerate(zip(images, frame_numbers)):
+            active_odors = odor_valve_times.get(frame_num, [])
+            
+            if active_odors:
+                odor_text = " | ".join(sorted(set(active_odors)))
+                height, width = frame.shape[:2]
+                text_size = cv2.getTextSize(odor_text, font, 1.2, 2)[0]
+                
+                x = width // 2 + 50
+                y = 50 + text_size[1]
+                
+                overlay = frame.copy()
+                cv2.rectangle(overlay, (x - 5, y - text_size[1] - 5),
+                             (x + text_size[0] + 5, y + 5), (0, 0, 0), -1)
+                cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
+                cv2.putText(frame, odor_text, (x, y), font, 1.2, (0, 255, 0), 2)
+            
+            images[i] = frame
+    
+    # ============ Save video ============
     server_root = base_path.resolve().parent
     derivatives_dir = server_root / "derivatives" / subject_dir.name / session_dir.name / "video_analysis"
     derivatives_dir.mkdir(parents=True, exist_ok=True)
     out_mp4 = derivatives_dir / f"video_cut_{start_dt.strftime('%H-%M-%S-%f')}_{end_dt.strftime('%H-%M-%S-%f')}.mp4"
     clip = ImageSequenceClip(images, fps=fps)
     clip.write_videofile(str(out_mp4), codec="libx264", audio=False)
-    print(f"Saved cut video to: {out_mp4}")
+    print(f"Saved to: {out_mp4}")
     return out_mp4
 
 
