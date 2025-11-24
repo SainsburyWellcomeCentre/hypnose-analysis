@@ -4449,10 +4449,30 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
         # Initiated breakdown
         comp_n = int(len(comp))
         ab_n = int(len(ab))
+        def _count_unique_trials(df: pd.DataFrame) -> int:
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                return 0
+            subset = [col for col in ("run_id", "trial_id") if col in df.columns]
+            if subset:
+                return int(df.drop_duplicates(subset=subset).shape[0])
+            return int(len(df))
+
+        hr_rewarded_count = _count_unique_trials(merged_classification.get('completed_sequence_HR_rewarded', pd.DataFrame()))
+        hr_missed_count = (
+            _count_unique_trials(merged_classification.get('completed_sequences_HR_missed', pd.DataFrame()))
+            + _count_unique_trials(merged_classification.get('aborted_sequences_HR', pd.DataFrame()))
+        )
+        hr_total_count = hr_rewarded_count + hr_missed_count
+
         print("INITIATED TRIALS BREAKDOWN:")
         print(f"-- Completed sequences: {comp_n} ({pct(comp_n, len(ini)): .1f}%)")
-        print(f"   -- Hidden Rule trials (HR): {int(len(comp_hr))} ({pct(len(comp_hr), comp_n):.1f}%)")
-        print(f"   -- Hidden Rule Missed (HR_missed): {int(len(comp_hr_missed))} ({pct(len(comp_hr_missed), comp_n):.1f}%)")
+        print(f"-- Hidden Rule Trials (HR): {hr_total_count} ({pct(hr_total_count, len(ini)):.1f}%)")
+        if hr_total_count:
+            print(f"   -- Hidden Rule Trials Rewarded: {hr_rewarded_count} ({pct(hr_rewarded_count, hr_total_count):.1f}%)")
+            print(f"   -- Hidden Rule Missed: {hr_missed_count} ({pct(hr_missed_count, hr_total_count):.1f}%)")
+        else:
+            print("   -- Hidden Rule Trials Rewarded: 0 (0.0%)")
+            print("   -- Hidden Rule Missed: 0 (0.0%)")
         print(f"-- Aborted sequences: {ab_n} ({pct(ab_n, len(ini)): .1f}%)")
         print(f"   -- Aborted Hidden Rule trials (HR): {int(len(ab_hr))} ({pct(len(ab_hr), ab_n):.1f}%)\n")
 
@@ -4582,9 +4602,35 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
 
         rt_block(rew_rt, "REWARDED TRIALS")
 
-        if not comp_hr.empty and not comp_rt.empty and 'trial_id' in comp_hr.columns and 'trial_id' in comp_rt.columns:
-            hr_ids = set(comp_hr['trial_id'].dropna().tolist())
-            hr_rew_rt = rew_rt[rew_rt['trial_id'].isin(hr_ids)] if not rew_rt.empty else pd.DataFrame()
+        if not rew_rt.empty:
+            if 'hidden_rule_success' in rew_rt.columns:
+                hr_rew_rt = rew_rt[rew_rt['hidden_rule_success'].fillna(False)]
+            else:
+                hr_rew_df = merged_classification.get('completed_sequence_HR_rewarded', pd.DataFrame())
+                if isinstance(hr_rew_df, pd.DataFrame) and not hr_rew_df.empty and 'trial_id' in hr_rew_df.columns:
+                    if 'run_id' in hr_rew_df.columns and 'run_id' in rew_rt.columns:
+                        hr_pairs = set(
+                            (
+                                int(row['trial_id']),
+                                int(row['run_id'])
+                            )
+                            for _, row in hr_rew_df.dropna(subset=['trial_id', 'run_id']).iterrows()
+                        )
+                        hr_rew_rt = rew_rt[
+                            rew_rt.apply(
+                                lambda r: (
+                                    not pd.isna(r.get('trial_id'))
+                                    and not pd.isna(r.get('run_id'))
+                                    and (int(r['trial_id']), int(r['run_id'])) in hr_pairs
+                                ),
+                                axis=1
+                            )
+                        ] if hr_pairs else pd.DataFrame()
+                    else:
+                        hr_ids = set(hr_rew_df['trial_id'].dropna().tolist())
+                        hr_rew_rt = rew_rt[rew_rt['trial_id'].isin(hr_ids)] if hr_ids else pd.DataFrame()
+                else:
+                    hr_rew_rt = pd.DataFrame()
             if hr_rew_rt.empty:
                 print("HR REWARDED TRIALS (response times): none\n")
             else:
