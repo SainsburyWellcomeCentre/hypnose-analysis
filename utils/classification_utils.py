@@ -955,7 +955,7 @@ def detect_trials(data, events, root, odor_map, verbose=True):
             print(f"  - {odor_name}: {threshold:.1f}")
     
     initiation_events = events['combined_initiation_sequence_df'].copy()
-    cue_pokes = data['digital_input_data']['DIPort0'].copy()
+    cue_pokes = data['digital_input_data']['DIPort0'].copy().astype(bool)
     
     trials = []
     initiated_sequences = []
@@ -975,7 +975,7 @@ def detect_trials(data, events, root, odor_map, verbose=True):
         
         # Get all poke data between initiations
         period_pokes = cue_pokes[(cue_pokes.index > initiation_time) & 
-                                (cue_pokes.index < next_initiation_time)]
+                     (cue_pokes.index <= next_initiation_time)]
         
         if period_pokes.empty:
             if verbose:
@@ -1005,124 +1005,208 @@ def detect_trials(data, events, root, odor_map, verbose=True):
         if verbose:
             print(f"  Found {len(poke_periods)} poke periods")
         
-        # Process pokes sequentially, building continuous sequences
+        attempt_events = [
+            {
+                'start_time': ev['start_time'],
+                'end_time': min(ev['end_time'], next_initiation_time),
+                'odor_name': ev['odor_name']
+            }
+            for ev in valve_events
+            if ev['start_time'] >= initiation_time and ev['start_time'] < next_initiation_time
+        ]
+
+        if not attempt_events:
+            # Fallback: no valve events detected; treat as a single attempt using default logic
+            attempt_events = [{
+                'start_time': poke_periods[0][0],
+                'end_time': next_initiation_time,
+                'odor_name': None
+            }]
+
         trial_found = False
         attempt_num = 0
-        i = 0
-        
-        while i < len(poke_periods) and not trial_found:
-            attempt_num += 1
-            sequence_start = poke_periods[i][0]
+        failed_attempts: list[dict] = []
+        pending_failed_attempt: dict | None = None
 
-            required_minimum_ms, attempt_odor = resolve_required_threshold_ms(sequence_start, next_initiation_time)
-            
-            if verbose:
-                odor_msg = f", odor={attempt_odor}" if attempt_odor else ""
-                print(f"    Starting attempt {attempt_num} at {sequence_start} (min={required_minimum_ms:.1f}ms{odor_msg})")
-            
-            # Build continuous sequence starting from poke i
-            continuous_time = 0
-            sequence_end = sequence_start
-            j = i
-            
-            while j < len(poke_periods):
-                poke_start, poke_end = poke_periods[j]
-                
-                if j == i:
-                    # First poke in sequence
-                    poke_duration = (poke_end - poke_start).total_seconds() * 1000
-                    continuous_time = poke_duration
-                    sequence_end = poke_end
-                    
+        for attempt_event in attempt_events:
+            if trial_found:
+                break
+
+            attempt_num += 1
+            event_start = attempt_event['start_time']
+            event_end = attempt_event['end_time']
+            if event_end <= event_start:
+                continue
+
+            attempt_odor = attempt_event['odor_name']
+            odor_key = str(attempt_odor) if attempt_odor is not None else None
+            required_minimum_ms = minimum_sampling_time_ms_by_odor.get(odor_key, default_minimum_sampling_time_ms)
+
+            if pending_failed_attempt is not None:
+                pending_odor = pending_failed_attempt.get('odor_name')
+                if attempt_odor is not None and (pending_odor is None or attempt_odor != pending_odor):
                     if verbose:
-                        print(f"      Poke {j+1}: {poke_duration:.1f}ms (total: {continuous_time:.1f}ms)")
-                else:
-                    # Check gap to this poke
-                    prev_end = poke_periods[j-1][1]
-                    gap = (poke_start - prev_end).total_seconds() * 1000
-                    
-                    if gap >= sample_offset_time_ms:
-                        # Gap too large - end this sequence
-                        if verbose:
-                            print(f"      Gap to poke {j+1}: {gap:.1f}ms (≥{sample_offset_time_ms}ms - sequence ends)")
-                        break
-                    else:
-                        # Merge this poke
-                        poke_duration = (poke_end - poke_start).total_seconds() * 1000
-                        continuous_time += gap + poke_duration
-                        sequence_end = poke_end
-                        
-                        if verbose:
-                            print(f"      Poke {j+1}: gap {gap:.1f}ms + {poke_duration:.1f}ms (total: {continuous_time:.1f}ms)")
-                
-                # Check if we've reached minimum_sampling_time
-                if continuous_time >= required_minimum_ms:
-                    # SUCCESS! Stop here
-                    if verbose:
-                        print(f"      SUCCESS: {continuous_time:.1f}ms continuous poke (≥{required_minimum_ms:.1f}ms)")
-                    
-                    # Add to trials
+                        print("    Fallback: subsequent distinct valve detected — counting trial despite short sampling")
+
+                    fallback_start = pending_failed_attempt.get('attempt_start', event_start)
+                    fallback_duration = pending_failed_attempt.get('continuous_poke_time_ms', 0.0)
+                    fallback_required = pending_failed_attempt.get('required_min_sampling_time_ms', required_minimum_ms)
+                    fallback_odor = pending_failed_attempt.get('odor_name')
+                    fallback_attempt_no = pending_failed_attempt.get('attempt_number', 1)
+
+                    if failed_attempts and failed_attempts[-1] is pending_failed_attempt:
+                        failed_attempts.pop()
+
                     trial_entry = {
                         'initiation_sequence_time': initiation_time,
-                        'trial_start': sequence_start,
+                        'trial_start': fallback_start,
                         'trial_end': next_initiation_time,
-                        'continuous_poke_time_ms': continuous_time,
+                        'continuous_poke_time_ms': fallback_duration,
                         'trial_id': len(trials),
-                        'attempt_number': attempt_num,
-                        'required_min_sampling_time_ms': required_minimum_ms,
-                        'odor_name': attempt_odor
+                        'attempt_number': fallback_attempt_no,
+                        'required_min_sampling_time_ms': fallback_required,
+                        'odor_name': fallback_odor
                     }
                     trials.append(trial_entry)
-                    
-                    # Add to initiated_sequences
+
                     initiated_sequence_entry = {
                         'initiation_sequence_time': initiation_time,
-                        'sequence_start': sequence_start,
+                        'sequence_start': fallback_start,
                         'sequence_end': next_initiation_time,
-                        'continuous_poke_time_ms': continuous_time,
+                        'continuous_poke_time_ms': fallback_duration,
                         'trial_id': len(trials) - 1,
-                        'attempt_number': attempt_num,
-                        'timestamp': sequence_start,
-                        'required_min_sampling_time_ms': required_minimum_ms,
-                        'odor_name': attempt_odor
+                        'attempt_number': fallback_attempt_no,
+                        'timestamp': fallback_start,
+                        'required_min_sampling_time_ms': fallback_required,
+                        'odor_name': fallback_odor
                     }
                     initiated_sequences.append(initiated_sequence_entry)
-                    
+
                     trial_found = True
+                    pending_failed_attempt = None
                     break
-                
-                j += 1
-            
-            if not trial_found:
-                # This sequence failed
+
+            if verbose:
+                odor_msg = f", odor={attempt_odor}" if attempt_odor else ""
+                print(f"    Attempt {attempt_num}: valve opens at {event_start} (min={required_minimum_ms:.1f}ms{odor_msg})")
+
+            # Collect poke intervals that overlap the valve-open window
+            overlapping_segments = []
+            for poke_start, poke_end in poke_periods:
+                if poke_end <= event_start:
+                    continue
+                if poke_start >= event_end:
+                    break
+                seg_start = max(poke_start, event_start)
+                seg_end = min(poke_end, event_end)
+                if seg_end > seg_start:
+                    overlapping_segments.append((seg_start, seg_end))
+
+            if not overlapping_segments:
+                state_at_start = False
+                try:
+                    state_at_start = bool(cue_pokes.loc[:event_start].iloc[-1])
+                except (KeyError, IndexError):
+                    state_at_start = False
+
+                if state_at_start:
+                    after_series = cue_pokes.loc[event_start:next_initiation_time]
+                    if not after_series.empty:
+                        after_bool = after_series.astype(bool)
+                        falls = (~after_bool) & after_bool.shift(1, fill_value=state_at_start)
+                        fall_times = list(falls[falls].index)
+                        if fall_times:
+                            inferred_end = min(fall_times[0], event_end)
+                        else:
+                            inferred_end = min(after_bool.index[-1], event_end)
+                    else:
+                        inferred_end = min(event_end, next_initiation_time)
+
+                    if inferred_end > event_start:
+                        overlapping_segments.append((event_start, inferred_end))
+
+            attempt_start = overlapping_segments[0][0] if overlapping_segments else event_start
+
+            continuous_time = 0.0
+            last_seg_end = None
+            success = False
+
+            for seg_idx, (seg_start, seg_end) in enumerate(overlapping_segments, start=1):
+                seg_duration_ms = (seg_end - seg_start).total_seconds() * 1000.0
+                if last_seg_end is None:
+                    continuous_time += seg_duration_ms
+                    if verbose:
+                        print(f"      Segment {seg_idx}: {seg_duration_ms:.1f}ms (total {continuous_time:.1f}ms)")
+                else:
+                    gap_ms = (seg_start - last_seg_end).total_seconds() * 1000.0
+                    if gap_ms >= sample_offset_time_ms:
+                        if verbose:
+                            print(f"      Gap {gap_ms:.1f}ms ≥ {sample_offset_time_ms}ms — sequence ends")
+                        break
+                    continuous_time += gap_ms + seg_duration_ms
+                    if verbose:
+                        print(f"      Segment {seg_idx}: gap {gap_ms:.1f}ms + {seg_duration_ms:.1f}ms (total {continuous_time:.1f}ms)")
+                last_seg_end = seg_end
+
+                if continuous_time >= required_minimum_ms:
+                    success = True
+                    if verbose:
+                        print(f"      SUCCESS: {continuous_time:.1f}ms ≥ {required_minimum_ms:.1f}ms")
+                    break
+
+            attempt_end = last_seg_end if last_seg_end is not None else event_start
+
+            if success:
+                pending_failed_attempt = None
+                trial_entry = {
+                    'initiation_sequence_time': initiation_time,
+                    'trial_start': attempt_start,
+                    'trial_end': next_initiation_time,
+                    'continuous_poke_time_ms': continuous_time,
+                    'trial_id': len(trials),
+                    'attempt_number': attempt_num,
+                    'required_min_sampling_time_ms': required_minimum_ms,
+                    'odor_name': attempt_odor
+                }
+                trials.append(trial_entry)
+
+                initiated_sequence_entry = {
+                    'initiation_sequence_time': initiation_time,
+                    'sequence_start': attempt_start,
+                    'sequence_end': next_initiation_time,
+                    'continuous_poke_time_ms': continuous_time,
+                    'trial_id': len(trials) - 1,
+                    'attempt_number': attempt_num,
+                    'timestamp': attempt_start,
+                    'required_min_sampling_time_ms': required_minimum_ms,
+                    'odor_name': attempt_odor
+                }
+                initiated_sequences.append(initiated_sequence_entry)
+
+                trial_found = True
+                break
+
+            if not success:
                 if verbose:
-                    print(f"      FAILED: {continuous_time:.1f}ms continuous poke (<{required_minimum_ms:.1f}ms)")
-                
-                # Add to non_initiated_sequences
+                    print(f"      FAILED: {continuous_time:.1f}ms < {required_minimum_ms:.1f}ms")
+
                 non_initiated_sequence_entry = {
                     'initiation_sequence_time': initiation_time,
-                    'attempt_start': sequence_start,
-                    'attempt_end': sequence_end,
+                    'attempt_start': attempt_start,
+                    'attempt_end': attempt_end,
                     'continuous_poke_time_ms': continuous_time,
                     'attempt_number': attempt_num,
-                    'timestamp': sequence_start,
+                    'timestamp': attempt_start,
                     'failure_reason': 'insufficient_continuous_poke_time',
                     'required_min_sampling_time_ms': required_minimum_ms,
                     'odor_name': attempt_odor
                 }
-                non_initiated_sequences.append(non_initiated_sequence_entry)
-                
-                # Move to next sequence start
-                # Find next poke that's ≥sample_offset_time_ms away
-                next_i = j  # j is where we stopped (gap was ≥sample_offset_time_ms or end of periods)
-                if next_i >= len(poke_periods):
-                    # No more pokes
-                    break
-                
-                i = next_i
-        
+                failed_attempts.append(non_initiated_sequence_entry)
+                pending_failed_attempt = non_initiated_sequence_entry
+
+        non_initiated_sequences.extend(failed_attempts)
         if not trial_found and verbose:
-            print(f"  No successful trial found for this initiation sequence")
+            print("  No successful trial found for this initiation sequence")
     
     # Convert to DataFrames and sort by timestamp for chronological access
     results = {
@@ -1698,35 +1782,30 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 next_pos += 1
             positions.append(odor_to_pos.get(od))
 
+        position_valve_times, position_poke_times = analyze_trial_valve_and_poke_times(valve_activations)
+
+        ordered_positions = sorted(position_valve_times.keys())
+
+        num_positions = len(ordered_positions)
+        last_event_index = num_positions - 1 if num_positions else None
+
         presentations = []
-        for idx_in_trial, (ev, pos) in enumerate(zip(valve_activations, positions)):
-            if not isinstance(pos, (int, np.integer)):
-                continue
-            vstart, vend = ev['start_time'], ev['end_time']
-            vdur_ms = (vend - vstart).total_seconds() * 1000.0
-            psum = window_poke_summary(vstart, vend)
+        for idx_in_trial, pos in enumerate(ordered_positions):
+            valve_info = position_valve_times.get(pos) or {}
+            poke_info = position_poke_times.get(pos) or {}
             presentations.append({
                 'index_in_trial': idx_in_trial,
-                'position': int(pos),
-                'odor_name': ev['odor_name'],
-                'valve_start': vstart,
-                'valve_end': vend,
-                'valve_duration_ms': float(vdur_ms),
-                'poke_time_ms': float(psum.get('poke_time_ms', 0.0)),
-                'poke_first_in': psum.get('poke_first_in'),
-                'required_min_sampling_time_ms': resolve_min_sampling_time_ms(ev['odor_name']),
+                'position': pos,
+                'odor_name': valve_info.get('odor_name'),
+                'valve_start': valve_info.get('valve_start'),
+                'valve_end': valve_info.get('valve_end'),
+                'valve_duration_ms': float(valve_info.get('valve_duration_ms', 0.0) or 0.0),
+                'poke_time_ms': float(poke_info.get('poke_time_ms', 0.0) or 0.0),
+                'poke_first_in': poke_info.get('poke_first_in'),
+                'required_min_sampling_time_ms': valve_info.get('required_min_sampling_time_ms'),
+                'is_last_event': last_event_index is not None and idx_in_trial == last_event_index,
             })
 
-        # Last relevant odor index (ignore valve durations < sample_offset_time_ms)
-        last_event_index = None
-        for i in range(len(valve_activations) - 1, -1, -1):
-            st, en = valve_activations[i]['start_time'], valve_activations[i]['end_time']
-            if (en - st).total_seconds() * 1000.0 >= sample_offset_time_ms:
-                last_event_index = i
-                break
-
-
-        position_valve_times, position_poke_times = analyze_trial_valve_and_poke_times(valve_activations)
 
         pos1_info = position_valve_times.get(1, {}) or {}
         last_pos1_start = pos1_info.get('valve_start')
@@ -1756,10 +1835,16 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         
         trial_await_rewards = [t for t in await_reward_times if trial_start <= t <= trial_end]
 
+        final_odor_sequence = [
+            (position_valve_times[pos] or {}).get('odor_name')
+            for pos in ordered_positions
+            if position_valve_times.get(pos) is not None
+        ]
+
         trial_dict = trial.to_dict()
-        trial_dict['odor_sequence'] = odor_sequence
-        trial_dict['num_odors'] = len(odor_sequence)
-        trial_dict['last_odor'] = odor_sequence[-1] if odor_sequence else None
+        trial_dict['odor_sequence'] = final_odor_sequence
+        trial_dict['num_odors'] = len(final_odor_sequence)
+        trial_dict['last_odor'] = final_odor_sequence[-1] if final_odor_sequence else None
         trial_dict['hidden_rule_location'] = hidden_rule_location
         trial_dict['hidden_rule_locations'] = list(hidden_rule_indices)
         trial_dict['hidden_rule_positions'] = list(hidden_rule_positions)
@@ -1772,17 +1857,19 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         if corrected_start is not None:
             trial_dict['sequence_start_corrected'] = corrected_start
 
+        effective_odor_sequence = final_odor_sequence
+
         enough_odors, hit_hidden_rule, hr_hit_indices = check_hidden_rule(
-            odor_sequence, hidden_rule_indices, hr_odor_set
+            effective_odor_sequence, hidden_rule_indices, hr_odor_set
         )
         hr_hit_positions = [idx + 1 for idx in hr_hit_indices]
         trial_dict['enough_odors_for_hr'] = enough_odors
         trial_dict['hit_hidden_rule'] = hit_hidden_rule
         trial_dict['hidden_rule_hit_indices'] = hr_hit_indices
         trial_dict['hidden_rule_hit_positions'] = hr_hit_positions
-        hr_success = len(odor_sequence) in hr_hit_positions if hr_hit_positions else False
+        hr_success = len(effective_odor_sequence) in hr_hit_positions if hr_hit_positions else False
         trial_dict['hidden_rule_success'] = hr_success
-        trial_dict['hidden_rule_success_position'] = len(odor_sequence) if hr_success else None
+        trial_dict['hidden_rule_success_position'] = len(effective_odor_sequence) if hr_success else None
 
         initiated_trials_list.append(trial_dict)
         if trial_await_rewards:
@@ -2306,7 +2393,7 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         target_required_min_ms = float('nan')
 
         # Get valve sequence
-        odor_sequence, trial_valve_events = get_trial_valve_sequence(trial_start, trial_end)
+        odor_sequence_raw, trial_valve_events = get_trial_valve_sequence(trial_start, trial_end)
         if not trial_valve_events:
             failed_calculations += 1
             per_trial_rows.append({
@@ -2316,79 +2403,41 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
             })
             continue
 
-        # Check hidden rule
+        position_locations_rt = {}
+        odor_to_pos_rt = {}
+        next_pos_rt = 1
+        for event in trial_valve_events:
+            odor = event['odor_name']
+            if odor not in odor_to_pos_rt:
+                odor_to_pos_rt[odor] = next_pos_rt
+                next_pos_rt += 1
+            pos_idx = odor_to_pos_rt[odor]
+            position_locations_rt[pos_idx] = event
+
+        ordered_positions_rt = sorted(position_locations_rt.keys())
+        effective_odor_sequence = [
+            position_locations_rt[pos]['odor_name']
+            for pos in ordered_positions_rt
+            if position_locations_rt.get(pos) is not None
+        ]
+
         _, hit_hidden_rule, hr_hit_indices = check_hidden_rule(
-            odor_sequence, hidden_rule_indices, hr_odor_set
+            effective_odor_sequence, hidden_rule_indices, hr_odor_set
         )
         hr_hit_positions = [idx + 1 for idx in hr_hit_indices]
-        hr_success = len(odor_sequence) in hr_hit_positions if hr_hit_positions else False
+        hr_success = len(effective_odor_sequence) in hr_hit_positions if hr_hit_positions else False
 
-        # Determine target odor position (0-based)
-        target_position = len(odor_sequence) - 1
+        if not ordered_positions_rt:
+            failed_calculations += 1
+            per_trial_rows.append({
+                'trial_id': trial_id,
+                'response_time_ms': np.nan,
+                'response_time_category': None,
+            })
+            continue
 
-        # Find target valve event
-        target_valve_event = None
-        if target_position == 0:
-            # Position 1: last individual activation of first odor
-            first_odor_valve = trial_valve_events[0]['valve_key']
-            first_odor_activations = []
-            for event in trial_valve_events:
-                if event['valve_key'] == first_odor_valve:
-                    first_odor_activations.append(event)
-                else:
-                    break
-            if first_odor_activations:
-                target_valve_event = first_odor_activations[-1]
-        else:
-            # Group consecutive events
-            grouped_presentations = []
-            current_valve = None
-            current_start_time = None
-            current_end_time = None
-            current_odor_name = None
-
-            for event in trial_valve_events:
-                if event['valve_key'] != current_valve:
-                    if current_valve is not None:
-                        grouped_presentations.append({
-                            'valve_key': current_valve,
-                            'odor_name': current_odor_name,
-                            'start_time': current_start_time,
-                            'end_time': current_end_time
-                        })
-                    current_valve = event['valve_key']
-                    current_odor_name = event['odor_name']
-                    current_start_time = event['start_time']
-                    current_end_time = event['end_time']
-                else:
-                    current_end_time = event['end_time']
-
-            if current_valve is not None:
-                grouped_presentations.append({
-                    'valve_key': current_valve,
-                    'odor_name': current_odor_name,
-                    'start_time': current_start_time,
-                    'end_time': current_end_time
-                })
-
-            # Map odor sequence positions to group indices
-            odor_position_to_group = {}
-            group_idx = 0
-            current_group_valve = None
-
-            for seq_pos, (odor_name, valve_event) in enumerate(zip(odor_sequence, trial_valve_events)):
-                if valve_event['valve_key'] != current_group_valve:
-                    current_group_valve = valve_event['valve_key']
-                    if group_idx < len(grouped_presentations):
-                        odor_position_to_group[seq_pos] = group_idx
-                        group_idx += 1
-                else:
-                    if seq_pos > 0 and (seq_pos - 1) in odor_position_to_group:
-                        odor_position_to_group[seq_pos] = odor_position_to_group[seq_pos - 1]
-
-            if target_position in odor_position_to_group:
-                group_index = odor_position_to_group[target_position]
-                target_valve_event = grouped_presentations[group_index]
+        target_pos_idx = ordered_positions_rt[-1]
+        target_valve_event = position_locations_rt.get(target_pos_idx)
 
         if target_valve_event is None:
             failed_calculations += 1
@@ -2959,6 +3008,9 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
             if dur_ms >= sample_offset_time_ms:
                 last_idx = i
                 break
+
+        for pres_entry in presentations_all:
+            pres_entry['is_last_event'] = last_idx is not None and pres_entry.get('index_in_trial') == last_idx
 
         # Map first-seen odor to position 1..5
         odor_to_pos = {}
