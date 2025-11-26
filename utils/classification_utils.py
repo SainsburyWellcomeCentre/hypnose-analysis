@@ -37,6 +37,7 @@ import datetime
 from datetime import timezone
 import zoneinfo
 import src.processing.detect_settings as detect_settings
+import src.processing.detect_stage as detect_stage_module
 from datetime import datetime, timezone, date
 from collections import defaultdict
 from bisect import bisect_left, bisect_right
@@ -865,7 +866,7 @@ def load_odor_mapping(root, *, data=None, verbose: bool = True, **kwargs):
 # ================= Functions for Trial Analysis and Classification ========================
 
 
-def detect_trials(data, events, root, odor_map, verbose=True):
+def detect_trials(data, events, root, odor_map, verbose=True, stage=None):
     """
     Trial Detection Function     
     Parameters:
@@ -902,6 +903,26 @@ def detect_trials(data, events, root, odor_map, verbose=True):
         raise ValueError("minimumSamplingTime_by_odor missing or empty in schema; cannot detect trials without per-odor thresholds")
 
     default_minimum_sampling_time_ms = max(minimum_sampling_time_ms_by_odor.values())
+
+    # Determine protocol name if provided; fallback to stage detection when needed
+    stage_name: str | None = None
+    if stage is not None:
+        if isinstance(stage, Mapping):
+            stage_name = stage.get('stage_name') or stage.get('name')
+        else:
+            stage_name = getattr(stage, 'stage_name', None) or getattr(stage, 'name', None)
+            if stage_name is None:
+                stage_name = str(stage)
+
+    if not stage_name:
+        try:
+            stage_detected = detect_stage_module.detect_stage(root)
+            stage_name = stage_detected.get('stage_name') if isinstance(stage_detected, Mapping) else None
+        except Exception:
+            stage_name = None
+
+    protocol_name = (stage_name or "").lower()
+    is_odour_discrimination = "odourdiscrimination" in protocol_name
 
     olfactometer_valves = (odor_map or {}).get('olfactometer_valves', {}) if odor_map is not None else {}
     valve_to_odor = (odor_map or {}).get('valve_to_odor', {}) if odor_map is not None else {}
@@ -956,6 +977,13 @@ def detect_trials(data, events, root, odor_map, verbose=True):
     
     initiation_events = events['combined_initiation_sequence_df'].copy()
     cue_pokes = data['digital_input_data']['DIPort0'].copy().astype(bool)
+
+    await_reward_df = events.get('combined_await_reward_df') if isinstance(events, Mapping) else None
+    if isinstance(await_reward_df, pd.DataFrame) and not await_reward_df.empty and 'Time' in await_reward_df.columns:
+        await_reward_times = pd.to_datetime(await_reward_df['Time'], errors='coerce').dropna()
+    else:
+        await_reward_times = pd.Series(dtype='datetime64[ns]')
+
     
     trials = []
     initiated_sequences = []
@@ -1022,6 +1050,12 @@ def detect_trials(data, events, root, odor_map, verbose=True):
                 'end_time': next_initiation_time,
                 'odor_name': None
             }]
+
+        attempt_next_start: dict[int, pd.Timestamp | None] = {}
+        for idx, attempt_event in enumerate(attempt_events):
+            next_start = attempt_events[idx + 1]['start_time'] if idx + 1 < len(attempt_events) else None
+            attempt_event['__next_start'] = next_start
+            attempt_next_start[idx + 1] = next_start
 
         trial_found = False
         attempt_num = 0
@@ -1199,14 +1233,84 @@ def detect_trials(data, events, root, odor_map, verbose=True):
                     'timestamp': attempt_start,
                     'failure_reason': 'insufficient_continuous_poke_time',
                     'required_min_sampling_time_ms': required_minimum_ms,
-                    'odor_name': attempt_odor
+                    'odor_name': attempt_odor,
+                    'next_attempt_start': attempt_next_start.get(attempt_num)
                 }
                 failed_attempts.append(non_initiated_sequence_entry)
                 pending_failed_attempt = non_initiated_sequence_entry
 
+        if (
+            not trial_found
+            and is_odour_discrimination
+            and isinstance(failed_attempts, list)
+            and failed_attempts
+            and not await_reward_times.empty
+        ):
+            candidate = None
+            if pending_failed_attempt is not None:
+                for fa in reversed(failed_attempts):
+                    if fa is pending_failed_attempt:
+                        candidate = fa
+                        break
+            if candidate is None:
+                candidate = failed_attempts[-1]
+            attempt_start = candidate.get('attempt_start') or candidate.get('timestamp')
+
+            if attempt_start is not None:
+                try:
+                    start_ts = pd.Timestamp(attempt_start)
+                except Exception:
+                    start_ts = None
+
+                if start_ts is not None:
+                    window_mask = await_reward_times >= start_ts
+                    if next_initiation_time is not None and not pd.isna(next_initiation_time):
+                        window_mask &= await_reward_times <= next_initiation_time
+                    awaits_in_window = await_reward_times[window_mask]
+
+                    if not awaits_in_window.empty:
+                        fallback_duration = candidate.get('continuous_poke_time_ms', 0.0)
+                        fallback_required = candidate.get('required_min_sampling_time_ms', default_minimum_sampling_time_ms)
+                        fallback_odor = candidate.get('odor_name')
+                        fallback_attempt_no = candidate.get('attempt_number', attempt_num if attempt_num else 1)
+                        trial_entry = {
+                            'initiation_sequence_time': initiation_time,
+                            'trial_start': start_ts,
+                            'trial_end': next_initiation_time,
+                            'continuous_poke_time_ms': fallback_duration,
+                            'trial_id': len(trials),
+                            'attempt_number': fallback_attempt_no,
+                            'required_min_sampling_time_ms': fallback_required,
+                            'odor_name': fallback_odor,
+                            'fallback_reason': 'await_reward_event'
+                        }
+                        trials.append(trial_entry)
+
+                        initiated_sequence_entry = {
+                            'initiation_sequence_time': initiation_time,
+                            'sequence_start': start_ts,
+                            'sequence_end': next_initiation_time,
+                            'continuous_poke_time_ms': fallback_duration,
+                            'trial_id': len(trials) - 1,
+                            'attempt_number': fallback_attempt_no,
+                            'timestamp': start_ts,
+                            'required_min_sampling_time_ms': fallback_required,
+                            'odor_name': fallback_odor,
+                            'fallback_reason': 'await_reward_event'
+                        }
+                        initiated_sequences.append(initiated_sequence_entry)
+
+                        if verbose:
+                            print("    Fallback: AwaitReward detected — counting trial despite short sampling")
+
+                        trial_found = True
+                        pending_failed_attempt = None
+                        failed_attempts = [fa for fa in failed_attempts if fa is not candidate]
+
         non_initiated_sequences.extend(failed_attempts)
         if not trial_found and verbose:
             print("  No successful trial found for this initiation sequence")
+
     
     # Convert to DataFrames and sort by timestamp for chronological access
     results = {
@@ -5009,7 +5113,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
             events = _maybe_silent(load_experiment_events, root, verbose=verbose)
             run_end_time = extract_run_end_time(data, events)
             odor_map = _maybe_silent(load_odor_mapping, root, data=data, verbose=verbose)
-            trial_counts = detect_trials(data, events, root, odor_map, verbose=verbose)
+            trial_counts = detect_trials(data, events, root, odor_map, verbose=verbose, stage=stage)
 
             out = _maybe_silent(
                 classify_and_analyze_with_response_times,
