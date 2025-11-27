@@ -801,7 +801,8 @@ def plot_abortion_and_fa_rates(
             # Load metrics JSON for FA rates
             metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
             if metrics is None:
-                continue
+                # No metrics JSON - we'll still try to get FA stats from CSVs below
+                metrics = {}
             
             
             # Extract FA rates from metrics (no need to load raw CSVs)
@@ -866,38 +867,48 @@ def plot_abortion_and_fa_rates(
                     "rate": rate_noninit
                 })
 
-            # ============ FA PORT RATIO - with fa_types filter ============
+            # ============ FA PORT RATIO - Calculate from CSVs (ensures correct include_noninitiated_in_fa_odor behavior) ============
             ab_det_path = results_dir / "aborted_sequences_detailed.csv"
             fa_noninit_path = results_dir / "non_initiated_FA.csv"
             
             ab_det = pd.DataFrame()
             fa_noninit = pd.DataFrame()
             
+            # Load aborted sequences with FA data
             if ab_det_path.exists():
                 try:
                     ab_det = pd.read_csv(ab_det_path)
+                    # Filter by fa_label if column exists
+                    if "fa_label" in ab_det.columns:
+                        ab_det = ab_det[fa_filter_fn(ab_det["fa_label"])].copy()
+                    # Keep only needed columns
                     needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
                     ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
                 except Exception:
-                    pass
+                    ab_det = pd.DataFrame()
             
+            # Load non-initiated FA data if requested
             if include_noninitiated_in_fa_odor and fa_noninit_path.exists():
                 try:
                     fa_noninit = pd.read_csv(fa_noninit_path)
-                    needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
+                    # Filter by fa_label if column exists
+                    if "fa_label" in fa_noninit.columns:
+                        fa_noninit = fa_noninit[fa_filter_fn(fa_noninit["fa_label"])].copy()
+                    # Keep only needed columns (note: uses 'odor_name' not 'last_odor_name')
+                    needed_cols = ['fa_label', 'odor_name', 'fa_port']
                     fa_noninit = fa_noninit[[col for col in needed_cols if col in fa_noninit.columns]]
+                    # Rename 'odor_name' to 'last_odor_name' for consistency with aborted data
+                    if 'odor_name' in fa_noninit.columns:
+                        fa_noninit = fa_noninit.rename(columns={'odor_name': 'last_odor_name'})
                 except Exception:
-                    pass
+                    fa_noninit = pd.DataFrame()
             
-            # Combine or not based on parameter
+            # Combine data based on include_noninitiated_in_fa_odor parameter
             try:
                 if include_noninitiated_in_fa_odor:
-                    # Apply fa_types filter to both
-                    fa_ab = ab_det[fa_filter_fn(ab_det["fa_label"])].copy() if not ab_det.empty else pd.DataFrame()
-                    fa_ni = fa_noninit[fa_filter_fn(fa_noninit["fa_label"])].copy() if not fa_noninit.empty else pd.DataFrame()
-                    fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True)
+                    fa_all = pd.concat([ab_det, fa_noninit], ignore_index=True)
                 else:
-                    fa_all = ab_det[fa_filter_fn(ab_det["fa_label"])].copy() if not ab_det.empty else pd.DataFrame()
+                    fa_all = ab_det.copy()
                 
                 # Calculate FA port ratio per odor
                 if not fa_all.empty and "fa_port" in fa_all.columns and "last_odor_name" in fa_all.columns:
@@ -906,7 +917,7 @@ def plot_abortion_and_fa_rates(
                         n_a = (fa_odor["fa_port"] == 1).sum()
                         n_b = (fa_odor["fa_port"] == 2).sum()
                         n_total = n_a + n_b
-                        ratio_a = n_a / n_total if n_total > 0 else np.nan
+                        ratio_a = (n_a - n_b) / n_total if n_total > 0 else np.nan
                         fa_port_rows.append({
                             "date": int(date_str),
                             "odor": str(odor),
@@ -1088,8 +1099,9 @@ def plot_abortion_and_fa_rates(
     ax.set_ylim([0, 1.05])
     ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
+
     
-    # ============ PLOT 5: FA Ratio A / (A+B) per Odor (full width) ============
+    # ============ PLOT 5: FA Ratio (A-B) / (A+B) per Odor (full width) ============
     ax = ax5
     if not df_port.empty:
         odors = sorted(df_port["odor"].unique())
@@ -1112,10 +1124,11 @@ def plot_abortion_and_fa_rates(
         ax.set_xticklabels(odors)
     
     ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
-    ax.set_ylabel('FA Ratio A / (A+B)', fontsize=11, fontweight='bold')
-    ax.set_title(f'FA Ratio A/(A+B) per Odor\n(Subject {str(subjid).zfill(3)})', 
+    ax.set_ylabel('FA Ratio (A-B)/(A+B)', fontsize=11, fontweight='bold')
+    ax.set_title(f'FA Ratio (A-B)/(A+B) per Odor\n(Subject {str(subjid).zfill(3)})', 
                 fontsize=12, fontweight='bold')
-    ax.set_ylim([0, 1.05])
+    ax.set_ylim([-1.1, 1.1])
+    ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
     ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
@@ -3435,3 +3448,387 @@ def get_fa_ratio_a_stats(subjid, dates=None, odors=['C', 'F']):
     print(f"{'='*70}\n")
     
     return df
+
+
+def plot_fa_ratio_by_hr_position(
+    subjid,
+    dates=None,
+    figsize=(16, 10),
+    fa_types='FA_time_in', 
+    print_statistics=False
+):
+    """
+    Plot FA Ratio (A-B)/(A+B) by hidden rule odor position across sessions.
+    
+    For each session and each HR odor, calculates:
+    1. FA on HR Odor at HR position
+    2. FA at the next odor in sequence (position-independent)
+    3. Total FA at or after HR position
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    dates : tuple, list, or None
+        Date or date range. If None, plots all available dates.
+    figsize : tuple, optional
+        Figure size (default: (16, 10))
+    fa_types : str or list, optional
+        Which FA types to include:
+        - 'FA_time_in' : only FA_time_in
+        - 'FA_time_in,FA_time_out' : multiple specific types (comma-separated)
+        - 'All' : all FA types starting with 'FA_'
+        (default: 'FA_time_in')
+    print_statistics: 
+        Whether to print a statistic summary table with counts for each
+        FA type and position. 
+    
+    Returns:
+    --------
+    fig, axes : matplotlib figure and axes array
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    # Parse FA type filter
+    if isinstance(fa_types, str):
+        if fa_types.lower() == 'all':
+            fa_filter_fn = lambda fa_label: str(fa_label).startswith('FA_') if pd.notna(fa_label) else False
+        else:
+            types_list = [t.strip().lower() for t in fa_types.split(',')]
+            fa_filter_fn = lambda fa_label: str(fa_label).lower() in types_list if pd.notna(fa_label) else False
+    else:
+        fa_filter_fn = lambda fa_label: True
+    
+    rows = []  # {date, session_num, odor_num, hr_odor, category, port_a, port_b, total, ratio}
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        
+        for session_num, ses in enumerate(ses_dirs, 1):
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            
+            if not results_dir.exists():
+                continue
+            
+            hr_path = results_dir / "aborted_sequences_HR.csv"
+            ab_det_path = results_dir / "aborted_sequences_detailed.csv"
+            summary_path = results_dir / "summary.json"
+            
+            if not hr_path.exists() or not ab_det_path.exists() or not summary_path.exists():
+                continue
+            
+            try:
+                # Load summary to get HR odors
+                with open(summary_path) as f:
+                    summary = json.load(f)
+                
+                hr_odors = summary.get("params", {}).get("hidden_rule_odors", [])
+                if not hr_odors:
+                    continue
+                
+                # Load data
+                df_hr = pd.read_csv(hr_path)
+                df_ab = pd.read_csv(ab_det_path)
+                
+                # Match HR trials with aborted sequences
+                if "sequence_start" not in df_hr.columns or "sequence_start" not in df_ab.columns:
+                    continue
+                
+                hr_with_fa = df_hr[df_hr["sequence_start"].isin(df_ab["sequence_start"])].copy()
+                
+                # Merge to get FA details
+                merged = hr_with_fa.merge(
+                    df_ab[["sequence_start", "fa_label", "last_odor_name", "fa_port", "last_odor_position"]],
+                    on="sequence_start",
+                    how="left"
+                )
+                
+                # Add HR position info and odor_sequence from HR data
+                hr_cols_to_merge = ["sequence_start"]
+                if "hidden_rule_positions" in df_hr.columns:
+                    hr_cols_to_merge.append("hidden_rule_positions")
+                if "odor_sequence" in df_hr.columns:
+                    hr_cols_to_merge.append("odor_sequence")
+                
+                if len(hr_cols_to_merge) > 1:
+                    merged = merged.merge(
+                        df_hr[hr_cols_to_merge],
+                        on="sequence_start",
+                        how="left",
+                        suffixes=('', '_hr')
+                    )
+                
+                # Filter for actual FAs (not nFA) and apply FA type filter
+                merged_fa = merged[
+                    (merged["fa_label"] != "nFA") & 
+                    (merged["fa_label"].apply(fa_filter_fn))
+                ].copy()
+                
+                if merged_fa.empty or "hidden_rule_positions" not in merged_fa.columns:
+                    continue
+                
+                # Helper functions
+                def count_ports(data):
+                    if data.empty:
+                        return 0, 0, 0
+                    port_a = (data["fa_port"] == 1).sum()
+                    port_b = (data["fa_port"] == 2).sum()
+                    total = port_a + port_b
+                    return int(port_a), int(port_b), int(total)
+                
+                def get_hr_position(hr_pos_str):
+                    if pd.isna(hr_pos_str):
+                        return None
+                    try:
+                        pos_list = json.loads(str(hr_pos_str))
+                        if isinstance(pos_list, list) and len(pos_list) > 0:
+                            return int(pos_list[0])
+                    except:
+                        pass
+                    return None
+                
+                def has_hr_odor_in_sequence(odor_seq, hr_odor):
+                    if pd.isna(odor_seq):
+                        return False
+                    try:
+                        seq_list = json.loads(str(odor_seq))
+                        return hr_odor in seq_list if isinstance(seq_list, list) else False
+                    except:
+                        return hr_odor in str(odor_seq)
+                
+                # Analyze each HR odor
+                for odor_num, hr_odor in enumerate(hr_odors, 1):
+                    # Filter to trials where this HR odor appears in the sequence
+                    if "odor_sequence" in merged_fa.columns:
+                        fa_for_this_hr = merged_fa[
+                            merged_fa["odor_sequence"].apply(lambda seq: has_hr_odor_in_sequence(seq, hr_odor))
+                        ].copy()
+                    else:
+                        fa_for_this_hr = merged_fa.copy()
+                    
+                    if fa_for_this_hr.empty:
+                        continue
+                    
+                    # Extract HR position
+                    fa_for_this_hr["hr_position"] = fa_for_this_hr["hidden_rule_positions"].apply(get_hr_position)
+                    fa_for_this_hr = fa_for_this_hr[fa_for_this_hr["hr_position"].notna()]
+                    
+                    if fa_for_this_hr.empty:
+                        continue
+                    
+                    # Category 1: FA on HR odor itself at HR position
+                    fa_on_hr_odor = fa_for_this_hr[
+                        (fa_for_this_hr["last_odor_name"] == hr_odor) & 
+                        (fa_for_this_hr["last_odor_position"] == fa_for_this_hr["hr_position"])
+                    ].copy()
+                    a1, b1, t1 = count_ports(fa_on_hr_odor)
+                    ratio1 = (a1 - b1) / t1 if t1 > 0 else np.nan
+                    rows.append({
+                        "date": int(date_str),
+                        "session_num": session_num,
+                        "odor_num": odor_num,
+                        "hr_odor": hr_odor,
+                        "category": f"On {hr_odor}",
+                        "port_a": a1,
+                        "port_b": b1,
+                        "total": t1,
+                        "ratio": ratio1
+                    })
+                    
+                    # Category 2: FA at next odor after HR odor (position-based, not odor-based)
+                    # Find the position of the HR odor first
+                    fa_one_after = fa_for_this_hr[
+                        (fa_for_this_hr["last_odor_position"] == fa_for_this_hr["hr_position"] + 1)
+                    ].copy()
+                    a2, b2, t2 = count_ports(fa_one_after)
+                    ratio2 = (a2 - b2) / t2 if t2 > 0 else np.nan
+                    rows.append({
+                        "date": int(date_str),
+                        "session_num": session_num,
+                        "odor_num": odor_num,
+                        "hr_odor": hr_odor,
+                        "category": f"After {hr_odor}",
+                        "port_a": a2,
+                        "port_b": b2,
+                        "total": t2,
+                        "ratio": ratio2
+                    })
+                    
+                    # Category 3: Total FA at or after HR position
+                    fa_total = fa_for_this_hr[
+                        (fa_for_this_hr["last_odor_position"] >= fa_for_this_hr["hr_position"])
+                    ].copy()
+                    a3, b3, t3 = count_ports(fa_total)
+                    ratio3 = (a3 - b3) / t3 if t3 > 0 else np.nan
+                    rows.append({
+                        "date": int(date_str),
+                        "session_num": session_num,
+                        "odor_num": odor_num,
+                        "hr_odor": hr_odor,
+                        "category": f"Total {hr_odor}",
+                        "port_a": a3,
+                        "port_b": b3,
+                        "total": t3,
+                        "ratio": ratio3
+                    })
+                
+            except Exception as e:
+                print(f"Error processing date {date_str}: {e}")
+                continue
+    
+    if not rows:
+        print("No data found for FA ratio analysis by HR position")
+        return None, None
+    
+    df = pd.DataFrame(rows)
+    
+    # Get unique HR odors and create subplots: 2 rows (scatter + line) per odor
+    unique_odors = sorted(df["hr_odor"].unique())
+    n_odors = len(unique_odors)
+    
+    fig, axes = plt.subplots(2, n_odors, figsize=(figsize[0], figsize[1] * 1.5))
+    if n_odors == 1:
+        axes = axes.reshape(2, 1)
+    
+    for ax_idx, hr_odor in enumerate(unique_odors):
+        # ===== TOP ROW: Scatter plot by category =====
+        ax_scatter = axes[0, ax_idx]
+        
+        df_odor = df[df["hr_odor"] == hr_odor].copy()
+        
+        # Define X positions for the 3 categories
+        categories = [f"On {hr_odor}", f"After {hr_odor}", f"Total {hr_odor}"]
+        x_positions = {cat: i for i, cat in enumerate(categories)}
+        
+        # Plot each session as a dot
+        for cat_idx, category in enumerate(categories):
+            df_cat = df_odor[df_odor["category"] == category]
+            
+            if not df_cat.empty:
+                ratios = df_cat["ratio"].dropna()
+                if not ratios.empty:
+                    x_jitter = np.random.normal(cat_idx, 0.08, size=len(ratios))
+                    ax_scatter.scatter(x_jitter, ratios, alpha=0.5, s=40, color='steelblue')
+        
+        ax_scatter.set_xticks(range(len(categories)))
+        ax_scatter.set_xticklabels(categories, fontsize=10, fontweight='bold')
+        ax_scatter.set_ylabel('FA Ratio (A-B)/(A+B)', fontsize=11, fontweight='bold')
+        ax_scatter.set_ylim([-1.1, 1.1])
+        ax_scatter.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
+        ax_scatter.grid(True, alpha=0.3, axis='y')
+        ax_scatter.set_title(f'HR Odor: {hr_odor} - By Category\n(Subject {str(subjid).zfill(3)})', 
+                    fontsize=12, fontweight='bold')
+        
+        # ===== BOTTOM ROW: Line plot across sessions =====
+        ax_line = axes[1, ax_idx]
+        
+        # Sort by date to get consecutive sessions
+        df_odor_sorted = df_odor.sort_values(by="date")
+        
+        # Create session mapping: consecutive integers 0 to end
+        unique_dates = sorted(df_odor_sorted["date"].unique())
+        date_to_session = {d: i for i, d in enumerate(unique_dates)}
+        df_odor_sorted["session_idx"] = df_odor_sorted["date"].map(date_to_session)
+        
+        # Define line properties for each category
+        line_config = {
+            f"On {hr_odor}": {"color": "blue", "label": f"On {hr_odor}"},
+            f"After {hr_odor}": {"color": "green", "label": f"After {hr_odor}"},
+            f"Total {hr_odor}": {"color": "black", "label": f"Total {hr_odor}"}
+        }
+        
+        # Plot line for each category
+        for category, config in line_config.items():
+            df_cat = df_odor_sorted[df_odor_sorted["category"] == category].sort_values(by="session_idx")
+            
+            if not df_cat.empty and not df_cat["ratio"].isna().all():
+                # Get data with values
+                df_cat_valid = df_cat[df_cat["ratio"].notna()].copy()
+                
+                if not df_cat_valid.empty:
+                    # Check if there are any gaps (missing sessions)
+                    session_indices = df_cat_valid["session_idx"].values
+                    all_sessions_present = len(session_indices) == (session_indices[-1] - session_indices[0] + 1)
+                    
+                    # Use dotted line if there are gaps in the data
+                    linestyle = '-' if all_sessions_present else ':'
+                    
+                    ax_line.plot(df_cat_valid["session_idx"], df_cat_valid["ratio"], 
+                                color=config["color"], 
+                                label=config["label"],
+                                linewidth=2,
+                                linestyle=linestyle,
+                                marker='o',
+                                markersize=5,
+                                alpha=0.7)
+        
+        ax_line.set_xlabel('Session Number', fontsize=11, fontweight='bold')
+        ax_line.set_ylabel('FA Ratio (A-B)/(A+B)', fontsize=11, fontweight='bold')
+        ax_line.set_ylim([-1.1, 1.1])
+        ax_line.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
+        ax_line.grid(True, alpha=0.3)
+        
+        # Set x-axis to whole numbers
+        max_session = int(df_odor_sorted["session_idx"].max())
+        ax_line.set_xticks(range(0, max_session + 1))
+        
+        ax_line.legend(loc='best', fontsize=9)
+        ax_line.set_title(f'HR Odor: {hr_odor} - Across Sessions\n(Subject {str(subjid).zfill(3)})', 
+                    fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    if print_statistics:
+        # Display summary table sorted by metric, then ratio ascending
+        print("\n" + "="*100)
+        print("SUMMARY TABLE (SORTED BY METRIC, THEN BY RATIO)")
+        print("="*100)
+        
+        # Create metric name by combining HR odor and category
+        df_display = df.copy()
+        df_display["metric"] = df_display["hr_odor"] + " - " + df_display["category"]
+        
+        # Select and order columns
+        df_summary = df_display[["date", "metric", "port_a", "port_b", "total", "ratio"]].copy()
+        df_summary = df_summary.sort_values(by=["metric", "ratio"], na_position='last')
+        
+        # Format ratio display
+        df_summary["ratio"] = df_summary["ratio"].apply(
+            lambda x: f"{x:+.3f}" if not pd.isna(x) else "N/A"
+        )
+        
+        # Display table
+        pd.set_option('display.max_rows', None)
+        pd.set_option('display.max_columns', None)
+        pd.set_option('display.width', None)
+        pd.set_option('display.max_colwidth', None)
+        print(df_summary.to_string(index=False))
+        
+        # Statistics per metric
+        print("\n" + "="*100)
+        print("STATISTICS (PER METRIC)")
+        print("="*100)
+        
+        # Convert ratio back to numeric for stats
+        df_stats = df_display[["metric", "ratio"]].copy()
+        
+        for metric in sorted(df_stats["metric"].unique()):
+            metric_data = df_stats[df_stats["metric"] == metric]["ratio"].dropna()
+            
+            if len(metric_data) > 0:
+                mean_val = metric_data.mean()
+                min_val = metric_data.min()
+                max_val = metric_data.max()
+                std_val = metric_data.std()
+                
+                print(f"{metric}:")
+                print(f"  Mean:  {mean_val:+.3f}")
+                print(f"  Min:   {min_val:+.3f}")
+                print(f"  Max:   {max_val:+.3f}")
+                print(f"  Std:   {std_val:.3f}")
+                print()
+    
+    return fig, axes

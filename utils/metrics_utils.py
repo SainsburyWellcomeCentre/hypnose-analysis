@@ -272,6 +272,24 @@ def run_all_metrics(results, save_txt=True, save_json=True):
             print(fa_ab_stats[2].to_string(index=False) if hasattr(fa_ab_stats[2], 'to_string') else fa_ab_stats[2])
         else:
             metrics['fa_abortion_stats'] = None
+        print("\n--- FA Port Ratio by Odor ---")
+        # Calculate with non-initiated FAs included
+        fa_port_ratio_with = fa_port_ratio_by_odor(results, include_non_initiated=True)
+        # Calculate without non-initiated FAs
+        fa_port_ratio_without = fa_port_ratio_by_odor(results, include_non_initiated=False)
+        
+        metrics['fa_port_ratio_by_odor'] = {
+            'with_non_initiated': {
+                'by_odor': fa_port_ratio_with['by_odor'].to_dict() if hasattr(fa_port_ratio_with['by_odor'], 'to_dict') else fa_port_ratio_with['by_odor'],
+                'counts': fa_port_ratio_with['counts'],
+                'total_fa_by_odor': fa_port_ratio_with['total_fa_by_odor'],
+            },
+            'without_non_initiated': {
+                'by_odor': fa_port_ratio_without['by_odor'].to_dict() if hasattr(fa_port_ratio_without['by_odor'], 'to_dict') else fa_port_ratio_without['by_odor'],
+                'counts': fa_port_ratio_without['counts'],
+                'total_fa_by_odor': fa_port_ratio_without['total_fa_by_odor'],
+            }
+        }
 
     # Print to screen
     print(buffer.getvalue())
@@ -1202,4 +1220,82 @@ def fa_abortion_stats(results, return_df=False):
         if df_odor.empty and df_pos.empty and df_out.empty:
             print("No FA abortions found.")
     return (df_odor, df_pos, df_out) if return_df else None
+
+def fa_port_ratio_by_odor(results, include_non_initiated=True, fa_type="FA_time_in"):
+    """
+    Calculate FA port bias ratio per odor: (Port A - Port B) / (Port A + Port B).
+    
+    This metric shows the signed bias in which port (A or B) is selected during
+    false alarm responses for each odor. A ratio of 0 indicates no preference,
+    positive values indicate bias towards port A, and negative values indicate bias towards port B.
+    
+    Parameters:
+    -----------
+    results : dict
+        Results dictionary containing 'aborted_sequences_detailed' and optionally 'non_initiated_FA'
+    include_non_initiated : bool
+        If True, include non-initiated FAs in calculation. Default: True
+    fa_type : str
+        Which FA type to filter for. Default: 'FA_time_in'
+        Can be 'FA_time_in', 'FA_time_out', 'FA_late', or 'all' for all FA types.
+    
+    Returns:
+    --------
+    dict : Dictionary with structure:
+        {
+            'by_odor': pd.Series indexed by odor letter with FA port ratios,
+            'counts': dict with counts of FA events per port per odor,
+            'total_fa_by_odor': dict with total FA counts per odor
+        }
+    """
+    print(f"FA Port Ratio by Odor ({fa_type}):")
+    
+    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
+    fa_noninit = results.get("non_initiated_FA", pd.DataFrame())
+    
+    # Define filter function based on fa_type
+    if fa_type.lower() == 'all':
+        fa_filter = lambda x: x.astype(str).str.startswith('FA_', na=False)
+    else:
+        fa_filter = lambda x: x.astype(str) == fa_type
+    
+    # Combine FA data based on parameter
+    if include_non_initiated and not fa_noninit.empty:
+        fa_ab = ab_det[fa_filter(ab_det["fa_label"])].copy() if not ab_det.empty and "fa_label" in ab_det.columns else pd.DataFrame()
+        fa_ni = fa_noninit[fa_filter(fa_noninit["fa_label"])].copy() if not fa_noninit.empty and "fa_label" in fa_noninit.columns else pd.DataFrame()
+        fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True)
+    else:
+        fa_all = ab_det[fa_filter(ab_det["fa_label"])].copy() if not ab_det.empty and "fa_label" in ab_det.columns else pd.DataFrame()
+    
+    if fa_all.empty or "fa_port" not in fa_all.columns or "last_odor_name" not in fa_all.columns:
+        print("  No FA data with port and odor information found.")
+        return {'by_odor': pd.Series(dtype=float), 'counts': {}, 'total_fa_by_odor': {}}
+    
+    # Calculate ratio per odor
+    ratios = {}
+    counts = {}
+    total_fa_by_odor = {}
+    
+    for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
+        fa_odor = fa_all[fa_all["last_odor_name"] == odor]
+        n_port_a = (fa_odor["fa_port"] == 1).sum()
+        n_port_b = (fa_odor["fa_port"] == 2).sum()
+        n_total = n_port_a + n_port_b
+        
+        if n_total > 0:
+            ratio = (n_port_a - n_port_b) / n_total
+            ratios[odor] = ratio
+            counts[odor] = {'port_a': n_port_a, 'port_b': n_port_b}
+            total_fa_by_odor[odor] = n_total
+            print(f"  {odor}: A={n_port_a}, B={n_port_b}, Bias ratio: {ratio:.3f}")
+        else:
+            ratios[odor] = np.nan
+            counts[odor] = {'port_a': 0, 'port_b': 0}
+            total_fa_by_odor[odor] = 0
+    
+    return {
+        'by_odor': pd.Series(ratios).sort_index(),
+        'counts': counts,
+        'total_fa_by_odor': total_fa_by_odor
+    }
 
