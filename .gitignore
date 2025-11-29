@@ -10,6 +10,7 @@ __pycache__/
 # Virtual environments
 venv/
 .env/
+.conda/
 
 # History files
 .history/
