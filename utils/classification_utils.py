@@ -4630,7 +4630,9 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
             print("   -- Hidden Rule Trials Rewarded: 0 (0.0%)")
             print("   -- Hidden Rule Missed: 0 (0.0%)")
         print(f"-- Aborted sequences: {ab_n} ({pct(ab_n, len(ini)): .1f}%)")
-        print(f"   -- Aborted Hidden Rule trials (HR): {int(len(ab_hr))} ({pct(len(ab_hr), ab_n):.1f}%)\n")
+        # Count unique HR aborted trials (deduplicate by run_id, trial_id)
+        ab_hr_count = _count_unique_trials(ab_hr)
+        print(f"   -- Aborted Hidden Rule trials (HR): {int(ab_hr_count)} ({pct(ab_hr_count, ab_n):.1f}%)\n")
 
         print(f"REWARDED TRIALS BREAKDOWN:")
         print(f"-- Rewarded: {int(len(comp_rew))} ({pct(len(comp_rew), comp_n):.1f}%)")
@@ -4846,6 +4848,7 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
             print("False Alarms:")
             print(f"  - non-FA Abortions: {nfa} ({pct(nfa, total):.1f}%)")
             print(f"  - False Alarm abortions: {fa_total} ({pct(fa_total, total):.1f}%)")
+            print(f"    [Breakdown across ALL positions: FA_time_in={fa_in}, FA_time_out={fa_out}, FA_late={fa_late}]")
             if fa_total > 0:
                 print(f"      - FA Time In - Within Response Time Window ({float(response_time_window_sec) if response_time_window_sec is not None else 'n/a'} s):  {fa_in} ({pct(fa_in, fa_total):.1f}%)")
                 s_in = pd.to_numeric(ab_det.loc[ab_det['fa_label'] == 'FA_time_in', 'fa_latency_ms'], errors='coerce').dropna() if 'fa_latency_ms' in ab_det.columns else pd.Series([], dtype=float)
@@ -4868,15 +4871,36 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
             # Abortions at Hidden Rule positions: split into HR vs non-HR trials, with FA breakdown
             if hr_positions and 'last_odor_position' in ab_det.columns:
                 abortions_at_hr_pos = ab_det[ab_det['last_odor_position'].isin(hr_positions)].copy()
+                abortions_at_pos5 = ab_det[~ab_det['last_odor_position'].isin(hr_positions)].copy()
+                
                 # Resolve HR-aborted trial IDs from merged classification
+                # Use (run_id, trial_id) pairs to handle multiple runs correctly
                 hr_ab_df = cls.get('aborted_sequences_HR')
                 if isinstance(hr_ab_df, pd.DataFrame) and not hr_ab_df.empty and 'trial_id' in hr_ab_df.columns:
-                    hr_aborted_ids = set(hr_ab_df['trial_id'].dropna().tolist())
-                else:
-                    hr_aborted_ids = set()
-                if 'trial_id' in abortions_at_hr_pos.columns:
-                    in_hr_trials = abortions_at_hr_pos[abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy()
-                    non_hr_trials = abortions_at_hr_pos[~abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy()
+                    if 'run_id' in hr_ab_df.columns:
+                        # For multi-run data, use (run_id, trial_id) pairs
+                        hr_pairs = set(zip(hr_ab_df['run_id'].fillna(1), hr_ab_df['trial_id']))
+                        if 'run_id' in abortions_at_hr_pos.columns:
+                            matched = abortions_at_hr_pos.apply(
+                                lambda row: (row.get('run_id', 1), row['trial_id']) in hr_pairs, 
+                                axis=1
+                            )
+                            in_hr_trials = abortions_at_hr_pos[matched].copy()
+                            non_hr_trials = abortions_at_hr_pos[~matched].copy()
+                        else:
+                            # Fallback if no run_id in abortions_at_hr_pos
+                            hr_aborted_ids = set(hr_ab_df['trial_id'].dropna().tolist())
+                            in_hr_trials = abortions_at_hr_pos[abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy()
+                            non_hr_trials = abortions_at_hr_pos[~abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy()
+                    else:
+                        # Single-run data, use trial_id alone
+                        hr_aborted_ids = set(hr_ab_df['trial_id'].dropna().tolist())
+                        if 'trial_id' in abortions_at_hr_pos.columns:
+                            in_hr_trials = abortions_at_hr_pos[abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy()
+                            non_hr_trials = abortions_at_hr_pos[~abortions_at_hr_pos['trial_id'].isin(hr_aborted_ids)].copy()
+                        else:
+                            in_hr_trials = pd.DataFrame()
+                            non_hr_trials = abortions_at_hr_pos.copy()
                 else:
                     in_hr_trials = pd.DataFrame()
                     non_hr_trials = abortions_at_hr_pos.copy()
@@ -4903,8 +4927,50 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
                 print(f"\n  Abortions at Hidden Rule Positions {hr_pos_summary}: n={total_at_hr}")
                 print(f"    Of which in Hidden Rule Trials: n={int(len(in_hr_trials))}")
                 _print_fa_counts(in_hr_trials)
+                
+                # Debug: show FA counts from HR trials at HR positions
+                if not in_hr_trials.empty and 'fa_label' in in_hr_trials.columns:
+                    hr_fa_in = int((in_hr_trials['fa_label'] == 'FA_time_in').sum())
+                    hr_fa_out = int((in_hr_trials['fa_label'] == 'FA_time_out').sum())
+                    hr_fa_in_out = hr_fa_in + hr_fa_out
+                    print(f"      [DEBUG: HR FA_time_in={hr_fa_in}, FA_time_out={hr_fa_out}, total={hr_fa_in_out}]")
+                
                 print(f"    Non-Hidden Rule Abortions at HR Location: n={int(len(non_hr_trials))}")
                 _print_fa_counts(non_hr_trials)
+                
+                # Debug: show FA counts from non-HR trials at HR positions
+                if not non_hr_trials.empty and 'fa_label' in non_hr_trials.columns:
+                    nhr_fa_in = int((non_hr_trials['fa_label'] == 'FA_time_in').sum())
+                    nhr_fa_out = int((non_hr_trials['fa_label'] == 'FA_time_out').sum())
+                    nhr_fa_in_out = nhr_fa_in + nhr_fa_out
+                    print(f"      [DEBUG: non-HR FA_time_in={nhr_fa_in}, FA_time_out={nhr_fa_out}, total={nhr_fa_in_out}]")
+                
+                # Show position 5 (or other non-HR positions) breakdown if any
+                if not abortions_at_pos5.empty:
+                    pos5_count = int(len(abortions_at_pos5))
+                    # Determine which positions are in pos5
+                    other_positions = sorted(set(abortions_at_pos5['last_odor_position'].dropna().unique()))
+                    pos5_display = ", ".join(str(int(p)) for p in other_positions) if other_positions else "other"
+                    print(f"  Abortions at Position(s) {pos5_display}: n={pos5_count}")
+                    _print_fa_counts(abortions_at_pos5)
+                    
+                    # Debug: show FA counts at position 5
+                    if 'fa_label' in abortions_at_pos5.columns:
+                        pos5_fa_in = int((abortions_at_pos5['fa_label'] == 'FA_time_in').sum())
+                        pos5_fa_out = int((abortions_at_pos5['fa_label'] == 'FA_time_out').sum())
+                        pos5_fa_in_out = pos5_fa_in + pos5_fa_out
+                        print(f"      [DEBUG: pos5 FA_time_in={pos5_fa_in}, FA_time_out={pos5_fa_out}, total={pos5_fa_in_out}]")
+                        
+                        # Verify all positions add up
+                        total_fa_in = fa_in
+                        total_fa_out = fa_out
+                        print(f"\n  VERIFICATION:")
+                        print(f"    Total FA_time_in across all positions: {total_fa_in}")
+                        print(f"    Total FA_time_out across all positions: {total_fa_out}")
+                        if not in_hr_trials.empty:
+                            print(f"      = HR@{hr_pos_summary}({hr_fa_in}) + non-HR@{hr_pos_summary}({nhr_fa_in}) + pos5({pos5_fa_in})")
+                        print(f"    Total FA_time_in/out across all positions: {total_fa_in + total_fa_out}")
+                        print(f"      = HR@{hr_pos_summary}({hr_fa_in_out if not in_hr_trials.empty else 0}) + non-HR@{hr_pos_summary}({nhr_fa_in_out if not non_hr_trials.empty else 0}) + pos5({pos5_fa_in_out})")
 
             # False Alarm classification for non-initiated trials (if present)
             fa_noninit_df = merged_classification.get('non_initiated_FA', pd.DataFrame())

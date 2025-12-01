@@ -3455,7 +3455,9 @@ def plot_fa_ratio_by_hr_position(
     dates=None,
     figsize=(16, 10),
     fa_types='FA_time_in', 
-    print_statistics=False
+    print_statistics=False,
+    exclude_last_pos=False,
+    last_odor_num=5
 ):
     """
     Plot FA Ratio (A-B)/(A+B) by hidden rule odor position across sessions.
@@ -3479,9 +3481,14 @@ def plot_fa_ratio_by_hr_position(
         - 'FA_time_in,FA_time_out' : multiple specific types (comma-separated)
         - 'All' : all FA types starting with 'FA_'
         (default: 'FA_time_in')
-    print_statistics: 
+    print_statistics: bool, optional
         Whether to print a statistic summary table with counts for each
-        FA type and position. 
+        FA type and position (default: False).
+    exclude_last_pos: bool, optional
+        If True, exclude FAs where last_odor_position == last_odor_num from all calculations.
+        If False (default), include all positions.
+    last_odor_num: int
+        defines what position last odor is for possible exclusion of rewarded odors 
     
     Returns:
     --------
@@ -3567,7 +3574,14 @@ def plot_fa_ratio_by_hr_position(
                     (merged["fa_label"].apply(fa_filter_fn))
                 ].copy()
                 
-                if merged_fa.empty or "hidden_rule_positions" not in merged_fa.columns:
+                # Optionally exclude FAs at the specified last_odor_position
+                if exclude_last_pos:
+                    merged_fa = merged_fa[merged_fa["last_odor_position"] != last_odor_num].copy()
+                
+                if merged_fa.empty:
+                    continue
+                
+                if "hidden_rule_positions" not in merged_fa.columns:
                     continue
                 
                 # Helper functions
@@ -3785,6 +3799,7 @@ def plot_fa_ratio_by_hr_position(
         # Display summary table sorted by metric, then ratio ascending
         print("\n" + "="*100)
         print("SUMMARY TABLE (SORTED BY METRIC, THEN BY RATIO)")
+        print(f"Note: Only showing dates where FA data was found on HR trials (Subject {str(subjid).zfill(3)})")
         print("="*100)
         
         # Create metric name by combining HR odor and category
@@ -3830,5 +3845,356 @@ def plot_fa_ratio_by_hr_position(
                 print(f"  Max:   {max_val:+.3f}")
                 print(f"  Std:   {std_val:.3f}")
                 print()
+    
+    return fig, axes
+
+
+def plot_fa_ratio_by_abort_odor(
+    subjid,
+    dates=None,
+    figsize=(14, 8),
+    fa_types='FA_time_in'
+):
+    """
+    Plot FA Ratio (A-B)/(A+B) by abortion odor, comparing HR and non-HR aborted sequences.
+    
+    For each odor where abortion occurred, compares:
+    1. Aborted HR trials where abortion happens AFTER the HR odor (not on the HR)
+    2. Aborted non-HR trials (no HR present in sequence)
+    
+    Only includes trials that match the FA type filter. FA Ratio is calculated for each category.
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    dates : tuple, list, or None
+        Date or date range. If None, plots all available dates.
+    figsize : tuple, optional
+        Figure size (default: (14, 8))
+    fa_types : str or list, optional
+        Which FA types to include:
+        - 'FA_time_in' : only FA_time_in
+        - 'FA_time_in,FA_time_out' : multiple specific types (comma-separated)
+        - 'All' : all FA types starting with 'FA_'
+        (default: 'FA_time_in')
+    
+    Returns:
+    --------
+    fig, axes : matplotlib figure and axes array
+    """
+    base_path = Path(project_root) / "data" / "rawdata"
+    server_root = base_path.resolve().parent
+    derivatives_dir = server_root / "derivatives"
+    
+    # Parse FA type filter
+    if isinstance(fa_types, str):
+        if fa_types.lower() == 'all':
+            fa_filter_fn = lambda fa_label: str(fa_label).startswith('FA_') if pd.notna(fa_label) else False
+        else:
+            types_list = [t.strip().lower() for t in fa_types.split(',')]
+            fa_filter_fn = lambda fa_label: str(fa_label).lower() in types_list if pd.notna(fa_label) else False
+    else:
+        fa_filter_fn = lambda fa_label: True
+    
+    rows = []  # {date, odor, hr_odor, category, port_a, port_b, total, ratio}
+    
+    # Statistics tracking
+    stats = {
+        'total_no_hr': 0,
+        'total_no_hr_fa': 0,
+        'total_hr': 0,
+        'total_hr_fa': 0
+    }
+    
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        
+        for session_num, ses in enumerate(ses_dirs, 1):
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            
+            if not results_dir.exists():
+                continue
+            
+            hr_path = results_dir / "aborted_sequences_HR.csv"
+            ab_det_path = results_dir / "aborted_sequences_detailed.csv"
+            summary_path = results_dir / "summary.json"
+            
+            if not hr_path.exists() or not ab_det_path.exists() or not summary_path.exists():
+                continue
+            
+            try:
+                # Load summary to get HR odors
+                with open(summary_path) as f:
+                    summary = json.load(f)
+                
+                hr_odors = summary.get("params", {}).get("hidden_rule_odors", [])
+                if not hr_odors:
+                    continue
+                
+                # Load data
+                df_hr = pd.read_csv(hr_path)
+                df_ab = pd.read_csv(ab_det_path)
+                
+                # ===== PROCESS ABORTED HR TRIALS (abortion after HR) =====
+                if "sequence_start" in df_hr.columns and "sequence_start" in df_ab.columns:
+                    # Get HR trials with FA
+                    hr_with_fa = df_hr[df_hr["sequence_start"].isin(df_ab["sequence_start"])].copy()
+                    
+                    if not hr_with_fa.empty:
+                        # Merge with FA details
+                        merged_hr = hr_with_fa.merge(
+                            df_ab[["sequence_start", "fa_label", "last_odor_name", "fa_port", "last_odor_position"]],
+                            on="sequence_start",
+                            how="left"
+                        )
+                        
+                        # Add HR position info
+                        if "hidden_rule_positions" in df_hr.columns:
+                            merged_hr = merged_hr.merge(
+                                df_hr[["sequence_start", "hidden_rule_positions"]],
+                                on="sequence_start",
+                                how="left",
+                                suffixes=('', '_hr')
+                            )
+                        
+                        # Filter for actual FAs and apply FA type filter
+                        merged_hr = merged_hr[
+                            (merged_hr["fa_label"] != "nFA") & 
+                            (merged_hr["fa_label"].apply(fa_filter_fn))
+                        ].copy()
+                        
+                        stats['total_hr'] += len(hr_with_fa)
+                        stats['total_hr_fa'] += len(merged_hr)
+                        
+                        if not merged_hr.empty:
+                            # Filter to abortions that happen AFTER the HR (not on the HR)
+                            def get_hr_position(hr_pos_str):
+                                if pd.isna(hr_pos_str):
+                                    return None
+                                try:
+                                    pos_list = json.loads(str(hr_pos_str))
+                                    if isinstance(pos_list, list) and len(pos_list) > 0:
+                                        return int(pos_list[0])
+                                except:
+                                    pass
+                                return None
+                            
+                            merged_hr["hr_position"] = merged_hr["hidden_rule_positions"].apply(get_hr_position)
+                            
+                            # Keep only trials where abortion happens AFTER HR position
+                            before_after_filter = len(merged_hr)
+                            merged_hr = merged_hr[
+                                merged_hr["last_odor_position"] > merged_hr["hr_position"]
+                            ].copy()
+                            stats['total_hr_fa_after_pos'] = stats.get('total_hr_fa_after_pos', 0) + len(merged_hr)
+                            stats['total_hr_fa_lost_to_position'] = stats.get('total_hr_fa_lost_to_position', 0) + (before_after_filter - len(merged_hr))
+                            
+                            if not merged_hr.empty:
+                                # Group by last odor and HR odor
+                                for last_odor in merged_hr["last_odor_name"].unique():
+                                    odor_data = merged_hr[merged_hr["last_odor_name"] == last_odor]
+                                    
+                                    for hr_odor in hr_odors:
+                                        # Check if this HR odor is in the sequence for this trial
+                                        odor_matches = []
+                                        
+                                        if "odor_sequence" in odor_data.columns:
+                                            def has_hr_odor(odor_seq, target_hr):
+                                                if pd.isna(odor_seq):
+                                                    return False
+                                                try:
+                                                    seq_list = json.loads(str(odor_seq))
+                                                    return target_hr in seq_list if isinstance(seq_list, list) else False
+                                                except:
+                                                    return target_hr in str(odor_seq)
+                                            
+                                            odor_matches = odor_data[
+                                                odor_data["odor_sequence"].apply(lambda seq: has_hr_odor(seq, hr_odor))
+                                            ]
+                                        else:
+                                            odor_matches = odor_data
+                                        
+                                        if not odor_matches.empty:
+                                            port_a = (odor_matches["fa_port"] == 1).sum()
+                                            port_b = (odor_matches["fa_port"] == 2).sum()
+                                            total = port_a + port_b
+                                            ratio = (port_a - port_b) / total if total > 0 else np.nan
+                                            
+                                            rows.append({
+                                                "date": int(date_str),
+                                                "odor": last_odor,
+                                                "category": hr_odor,
+                                                "port_a": port_a,
+                                                "port_b": port_b,
+                                                "total": total,
+                                                "ratio": ratio
+                                            })
+                
+                # ===== PROCESS ABORTED NON-HR TRIALS =====
+                # Get trials that are NOT in HR file (no HR present)
+                if "sequence_start" in df_ab.columns:
+                    ab_no_hr = df_ab[~df_ab["sequence_start"].isin(df_hr["sequence_start"].values)].copy()
+                    
+                    stats['total_no_hr'] += len(ab_no_hr)
+                    
+                    # Filter for actual FAs and apply FA type filter
+                    ab_no_hr = ab_no_hr[
+                        (ab_no_hr["fa_label"] != "nFA") & 
+                        (ab_no_hr["fa_label"].apply(fa_filter_fn))
+                    ].copy()
+                    
+                    stats['total_no_hr_fa'] += len(ab_no_hr)
+                    
+                    if not ab_no_hr.empty:
+                        # Track how many go into breakdown
+                        before_breakdown = len(ab_no_hr)
+                        # Group by last odor
+                        for last_odor in ab_no_hr["last_odor_name"].unique():
+                            odor_data = ab_no_hr[ab_no_hr["last_odor_name"] == last_odor]
+                            
+                            port_a = (odor_data["fa_port"] == 1).sum()
+                            port_b = (odor_data["fa_port"] == 2).sum()
+                            total = port_a + port_b
+                            ratio = (port_a - port_b) / total if total > 0 else np.nan
+                            
+                            rows.append({
+                                "date": int(date_str),
+                                "odor": last_odor,
+                                "category": "No HR",
+                                "port_a": port_a,
+                                "port_b": port_b,
+                                "total": total,
+                                "ratio": ratio
+                            })
+                        stats['total_no_hr_in_breakdown'] = stats.get('total_no_hr_in_breakdown', 0) + sum(
+                            row['total'] for row in rows if row.get('category') == 'No HR' and row.get('date') == int(date_str)
+                        )
+            
+            except Exception as e:
+                print(f"Error processing date {date_str}: {e}")
+                continue
+    
+    if not rows:
+        print("No data found for FA ratio by abort odor")
+        return None, None
+    
+    df = pd.DataFrame(rows)
+    
+    # Get unique odors
+    unique_odors = sorted(df["odor"].unique())
+    n_odors = len(unique_odors)
+    
+    # Create subplots: one per odor
+    fig, axes = plt.subplots(1, n_odors, figsize=(figsize[0], figsize[1] / 1.5) if n_odors > 2 else figsize)
+    if n_odors == 1:
+        axes = np.array([axes])
+    else:
+        axes = np.atleast_1d(axes)
+    
+    # Define category order
+    category_order = []
+    if "No HR" in df["category"].unique():
+        category_order.append("No HR")
+    category_order.extend(sorted([c for c in df["category"].unique() if c != "No HR"]))
+    
+    # Debug: Show how many sessions we have data from
+    unique_dates = df["date"].unique()
+    print(f"\nDEBUG: Data aggregated from {len(unique_dates)} sessions on dates: {sorted(unique_dates)}")
+    print(f"DEBUG: Total rows in breakdown dataframe: {len(df)}")
+    
+    
+    # Plot for each odor
+    for ax_idx, odor in enumerate(unique_odors):
+        ax = axes[ax_idx] if n_odors > 1 else axes[0]
+        
+        df_odor = df[df["odor"] == odor].copy()
+        
+        x_positions = {cat: i for i, cat in enumerate(category_order)}
+        
+        # Scatter plot
+        for category in category_order:
+            df_cat = df_odor[df_odor["category"] == category]
+            
+            if not df_cat.empty:
+                ratios = df_cat["ratio"].dropna()
+                if not ratios.empty:
+                    x_jitter = np.random.normal(x_positions[category], 0.08, size=len(ratios))
+                    ax.scatter(x_jitter, ratios, alpha=0.6, s=60, color='steelblue')
+        
+        ax.set_xticks(range(len(category_order)))
+        ax.set_xticklabels(category_order, fontsize=10, fontweight='bold')
+        ax.set_ylabel('FA Ratio (A-B)/(A+B)', fontsize=11, fontweight='bold')
+        ax.set_ylim([-1.1, 1.1])
+        ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
+        ax.grid(True, alpha=0.3, axis='y')
+        ax.set_title(f'Abortion Odor: {odor}', fontsize=12, fontweight='bold')
+    
+    plt.tight_layout()
+    
+    # Print statistics
+    print("\n" + "="*100)
+    print("FA RATIO BY ABORTION ODOR - STATISTICS")
+    print("="*100)
+    print(f"\nAborted Sequences WITHOUT Hidden Rule:")
+    print(f"  Total aborted: {stats['total_no_hr']}")
+    print(f"  Matching FA filter: {stats['total_no_hr_fa']}")
+    print(f"  In breakdown by odor: {stats.get('total_no_hr_in_breakdown', 'unknown')}")
+    
+    # Calculate actual HR breakdown count
+    hr_breakdown_count = sum(row['total'] for row in rows if row.get('category') != 'No HR')
+    
+    print(f"\nAborted Sequences WITH Hidden Rule (abortion AFTER HR):")
+    print(f"  Total aborted: {stats['total_hr']}")
+    print(f"  Matching FA filter: {stats['total_hr_fa']}")
+    print(f"  After position filter (after HR): {stats.get('total_hr_fa_after_pos', 'unknown')}")
+    print(f"  In breakdown table: {hr_breakdown_count}")
+    print(f"\nDISCREPANCY ANALYSIS:")
+    print(f"  Non-HR: FA filter count ({stats['total_no_hr_fa']}) vs breakdown count ({stats.get('total_no_hr_in_breakdown', 'unknown')})")
+    print(f"  HR: FA filter count ({stats['total_hr_fa']}) vs breakdown count ({hr_breakdown_count})")
+    print(f"  Missing HR trials in breakdown: {stats['total_hr_fa'] - hr_breakdown_count}")
+    
+    print(f"\n" + "-"*100)
+    print("BREAKDOWN BY ODOR AND CATEGORY:")
+    print("-"*100)
+    
+    # Group by odor and show per-date breakdown
+    for odor in unique_odors:
+        print(f"\n{odor}:")
+        df_odor = df[df["odor"] == odor]
+        
+        for category in category_order:
+            df_cat = df_odor[df_odor["category"] == category]
+            
+            if not df_cat.empty:
+                # Show aggregate across all dates
+                port_a_total = df_cat["port_a"].sum()
+                port_b_total = df_cat["port_b"].sum()
+                total_trials = df_cat["total"].sum()
+                ratio_agg = (port_a_total - port_b_total) / total_trials if total_trials > 0 else np.nan
+                
+                ratio_str = f"{ratio_agg:+.3f}" if not pd.isna(ratio_agg) else "N/A"
+                print(f"  {category:<12} - Ratio: {ratio_str}  Port A: {int(port_a_total)}, Port B: {int(port_b_total)}, Total: {int(total_trials)}")
+                
+                # Show per-date breakdown
+                for idx, row in df_cat.iterrows():
+                    date_val = int(row['date'])
+                    ratio_str_date = f"{row['ratio']:+.3f}" if not pd.isna(row['ratio']) else "N/A"
+                    print(f"      → {date_val}: Port A: {int(row['port_a'])}, Port B: {int(row['port_b'])}, Total: {int(row['total'])}")
+            else:
+                print(f"  {category:<12} - No data")
+    
+    print("="*100)
+    
+    # Show summary totals
+    print("\nSUMMARY BY CATEGORY (across all odors and dates):")
+    print("-"*100)
+    
+    total_no_hr_all = df[df["category"] == "No HR"]["total"].sum()
+    total_hr_all = df[df["category"] != "No HR"]["total"].sum()
+    
+    print(f"No HR trials total: {int(total_no_hr_all)}")
+    print(f"HR trials total: {int(total_hr_all)}")
     
     return fig, axes
