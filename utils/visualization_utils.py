@@ -3852,7 +3852,7 @@ def plot_fa_ratio_by_hr_position(
 def plot_fa_ratio_by_abort_odor(
     subjid,
     dates=None,
-    figsize=(14, 8),
+    figsize=(18, 8),
     fa_types='FA_time_in'
 ):
     """
@@ -4082,12 +4082,16 @@ def plot_fa_ratio_by_abort_odor(
     
     df = pd.DataFrame(rows)
     
-    # Get unique odors
-    unique_odors = sorted(df["odor"].unique())
+    # Get unique odors and filter out rewarded odors (OdorA, OdorB)
+    all_unique_odors = sorted(df["odor"].unique())
+    rewarded_odors = ['OdorA', 'OdorB']
+    unique_odors = [odor for odor in all_unique_odors if odor not in rewarded_odors]
+    
+    # Still print stats for all odors including rewarded ones
     n_odors = len(unique_odors)
     
     # Create subplots: one per odor
-    fig, axes = plt.subplots(1, n_odors, figsize=(figsize[0], figsize[1] / 1.5) if n_odors > 2 else figsize)
+    fig, axes = plt.subplots(1, n_odors, figsize=(figsize[0] * 0.85, figsize[1] * 0.9) if n_odors > 2 else figsize)
     if n_odors == 1:
         axes = np.array([axes])
     else:
@@ -4099,9 +4103,26 @@ def plot_fa_ratio_by_abort_odor(
         category_order.append("No HR")
     category_order.extend(sorted([c for c in df["category"].unique() if c != "No HR"]))
     
+    # Create session gradient colormap: dark blue for recent, light blue for older
+    unique_dates_sorted = sorted(df["date"].unique())
+    n_sessions = len(unique_dates_sorted)
+    
+    # Create color map: most recent = dark blue, oldest = light blue
+    if n_sessions == 1:
+        colors_for_dates = {unique_dates_sorted[0]: '#00008B'}  # Dark blue
+    else:
+        # Linear interpolation from light to dark blue
+        blue_light = np.array([0.68, 0.85, 1.0])      # Light blue
+        blue_dark = np.array([0.0, 0.0, 0.55])        # Dark blue
+        colors_for_dates = {}
+        for idx, date in enumerate(unique_dates_sorted):
+            t = idx / (n_sessions - 1)  # 0 for oldest, 1 for newest
+            color = blue_light * (1 - t) + blue_dark * t
+            colors_for_dates[date] = color
+    
     # Debug: Show how many sessions we have data from
-    unique_dates = df["date"].unique()
-    print(f"\nDEBUG: Data aggregated from {len(unique_dates)} sessions on dates: {sorted(unique_dates)}")
+    print(f"\nDEBUG: Data aggregated from {len(unique_dates_sorted)} sessions on dates: {sorted(unique_dates_sorted)}")
+    print(f"DEBUG: Color mapping: {unique_dates_sorted} → Most recent (dark) to oldest (light)")
     print(f"DEBUG: Total rows in breakdown dataframe: {len(df)}")
     
     
@@ -4111,27 +4132,75 @@ def plot_fa_ratio_by_abort_odor(
         
         df_odor = df[df["odor"] == odor].copy()
         
-        x_positions = {cat: i for i, cat in enumerate(category_order)}
+        # For this specific odor, only include categories that have data
+        categories_with_data = sorted([c for c in df_odor["category"].unique()])
+        if not categories_with_data:
+            continue
         
-        # Scatter plot
-        for category in category_order:
+        x_positions = {cat: i for i, cat in enumerate(categories_with_data)}
+        
+        # Scatter plot with session gradient coloring
+        for category in categories_with_data:
             df_cat = df_odor[df_odor["category"] == category]
             
             if not df_cat.empty:
-                ratios = df_cat["ratio"].dropna()
-                if not ratios.empty:
-                    x_jitter = np.random.normal(x_positions[category], 0.08, size=len(ratios))
-                    ax.scatter(x_jitter, ratios, alpha=0.6, s=60, color='steelblue')
+                # Plot each date separately with its own color
+                for date in unique_dates_sorted:
+                    df_date = df_cat[df_cat["date"] == date]
+                    if df_date.empty:
+                        continue
+                    
+                    ratios = df_date["ratio"].dropna()
+                    if not ratios.empty:
+                        x_pos = x_positions[category]
+                        # Add small jitter to spread out points
+                        x_jitter = np.random.normal(x_pos, 0.06, size=len(ratios))
+                        color = colors_for_dates[date]
+                        ax.scatter(x_jitter, ratios, alpha=0.7, s=80, color=color, 
+                                  edgecolors='none', label=f'{date}' if ax_idx == 0 else '')
         
-        ax.set_xticks(range(len(category_order)))
-        ax.set_xticklabels(category_order, fontsize=10, fontweight='bold')
+        # Add black line for aggregate mean for each category that actually has data in this odor
+        # Line width scales with number of categories (smaller when fewer categories)
+        line_half_width = 0.15 if len(categories_with_data) > 1 else 0.08
+        for category in categories_with_data:
+            df_cat = df_odor[df_odor["category"] == category]
+            all_ratios = df_cat["ratio"].dropna()
+            if len(all_ratios) > 0:
+                mean_ratio = all_ratios.mean()
+                x_pos = x_positions[category]
+                # Only draw line if we have data at this position
+                ax.plot([x_pos - line_half_width, x_pos + line_half_width], [mean_ratio, mean_ratio], 
+                       color='black', linewidth=3, alpha=0.8, zorder=10)
+        
+        ax.set_xticks(range(len(categories_with_data)))
+        ax.set_xticklabels(categories_with_data, fontsize=10, fontweight='bold', rotation=0)
         ax.set_ylabel('FA Ratio (A-B)/(A+B)', fontsize=11, fontweight='bold')
         ax.set_ylim([-1.1, 1.1])
         ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
         ax.grid(True, alpha=0.3, axis='y')
-        ax.set_title(f'Abortion Odor: {odor}', fontsize=12, fontweight='bold')
+        ax.set_title(f'{odor}', fontsize=12, fontweight='bold')
+        
+        # Set x-axis limits with padding
+        n_cats = len(categories_with_data)
+        ax.set_xlim(-0.5, n_cats - 0.5)
+        ax.margins(y=0)  # Only apply margins to y-axis, not x-axis
     
-    plt.tight_layout()
+    # Create a legend for the sessions (on the first subplot)
+    if n_odors > 0:
+        # Create custom legend entries
+        legend_elements = []
+        for date in reversed(unique_dates_sorted):  # Reverse so newest is first
+            label = f'{date}'
+            if date == unique_dates_sorted[-1]:
+                label += ' (recent)'
+            legend_elements.append(Line2D([0], [0], marker='o', color='w', 
+                                         markerfacecolor=colors_for_dates[date], 
+                                         markersize=8, label=label, alpha=0.7))
+        
+        fig.legend(handles=legend_elements, loc='upper right', fontsize=9, 
+                  title='Sessions', title_fontsize=10, framealpha=0.95)
+    
+    plt.tight_layout(rect=[0, 0, 0.88, 1])  # Leave space for legend
     
     # Print statistics
     print("\n" + "="*100)
@@ -4156,12 +4225,14 @@ def plot_fa_ratio_by_abort_odor(
     print(f"  Missing HR trials in breakdown: {stats['total_hr_fa'] - hr_breakdown_count}")
     
     print(f"\n" + "-"*100)
-    print("BREAKDOWN BY ODOR AND CATEGORY:")
+    print("BREAKDOWN BY ODOR AND CATEGORY (including rewarded odors OdorA, OdorB in stats):")
     print("-"*100)
     
-    # Group by odor and show per-date breakdown
-    for odor in unique_odors:
-        print(f"\n{odor}:")
+    # Group by odor and show per-date breakdown for ALL odors
+    for odor in all_unique_odors:
+        is_rewarded = odor in rewarded_odors
+        odor_label = f"{odor}" + (" [REWARDED - not plotted]" if is_rewarded else "")
+        print(f"\n{odor_label}:")
         df_odor = df[df["odor"] == odor]
         
         for category in category_order:
@@ -4186,7 +4257,7 @@ def plot_fa_ratio_by_abort_odor(
                 print(f"  {category:<12} - No data")
     
     print("="*100)
-    
+        
     # Show summary totals
     print("\nSUMMARY BY CATEGORY (across all odors and dates):")
     print("-"*100)
@@ -4196,5 +4267,5 @@ def plot_fa_ratio_by_abort_odor(
     
     print(f"No HR trials total: {int(total_no_hr_all)}")
     print(f"HR trials total: {int(total_hr_all)}")
-    
+
     return fig, axes
