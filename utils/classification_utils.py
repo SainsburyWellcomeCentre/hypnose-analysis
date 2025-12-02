@@ -4010,8 +4010,10 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
     london_tz = zoneinfo.ZoneInfo("Europe/London")
 
     for run in runs:
-        # Extract start time from folder path
-        run_start_str = run["root"].split("/")[-1]  # Extract the timestamp part (e.g., "2025-10-17T12-57-05")
+        # Extract start time from folder path (handle both Unix and Windows paths)
+        root_path = run["root"]
+        # Normalize path separators and get the last component
+        run_start_str = root_path.replace("\\", "/").split("/")[-1]  # Extract the timestamp part (e.g., "2025-10-17T12-57-05")
         run_start = datetime.strptime(run_start_str, "%Y-%m-%dT%H-%M-%S").replace(tzinfo=zoneinfo.ZoneInfo("UTC"))
         run_start_london = run_start.astimezone(london_tz)
         run["start_time"] = run_start_london.isoformat()
