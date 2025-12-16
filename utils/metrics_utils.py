@@ -475,6 +475,10 @@ def batch_run_all_metrics_with_merge(
             results_dir = ses_dir / "saved_analysis_results"
             summary_path = results_dir / "summary.json"
             if not summary_path.exists():
+                if verbose:
+                    date_str = ses_dir.name.split("_date-")[-1]
+                    subjid_str = subj_dir.name.split("_")[0]
+                    print(f"Skipping {subjid_str} date {date_str}: summary.json not found at {summary_path}")
                 continue
             # Protocol filter
             if protocol is not None:
@@ -1070,6 +1074,11 @@ def non_initiation_odor_bias(results):
 
     # Numerator: non-initiated trials with this odor as first odor
     all_non_init = pd.concat([non_ini, pos1], ignore_index=True)
+    
+    # Handle empty DataFrame or missing odor_name column
+    if all_non_init.empty or "odor_name" not in all_non_init.columns:
+        return pd.Series(dtype=float)
+    
     count_odors = all_non_init["odor_name"].value_counts()
 
     # Denominator: all trials with this odor as first odor (initiated or not)

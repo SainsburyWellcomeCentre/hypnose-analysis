@@ -6222,11 +6222,21 @@ def plot_valve_and_poke_events(
             plt.step(valve_data.index, valve_data.astype(float) * 0.8 + valve_offset, where='post',
                     c=color, linewidth=1.5, label=f'{odour_to_olfactometer_map[0][i] if i < len(odour_to_olfactometer_map[0]) else valve_col} (Olfac1)', alpha=0.8)
             if isinstance(endinit_df, pd.DataFrame) and not endinit_df.empty and 'EndInitiation' in endinit_df:
-                plt.scatter(endinit_df.index, endinit_df['EndInitiation'].astype(float) * 0.5 + valve_offset, s=5, c='k')
+                # Filter out NaT values from index before plotting
+                valid_mask = endinit_df.index.notna()
+                valid_endinit = endinit_df[valid_mask]
+                if not valid_endinit.empty:
+                    plt.scatter(valid_endinit.index, valid_endinit['EndInitiation'].astype(float) * 0.5 + valve_offset, s=5, c='k')
             if isinstance(pulse_supply_1, pd.DataFrame) and not pulse_supply_1.empty:
-                plt.scatter(pulse_supply_1.index, np.ones(len(pulse_supply_1)) * (0.5 + valve_offset), s=5, c='r')
+                valid_mask = pulse_supply_1.index.notna()
+                valid_supply_1 = pulse_supply_1[valid_mask]
+                if not valid_supply_1.empty:
+                    plt.scatter(valid_supply_1.index, np.ones(len(valid_supply_1)) * (0.5 + valve_offset), s=5, c='r')
             if isinstance(pulse_supply_2, pd.DataFrame) and not pulse_supply_2.empty:
-                plt.scatter(pulse_supply_2.index, np.ones(len(pulse_supply_2)) * (0.5 + valve_offset), s=5, c='r')
+                valid_mask = pulse_supply_2.index.notna()
+                valid_supply_2 = pulse_supply_2[valid_mask]
+                if not valid_supply_2.empty:
+                    plt.scatter(valid_supply_2.index, np.ones(len(valid_supply_2)) * (0.5 + valve_offset), s=5, c='r')
             valve_offset -= 0.3
 
     # Plot individual valves from olfactometer 1 and EndInitiation events and reward delivery
@@ -6238,11 +6248,21 @@ def plot_valve_and_poke_events(
             plt.step(valve_data.index, valve_data.astype(float) * 0.8 + valve_offset, where='post',
                     c=color, linewidth=1.5, label=f'{odour_to_olfactometer_map[1][i] if i < len(odour_to_olfactometer_map[1]) else valve_col} (Olfac2)', alpha=0.8, linestyle='--')
             if isinstance(endinit_df, pd.DataFrame) and not endinit_df.empty and 'EndInitiation' in endinit_df:
-                plt.scatter(endinit_df.index, endinit_df['EndInitiation'].astype(float) * 0.5 + valve_offset, s=5, c='k')
+                # Filter out NaT values from index before plotting
+                valid_mask = endinit_df.index.notna()
+                valid_endinit = endinit_df[valid_mask]
+                if not valid_endinit.empty:
+                    plt.scatter(valid_endinit.index, valid_endinit['EndInitiation'].astype(float) * 0.5 + valve_offset, s=5, c='k')
             if isinstance(pulse_supply_1, pd.DataFrame) and not pulse_supply_1.empty:
-                plt.scatter(pulse_supply_1.index, np.ones(len(pulse_supply_1)) * (0.5 + valve_offset), s=5, c='r')
+                valid_mask = pulse_supply_1.index.notna()
+                valid_supply_1 = pulse_supply_1[valid_mask]
+                if not valid_supply_1.empty:
+                    plt.scatter(valid_supply_1.index, np.ones(len(valid_supply_1)) * (0.5 + valve_offset), s=5, c='r')
             if isinstance(pulse_supply_2, pd.DataFrame) and not pulse_supply_2.empty:
-                plt.scatter(pulse_supply_2.index, np.ones(len(pulse_supply_2)) * (0.5 + valve_offset), s=5, c='r')
+                valid_mask = pulse_supply_2.index.notna()
+                valid_supply_2 = pulse_supply_2[valid_mask]
+                if not valid_supply_2.empty:
+                    plt.scatter(valid_supply_2.index, np.ones(len(valid_supply_2)) * (0.5 + valve_offset), s=5, c='r')
             valve_offset -= 0.3
 
     # Plot reward pokes and reward delivery
@@ -6252,21 +6272,39 @@ def plot_valve_and_poke_events(
                 DIPort_data = digital_input_data[di_col]
                 plt.step(DIPort_data.index, DIPort_data.astype(float) * 0.8 + valve_offset, where='post', c='orange', linewidth=1.5, label='Reward Pokes A')
                 if isinstance(pulse_supply_1, pd.DataFrame) and not pulse_supply_1.empty:
-                    plt.scatter(pulse_supply_1.index, np.ones(len(pulse_supply_1)) * (0.5 + valve_offset), s=5, c='r')
+                    valid_mask = pulse_supply_1.index.notna()
+                    valid_supply_1 = pulse_supply_1[valid_mask]
+                    if not valid_supply_1.empty:
+                        plt.scatter(valid_supply_1.index, np.ones(len(valid_supply_1)) * (0.5 + valve_offset), s=5, c='r')
                 if isinstance(pulse_supply_2, pd.DataFrame) and not pulse_supply_2.empty:
-                    plt.scatter(pulse_supply_2.index, np.ones(len(pulse_supply_2)) * (0.5 + valve_offset), s=5, c='r')
+                    valid_mask = pulse_supply_2.index.notna()
+                    valid_supply_2 = pulse_supply_2[valid_mask]
+                    if not valid_supply_2.empty:
+                        plt.scatter(valid_supply_2.index, np.ones(len(valid_supply_2)) * (0.5 + valve_offset), s=5, c='r')
                 if isinstance(endinit_df, pd.DataFrame) and not endinit_df.empty and 'EndInitiation' in endinit_df:
-                    plt.scatter(endinit_df.index, endinit_df['EndInitiation'].astype(float) * 0.5 + valve_offset, s=5, c='k')
+                    valid_mask = endinit_df.index.notna()
+                    valid_endinit = endinit_df[valid_mask]
+                    if not valid_endinit.empty:
+                        plt.scatter(valid_endinit.index, valid_endinit['EndInitiation'].astype(float) * 0.5 + valve_offset, s=5, c='k')
                 valve_offset -= 0.3
             elif di_col == 'DIPort2':
                 DIPort_data = digital_input_data[di_col]
                 plt.step(DIPort_data.index, DIPort_data.astype(float) * 0.8 + valve_offset, where='post', c='cyan', linewidth=1.5, label='Reward Pokes B')
                 if isinstance(pulse_supply_1, pd.DataFrame) and not pulse_supply_1.empty:
-                    plt.scatter(pulse_supply_1.index, np.ones(len(pulse_supply_1)) * (0.5 + valve_offset), s=5, c='r')
+                    valid_mask = pulse_supply_1.index.notna()
+                    valid_supply_1 = pulse_supply_1[valid_mask]
+                    if not valid_supply_1.empty:
+                        plt.scatter(valid_supply_1.index, np.ones(len(valid_supply_1)) * (0.5 + valve_offset), s=5, c='r')
                 if isinstance(pulse_supply_2, pd.DataFrame) and not pulse_supply_2.empty:
-                    plt.scatter(pulse_supply_2.index, np.ones(len(pulse_supply_2)) * (0.5 + valve_offset), s=5, c='r', label='Reward Delivery')
+                    valid_mask = pulse_supply_2.index.notna()
+                    valid_supply_2 = pulse_supply_2[valid_mask]
+                    if not valid_supply_2.empty:
+                        plt.scatter(valid_supply_2.index, np.ones(len(valid_supply_2)) * (0.5 + valve_offset), s=5, c='r', label='Reward Delivery')
                 if isinstance(endinit_df, pd.DataFrame) and not endinit_df.empty and 'EndInitiation' in endinit_df:
-                    plt.scatter(endinit_df.index, endinit_df['EndInitiation'].astype(float) * 0.5 + valve_offset, s=5, c='k', label='Trial End')
+                    valid_mask = endinit_df.index.notna()
+                    valid_endinit = endinit_df[valid_mask]
+                    if not valid_endinit.empty:
+                        plt.scatter(valid_endinit.index, valid_endinit['EndInitiation'].astype(float) * 0.5 + valve_offset, s=5, c='k', label='Trial End')
                 valve_offset -= 0.3
 
     # --- Indicate session cuts ---
