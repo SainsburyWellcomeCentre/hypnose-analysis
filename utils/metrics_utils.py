@@ -454,6 +454,9 @@ def batch_run_all_metrics_with_merge(
     results = []
     results_dicts = []
 
+    # Track session processing stats per subject
+    session_stats = {}  # Format: {subjid: {'analyzed': [dates], 'skipped': [(date, reason)], 'failed': [(date, error)]}}
+
     # Find all subject directories
     subj_dirs = list(derivatives_dir.glob("sub-*_id-*")) if subjids is None else [
         d for subjid in subjids
@@ -465,6 +468,8 @@ def batch_run_all_metrics_with_merge(
     for subj_dir in subj_dirs:
         subj_results = []  # Store results for this subject
         subj_dates = []  # Track processed dates for this subject
+        subjid = subj_dir.name.split("_")[0].replace("sub-", "")
+        session_stats[subjid] = {'analyzed': [], 'skipped': [], 'failed': []}
 
         # Find all session directories for this subject
         ses_dirs = _filter_session_dirs(subj_dir, dates)
@@ -474,30 +479,39 @@ def batch_run_all_metrics_with_merge(
         for ses_dir in ses_dirs:
             results_dir = ses_dir / "saved_analysis_results"
             summary_path = results_dir / "summary.json"
+            date = ses_dir.name.split("_date-")[-1]
+            
             if not summary_path.exists():
                 if verbose:
-                    date_str = ses_dir.name.split("_date-")[-1]
-                    subjid_str = subj_dir.name.split("_")[0]
-                    print(f"Skipping {subjid_str} date {date_str}: summary.json not found at {summary_path}")
+                    print(f"Skipping {subjid} date {date}: summary.json not found at {summary_path}")
+                session_stats[subjid]['skipped'].append((date, "summary.json not found"))
                 continue
+            
             # Protocol filter
+            skip_protocol = False
             if protocol is not None:
                 try:
                     with open(summary_path, "r") as f:
                         summary = json.load(f)
                     runs = summary.get("session", {}).get("runs", [])
                     if not runs or "stage" not in runs[0]:
-                        continue
-                    stage_name = runs[0]["stage"].get("stage_name", "")
-                    if protocol not in stage_name:
-                        continue
+                        skip_protocol = True
+                    else:
+                        stage_name = runs[0]["stage"].get("stage_name", "")
+                        if protocol not in stage_name:
+                            skip_protocol = True
                 except Exception as e:
                     if verbose:
-                        print(f"Skipping {summary_path}: {e}")
+                        print(f"Skipping {subjid} date {date}: Protocol filter error - {e}")
+                    session_stats[subjid]['skipped'].append((date, f"Protocol filter error: {e}"))
                     continue
-            # Extract subjid and date from path or summary
-            subjid = subj_dir.name.split("_")[0].replace("sub-", "")
-            date = ses_dir.name.split("_date-")[-1]
+                
+                if skip_protocol:
+                    if verbose:
+                        print(f"Skipping {subjid} date {date}: Does not match protocol '{protocol}'")
+                    session_stats[subjid]['skipped'].append((date, f"Protocol '{protocol}' not in stage"))
+                    continue
+            
             # Run metrics
             try:
                 session_results = load_session_results(subjid, date)
@@ -509,11 +523,13 @@ def batch_run_all_metrics_with_merge(
                 subj_results.append(session_results)  # Collect results for this subject
                 subj_dates.append(date)  # Track processed dates for this subject
                 results_dicts.append(session_results)  # Add to global results
+                session_stats[subjid]['analyzed'].append(date)
                 if verbose:
                     print(f"Processed subjid={subjid}, date={date}")
             except Exception as e:
                 if verbose:
                     print(f"Failed for subjid={subjid}, date={date}: {e}")
+                session_stats[subjid]['failed'].append((date, str(e)))
 
         # --- Merge results for this subject ---
         if subj_results:
@@ -593,6 +609,41 @@ def batch_run_all_metrics_with_merge(
             json.dump(merged_metrics, f, indent=2, default=str)
         if verbose:
             print(f"Saved total merged metrics values to {json_path}")
+
+    # ===== FINAL SESSION SUMMARY =====
+    print("\n" + "="*80)
+    print("SESSION PROCESSING SUMMARY")
+    print("="*80)
+    
+    for subjid in sorted(session_stats.keys()):
+        stats = session_stats[subjid]
+        analyzed = stats['analyzed']
+        skipped = stats['skipped']
+        failed = stats['failed']
+        
+        print(f"\nSubject ID: {subjid}")
+        print(f"  ✓ Analyzed ({len(analyzed)}): {', '.join(analyzed) if analyzed else 'None'}")
+        
+        if skipped:
+            print(f"  ⊘ Skipped ({len(skipped)}):")
+            for date, reason in skipped:
+                print(f"      - {date}: {reason}")
+        else:
+            print(f"  ⊘ Skipped: None")
+        
+        if failed:
+            print(f"  ✗ Failed ({len(failed)}):")
+            for date, error in failed:
+                print(f"      - {date}: {error}")
+        else:
+            print(f"  ✗ Failed: None")
+    
+    print("\n" + "="*80)
+    total_analyzed = sum(len(s['analyzed']) for s in session_stats.values())
+    total_skipped = sum(len(s['skipped']) for s in session_stats.values())
+    total_failed = sum(len(s['failed']) for s in session_stats.values())
+    print(f"TOTALS: Analyzed={total_analyzed} | Skipped={total_skipped} | Failed={total_failed}")
+    print("="*80 + "\n")
 
     return results
 

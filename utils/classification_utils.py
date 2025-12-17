@@ -1962,6 +1962,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             trial_dict['sequence_start_corrected'] = corrected_start
 
         effective_odor_sequence = final_odor_sequence
+        last_position = len(effective_odor_sequence)
 
         enough_odors, hit_hidden_rule, hr_hit_indices = check_hidden_rule(
             effective_odor_sequence, hidden_rule_indices, hr_odor_set
@@ -1971,9 +1972,21 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_dict['hit_hidden_rule'] = hit_hidden_rule
         trial_dict['hidden_rule_hit_indices'] = hr_hit_indices
         trial_dict['hidden_rule_hit_positions'] = hr_hit_positions
-        hr_success = len(effective_odor_sequence) in hr_hit_positions if hr_hit_positions else False
+        hr_success = False
+        hr_success_position = None
+        if hr_hit_positions:
+            first_hr_pos = min(hr_hit_positions)
+            # New rule: once the HR odor is hit, leaving before Position 5 (and reaching AwaitReward)
+            # still counts as a Hidden Rule success. Only completing all 5 positions without leaving
+            # on/after the HR odor is treated as HR missed (except when HR itself is at pos 5).
+            if last_position < 5:
+                hr_success = True
+                hr_success_position = first_hr_pos
+            else:
+                hr_success = last_position in hr_hit_positions
+                hr_success_position = first_hr_pos if hr_success else None
         trial_dict['hidden_rule_success'] = hr_success
-        trial_dict['hidden_rule_success_position'] = len(effective_odor_sequence) if hr_success else None
+        trial_dict['hidden_rule_success_position'] = hr_success_position
 
         initiated_trials_list.append(trial_dict)
         if trial_await_rewards:
