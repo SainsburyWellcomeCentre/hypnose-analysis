@@ -465,6 +465,10 @@ def batch_run_all_metrics_with_merge(
     if verbose:
         print(f"Found {len(subj_dirs)} subject directories.")
 
+    def _print_session_banner(subjid_str: str, date_str: str):
+        banner = f"\n ======================= Subject {subjid_str} Date {date_str} ======================="
+        print(banner)
+
     for subj_dir in subj_dirs:
         subj_results = []  # Store results for this subject
         subj_dates = []  # Track processed dates for this subject
@@ -514,6 +518,8 @@ def batch_run_all_metrics_with_merge(
             
             # Run metrics
             try:
+                if verbose:
+                    _print_session_banner(subjid, date)
                 session_results = load_session_results(subjid, date)
                 metrics = run_all_metrics(
                     session_results,
@@ -533,13 +539,24 @@ def batch_run_all_metrics_with_merge(
 
         # --- Merge results for this subject ---
         if subj_results:
+            def _range_str(dates_list):
+                unique_sorted = sorted(set(dates_list))
+                if not unique_sorted:
+                    return "None"
+                return unique_sorted[0] if len(unique_sorted) == 1 else f"{unique_sorted[0]}-{unique_sorted[-1]}"
+
             pooled_results = pool_results_dicts(subj_results)
             # --- Capture pretty print output ---
             buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):
                 merged_metrics = run_all_metrics(pooled_results, save_txt=False, save_json=False)
             pretty_print_str = buffer.getvalue()
-            print(pretty_print_str)
+            if len(subj_results) > 1:
+                banner_range = _range_str(subj_dates)
+                print(f"\n======================= Subject {subjid} Summary {banner_range} =======================")
+                print(pretty_print_str)
+            elif verbose:
+                print(f"Merged metrics not echoed to console for subjid={subjid} (single session). Files still saved.")
             # Prepare header
             header = (
                 "Merged Results for:\n"
@@ -574,7 +591,6 @@ def batch_run_all_metrics_with_merge(
         with contextlib.redirect_stdout(buffer):
             merged_metrics = run_all_metrics(pooled_results, save_txt=False, save_json=False)
         pretty_print_str = buffer.getvalue()
-        print(pretty_print_str)
         # Prepare header
         subjids_merged = pooled_results["manifest"]["merged_subjects"]
         dates_merged = pooled_results["manifest"]["merged_dates"]
@@ -609,6 +625,14 @@ def batch_run_all_metrics_with_merge(
             json.dump(merged_metrics, f, indent=2, default=str)
         if verbose:
             print(f"Saved total merged metrics values to {json_path}")
+        # Only echo the combined summary when spanning multiple subjects or dates
+        if len(subjids_merged) > 1 or len(set(dates_merged)) > 1:
+            banner_dates = sorted(set(dates_merged))
+            date_range = banner_dates[0] if len(banner_dates) == 1 else f"{banner_dates[0]}-{banner_dates[-1]}"
+            print(f"\n======================= Subjects {subjids_str} {date_range} =======================")
+            print(pretty_print_str)
+        elif verbose:
+            print("Merged metrics not echoed to console for single subject/date (already shown above).")
 
     # ===== FINAL SESSION SUMMARY =====
     print("\n" + "="*80)
