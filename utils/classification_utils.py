@@ -1459,6 +1459,12 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     hidden_rule_position = hidden_rule_positions[0] if hidden_rule_positions else None
     multiple_hidden_rule_locations = len(hidden_rule_positions) > 1
 
+    # Sequence length (positions) for all position-based loops
+    seq_len = schema_settings.get('sequenceLength')
+    max_positions = int(seq_len) if seq_len is not None else None
+    if max_positions is None or max_positions < 1:
+        raise ValueError("sequenceLength missing or invalid; cannot proceed without a valid sequence length")
+
     if verbose:
         seq_label = sequence_name or str(stage)
         if hidden_rule_indices:
@@ -1572,8 +1578,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     initiated_trials_list = []
 
     # Aggregators for summary prints (completed trials only)
-    agg_position_poke_times = {pos: [] for pos in range(1, 6)}
-    agg_position_valve_times = {pos: [] for pos in range(1, 6)}
+    agg_position_poke_times = {pos: [] for pos in range(1, max_positions + 1)}
+    agg_position_valve_times = {pos: [] for pos in range(1, max_positions + 1)}
     agg_odor_poke_times = defaultdict(list)
     agg_odor_valve_times = defaultdict(list)
 
@@ -1765,7 +1771,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                     for e in first_odor_activations[:-1]
                 ]
 
-        # Positions 2-5: Keep ONLY the LAST occurrence of each new odor
+        # Positions 2- max index: Keep ONLY the LAST occurrence of each new odor
         # (Don't merge consecutive events with same valve_key, just track the last one)
         odor_to_pos = {}
         next_pos = 2
@@ -1774,7 +1780,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             odor = event['odor_name']
             
             # If we haven't seen this odor yet, assign it a position
-            if odor not in odor_to_pos and next_pos <= 5:
+            if odor not in odor_to_pos and next_pos <= max_positions:
                 odor_to_pos[odor] = next_pos
                 next_pos += 1
             
@@ -1783,7 +1789,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 position_locations[odor_to_pos[odor]] = event
 
         # Valve timing per position
-        for position in range(1, 6):
+        for position in range(1, max_positions + 1):
             if position not in position_locations:
                 continue
             loc = position_locations[position]
@@ -1808,7 +1814,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         s_bool = poke_data.astype(bool)
 
         # Compute consolidated poke time
-        for position in range(1, 6):
+        for position in range(1, max_positions + 1):
             if position not in poke_position_locations:
                 continue
             loc = poke_position_locations[position]
@@ -1881,7 +1887,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         positions = []
         for ev in valve_activations:
             od = ev['odor_name']
-            if od not in odor_to_pos and next_pos <= 5:
+            if od not in odor_to_pos and next_pos <= max_positions:
                 odor_to_pos[od] = next_pos
                 next_pos += 1
             positions.append(odor_to_pos.get(od))
@@ -1976,10 +1982,10 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         hr_success_position = None
         if hr_hit_positions:
             first_hr_pos = min(hr_hit_positions)
-            # New rule: once the HR odor is hit, leaving before Position 5 (and reaching AwaitReward)
-            # still counts as a Hidden Rule success. Only completing all 5 positions without leaving
-            # on/after the HR odor is treated as HR missed (except when HR itself is at pos 5).
-            if last_position < 5:
+            # New rule: once the HR odor is hit, leaving before the final position (and reaching AwaitReward)
+            # still counts as a Hidden Rule success. Only completing all positions without leaving
+            # on/after the HR odor is treated as HR missed (except when HR itself is at the final position).
+            if last_position < max_positions:
                 hr_success = True
                 hr_success_position = first_hr_pos
             else:
@@ -2251,7 +2257,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         # Additional requested summaries
         print("POKE TIME RANGES BY POSITION:")
         print("-" * 40)
-        for pos in range(1, 6):
+        for pos in range(1, max_positions + 1):
             times = agg_position_poke_times[pos]
             if times:
                 min_v = min(times); max_v = max(times); avg_v = sum(times) / len(times)
@@ -2261,7 +2267,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
         print("\nVALVE TIME RANGES BY POSITION:")
         print("-" * 40)
-        for pos in range(1, 6):
+        for pos in range(1, max_positions + 1):
             times = agg_position_valve_times[pos]
             if times:
                 min_v = min(times); max_v = max(times); avg_v = sum(times) / len(times)
@@ -2833,6 +2839,18 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
          'last_odor_poke_time_ms','abortion_type',
          'abortion_time','fa_label','fa_time','fa_latency_ms']
     """
+    schema_settings = {}
+    schema_err: Exception | None = None
+    try:
+        _, schema_settings = detect_settings.detect_settings(root)
+    except Exception as exc:
+        schema_err = exc
+        schema_settings = {}
+        
+    seq_len = schema_settings.get('sequenceLength')
+    max_positions = int(seq_len) if seq_len is not None else None
+    if max_positions is None or max_positions < 1:
+        raise ValueError("sequenceLength missing or invalid; cannot proceed without a valid sequence length")
 
     DIP0 = data['digital_input_data'].get('DIPort0', pd.Series(dtype=bool)).astype(bool)
     DIP1 = data['digital_input_data'].get('DIPort1', pd.Series(dtype=bool)).astype(bool)
@@ -3064,13 +3082,13 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
         evs = trial_valve_events(t_start, t_end)
         odor_sequence = [e['odor_name'] for e in evs]
 
-        # Map first-seen odor to position 1..5
+        # Map first-seen odor to position 1.. max index
         odor_to_pos = {}
         next_pos = 1
         positions = []
         for e in evs:
             od = e['odor_name']
-            if od not in odor_to_pos and next_pos <= 5:
+            if od not in odor_to_pos and next_pos <= max_positions:
                 odor_to_pos[od] = next_pos
                 next_pos += 1
             positions.append(odor_to_pos.get(od))
@@ -3129,13 +3147,13 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
         for pres_entry in presentations_all:
             pres_entry['is_last_event'] = last_idx is not None and pres_entry.get('index_in_trial') == last_idx
 
-        # Map first-seen odor to position 1..5
+        # Map first-seen odor to position 1.. max index
         odor_to_pos = {}
         next_pos = 1
         positions = []
         for e in evs:
             od = e['odor_name']
-            if od not in odor_to_pos and next_pos <= 5:
+            if od not in odor_to_pos and next_pos <= max_positions:
                 odor_to_pos[od] = next_pos
                 next_pos += 1
             positions.append(odor_to_pos.get(od))
@@ -4656,8 +4674,22 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
 
         # Aggregate poke/valve time stats from completed trials (use comp, which has nested columns)
         def collect_pos_stats(df: pd.DataFrame):
-            pos_poke = {i: [] for i in range(1, 6)}
-            pos_valve = {i: [] for i in range(1, 6)}
+            # Infer max positions from data to avoid hardcoding
+            inferred_max = 0
+            if not df.empty:
+                all_pos_keys = []
+                for _, r in df.iterrows():
+                    pps = r.get("position_poke_times") or {}
+                    vps = r.get("position_valve_times") or {}
+                    all_pos_keys.extend([k for k in pps.keys() if isinstance(k, (int, np.integer))])
+                    all_pos_keys.extend([k for k in vps.keys() if isinstance(k, (int, np.integer))])
+                if all_pos_keys:
+                    try:
+                        inferred_max = max(int(p) for p in all_pos_keys)
+                    except Exception:
+                        inferred_max = 0
+            pos_poke = {i: [] for i in range(1, inferred_max + 1)}
+            pos_valve = {i: [] for i in range(1, inferred_max + 1)}
             odor_poke = defaultdict(list)
             odor_valve = defaultdict(list)
             if df.empty:
@@ -4665,7 +4697,7 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
             for _, r in df.iterrows():
                 pps = r.get("position_poke_times") or {}
                 vps = r.get("position_valve_times") or {}
-                for pos in range(1, 6):
+                for pos in range(1, inferred_max + 1):
                     if pos in pps:
                         v = pps[pos].get("poke_time_ms")
                         if v is not None and not (isinstance(v, float) and np.isnan(v)):
@@ -4885,7 +4917,7 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
             # Abortions at Hidden Rule positions: split into HR vs non-HR trials, with FA breakdown
             if hr_positions and 'last_odor_position' in ab_det.columns:
                 abortions_at_hr_pos = ab_det[ab_det['last_odor_position'].isin(hr_positions)].copy()
-                abortions_at_pos5 = ab_det[~ab_det['last_odor_position'].isin(hr_positions)].copy()
+                abortions_at_last_pos = ab_det[~ab_det['last_odor_position'].isin(hr_positions)].copy()
                 
                 # Resolve HR-aborted trial IDs from merged classification
                 # Use (run_id, trial_id) pairs to handle multiple runs correctly

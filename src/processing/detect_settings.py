@@ -54,6 +54,9 @@ def detect_settings(root):
     # Extract minimum sampling time per odor by iterating through all definitions
     target_odors = {'OdorA', 'OdorB', 'OdorC', 'OdorD', 'OdorE', 'OdorF', 'OdorG'}
     found_odors = set()
+    sequence_length_index = None
+    sequence_length_from_def = None
+    max_index_seen = None
     
     try:
         if sequences_obj:
@@ -68,6 +71,9 @@ def detect_settings(root):
                         definition = rc[0].get('definition')
                         if isinstance(definition, list):
                             # definition is a list of position lists
+                            # Track length from definition as fallback for sequence length
+                            if sequence_length_from_def is None:
+                                sequence_length_from_def = len(definition)
                             for position_choices in definition:
                                 items = position_choices if isinstance(position_choices, list) else [position_choices]
                                 for item in items:
@@ -78,6 +84,12 @@ def detect_settings(root):
                                             if mst is not None:
                                                 minimumSamplingTime_by_odor[odor] = mst
                                                 found_odors.add(odor)
+                                            try:
+                                                idx_val = item.get('index')
+                                                if isinstance(idx_val, (int, float)):
+                                                    max_index_seen = int(idx_val) if max_index_seen is None else max(max_index_seen, int(idx_val))
+                                            except Exception:
+                                                pass
                                 
                                 # Early exit if all odors found
                                 if len(found_odors) == len(target_odors):
@@ -86,6 +98,13 @@ def detect_settings(root):
                             if len(found_odors) == len(target_odors):
                                 break
                     
+                    # Capture explicit sequenceLengthIndex if present
+                    try:
+                        if sequence_length_index is None and isinstance(seg.get('sequenceLengthIndex'), (int, float)):
+                            sequence_length_index = int(seg.get('sequenceLengthIndex'))
+                    except Exception:
+                        pass
+
                     if len(found_odors) == len(target_odors):
                         break
                 
@@ -93,6 +112,26 @@ def detect_settings(root):
                     break
     except Exception as e:
         print(f"Error extracting minimum sampling times: {e}")
+
+    # Resolve sequence length with priority: explicit index -> max item index -> definition length
+    sequence_length = None
+    sequence_length_source = None
+
+    if sequence_length_index is not None:
+        sequence_length = sequence_length_index + 1
+        sequence_length_source = 'sequenceLengthIndex'
+    elif max_index_seen is not None:
+        sequence_length = max_index_seen + 1
+        sequence_length_source = 'maxItemIndex'
+    elif sequence_length_from_def is not None:
+        sequence_length = sequence_length_from_def
+        sequence_length_source = 'definitionLength'
+
+    schema_settings['sequenceLengthIndex'] = sequence_length_index
+    schema_settings['sequenceLengthMaxIndex'] = max_index_seen
+    schema_settings['sequenceLengthFromDefinition'] = sequence_length_from_def
+    schema_settings['sequenceLengthSource'] = sequence_length_source
+    schema_settings['sequenceLength'] = sequence_length
     
     schema_settings['minimumSamplingTime_by_odor'] = minimumSamplingTime_by_odor
     schema_settings['sampleOffsetTime'] = metadata.metadata.sampleOffsetTime
