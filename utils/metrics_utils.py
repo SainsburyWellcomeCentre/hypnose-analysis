@@ -703,17 +703,19 @@ def decision_accuracy_by_odor(results):
     """
     Calculate decision accuracy separately for each odor (A, B, etc.).
     Decision accuracy = rewarded / (rewarded + unrewarded) for trials ending with that odor.
+    Also reports totals including timeouts.
     
     Returns:
     --------
-    pd.Series : Accuracy per odor (indexed by odor letter: 'A', 'B', etc.)
+    pd.DataFrame : per-odor counts and accuracies
     """
     comp_rew = results.get("completed_sequence_rewarded", pd.DataFrame())
     comp_unr = results.get("completed_sequence_unrewarded", pd.DataFrame())
+    comp_tmo = results.get("completed_sequence_reward_timeout", pd.DataFrame())
     
-    if comp_rew.empty and comp_unr.empty:
+    if comp_rew.empty and comp_unr.empty and (comp_tmo.empty if isinstance(comp_tmo, pd.DataFrame) else True):
         print("No completed trials found")
-        return pd.Series(dtype=float)
+        return pd.DataFrame()
     
     # Extract just the odor letter from 'last_odor' (e.g., 'OdorA' -> 'A')
     def extract_odor_letter(odor_str):
@@ -724,43 +726,57 @@ def decision_accuracy_by_odor(results):
             return odor_str.replace('Odor', '')
         return odor_str
     
-    # Add reward status and odor letter
-    if not comp_rew.empty:
-        comp_rew_copy = comp_rew.copy()
-        comp_rew_copy['reward_status'] = 'rewarded'
-        comp_rew_copy['odor_letter'] = comp_rew_copy['last_odor'].apply(extract_odor_letter)
-    else:
-        comp_rew_copy = pd.DataFrame()
-    
-    if not comp_unr.empty:
-        comp_unr_copy = comp_unr.copy()
-        comp_unr_copy['reward_status'] = 'unrewarded'
-        comp_unr_copy['odor_letter'] = comp_unr_copy['last_odor'].apply(extract_odor_letter)
-    else:
-        comp_unr_copy = pd.DataFrame()
-    
-    # Combine both
-    combined = pd.concat([comp_rew_copy, comp_unr_copy], ignore_index=True)
-    
+    def add_status(df, status):
+        if df.empty:
+            return pd.DataFrame()
+        out = df.copy()
+        out['reward_status'] = status
+        out['odor_letter'] = out['last_odor'].apply(extract_odor_letter)
+        return out
+
+    comp_rew_copy = add_status(comp_rew, 'rewarded')
+    comp_unr_copy = add_status(comp_unr, 'unrewarded')
+    comp_tmo_copy = add_status(comp_tmo if isinstance(comp_tmo, pd.DataFrame) else pd.DataFrame(), 'timeout')
+
+    combined = pd.concat([comp_rew_copy, comp_unr_copy, comp_tmo_copy], ignore_index=True)
+
     if combined.empty:
         print("No completed trials found")
-        return pd.Series(dtype=float)
+        return pd.DataFrame()
     
     # Calculate accuracy per odor
-    accuracy_by_odor = {}
+    rows = []
     odors = sorted(combined['odor_letter'].dropna().unique())
-    
+
     print("Decision Accuracy by Odor:")
     for odor in odors:
         odor_trials = combined[combined['odor_letter'] == odor]
-        n_rew = (odor_trials['reward_status'] == 'rewarded').sum()
-        n_unr = (odor_trials['reward_status'] == 'unrewarded').sum()
-        n_total = len(odor_trials)
-        acc = n_rew / n_total if n_total > 0 else np.nan
-        accuracy_by_odor[odor] = acc
-        print(f"  Odor {odor}: {n_rew} rewarded, {n_unr} unrewarded → {n_rew}/{n_total} = {acc:.3f}")
-    
-    return pd.Series(accuracy_by_odor).sort_index()
+        n_rew = int((odor_trials['reward_status'] == 'rewarded').sum())
+        n_unr = int((odor_trials['reward_status'] == 'unrewarded').sum())
+        n_tmo = int((odor_trials['reward_status'] == 'timeout').sum())
+        denom_ab = n_rew + n_unr
+        denom_total = denom_ab + n_tmo
+        acc_ab = n_rew / denom_ab if denom_ab > 0 else np.nan
+        acc_total = n_rew / denom_total if denom_total > 0 else np.nan
+
+        def _fmt(v):
+            return f"{v:.3f}" if not np.isnan(v) else "nan"
+
+        print(f"  Odor {odor}: {n_rew} rewarded, {n_unr} unrewarded, {n_tmo} timeout")
+        print(f"       Decision Accuracy AB: {n_rew}/{denom_ab} = {_fmt(acc_ab)}, Total: {n_rew}/{denom_total} = {_fmt(acc_total)}")
+
+        rows.append({
+            'odor': odor,
+            'rewarded': n_rew,
+            'unrewarded': n_unr,
+            'timeout': n_tmo,
+            'decision_accuracy_ab': acc_ab,
+            'decision_accuracy_total': acc_total,
+            'denominator_ab': denom_ab,
+            'denominator_total': denom_total,
+        })
+
+    return pd.DataFrame(rows).set_index('odor').sort_index()
 
 def premature_response_rate(results):
     ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
