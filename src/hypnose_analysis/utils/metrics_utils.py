@@ -1,23 +1,6 @@
 import sys
 import os
 from pathlib import Path
-
-def _discover_project_root() -> str:
-    env_override = os.environ.get("HYPNOSE_PROJECT_ROOT")
-    if env_override:
-        return os.path.abspath(env_override)
-
-    current = Path(__file__).resolve().parent
-    for candidate in [current] + list(current.parents):
-        if (candidate / "data" / "rawdata").exists():
-            return str(candidate)
-    return os.path.abspath("")
-
-
-project_root = _discover_project_root()
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
 import json
 from dotmap import DotMap
 import pandas as pd
@@ -33,8 +16,7 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib import cm
 from typing import Iterable, Optional, Union
-
-
+from hypnose_analysis.paths import get_derivatives_root
 # ================== Loading, Wrapper, and Helper Functions ==================
 
 def load_session_results(subjid, date):
@@ -42,14 +24,12 @@ def load_session_results(subjid, date):
     Load saved analysis results for a given subject and date.
     Returns a dict of DataFrames and metadata, matching classification keys.
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    base_dir = server_root / "derivatives"
+    derivatives_dir = get_derivatives_root()
     sub_str = f"sub-{str(subjid).zfill(3)}"
     date_str = str(date)
 
     # Find subject directory (may have multiple _id-*)
-    subject_dirs = list(base_dir.glob(f"{sub_str}_id-*"))
+    subject_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
     if not subject_dirs:
         raise FileNotFoundError(f"No subject directory found for {sub_str}")
     if len(subject_dirs) > 1:
@@ -96,6 +76,7 @@ def load_session_results(subjid, date):
     # Attach manifest and summary
     results["manifest"] = manifest
     results["summary"] = summary
+    results["results_dir"] = str(results_dir)
 
     return results
 
@@ -145,54 +126,110 @@ def run_all_metrics(results, save_txt=True, save_json=True):
     Run all metrics, print results, and save to txt and json in the session's results directory.
     Returns a dict of all metric values.
     """
-    # --- Derive subjid, date, and output_dir from results ---
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    base_dir = server_root / "derivatives"    
-    manifest = results.get("manifest", {})
+    derivatives_dir = get_derivatives_root()
+    manifest = results.get("manifest", {}) or {}
+    summary = results.get("summary", {}) or {}
 
-    summary = results.get("summary", {})
-    # Try to get subjid and date from manifest or summary
+    def _safe_session_value(container, *keys):
+        cur = container
+        for key in keys:
+            if not isinstance(cur, dict):
+                return None
+            cur = cur.get(key)
+        return cur
+
     subjid = (
-        manifest.get("session", {}).get("subject_id")
-        or summary.get("session", {}).get("subject_id")
-        or manifest.get("session", {}).get("subjid")
-        or summary.get("session", {}).get("subjid")
-        or None
+        _safe_session_value(manifest, "session", "subject_id")
+        or _safe_session_value(summary, "session", "subject_id")
+        or _safe_session_value(manifest, "session", "subjid")
+        or _safe_session_value(summary, "session", "subjid")
     )
     date = (
-        manifest.get("session", {}).get("date")
-        or summary.get("session", {}).get("date")
-        or manifest.get("session", {}).get("session_date")
-        or summary.get("session", {}).get("session_date")
-        or None
+        _safe_session_value(manifest, "session", "date")
+        or _safe_session_value(summary, "session", "date")
+        or _safe_session_value(manifest, "session", "session_date")
+        or _safe_session_value(summary, "session", "session_date")
     )
-    # Try to get output_dir from manifest paths
-    paths = manifest.get("paths", {})
 
-    # Override paths with the local base_dir
-    if base_dir is not None:
-        base_dir = Path(base_dir)
-        if "rawdata_dir" in paths:
-            paths["rawdata_dir"] = str(base_dir / "rawdata")
-        if "results_dir" in manifest:
-            manifest["results_dir"] = str(base_dir / "derivatives" / paths.get("sub_folder", "") / paths.get("ses_folder", "") / "saved_analysis_results")
+    paths = manifest.get("paths", {}) if isinstance(manifest, dict) else {}
+    sub_folder = paths.get("sub_folder")
+    ses_folder = paths.get("ses_folder")
+    manifest_results_dir = manifest.get("results_dir")
+    results_dir_hint = (
+        results.get("results_dir")
+        or results.get("_results_dir")
+    )
 
-    out_dir = None
-    if "rawdata_dir" in paths:
-        # Ensure 'derivatives' is not duplicated
-        rawdata_parent = Path(paths["rawdata_dir"]).parent
-        if rawdata_parent.name == "derivatives":
-            out_dir = rawdata_parent / paths.get("sub_folder", "") / paths.get("ses_folder", "") / "saved_analysis_results"
-        else:
-            out_dir = rawdata_parent / "derivatives" / paths.get("sub_folder", "") / paths.get("ses_folder", "") / "saved_analysis_results"
-    elif "results_dir" in manifest:
-        out_dir = Path(manifest["results_dir"])
-    else:
-        # fallback: use current working directory
-        out_dir = Path.cwd()
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    def _is_relative_to(child: Path, parent: Path) -> bool:
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
+
+    def _normalize_subjid(value):
+        if value is None:
+            return None
+        digits = "".join(ch for ch in str(value) if ch.isdigit())
+        return f"sub-{digits.zfill(3)}" if digits else None
+
+    def _normalize_date(value):
+        if value is None:
+            return None
+        digits = "".join(ch for ch in str(value) if ch.isdigit())
+        return digits if digits else None
+
+    def _clean_folder_component(component: str) -> Path | None:
+        if not component:
+            return None
+        sanitized = component.strip().replace("..", "")
+        return Path(sanitized).name if sanitized else None
+
+    def _session_dir_from_manifest_parts() -> Path | None:
+        sub_comp = _clean_folder_component(sub_folder)
+        ses_comp = _clean_folder_component(ses_folder)
+        if not sub_comp or not ses_comp:
+            return None
+        return derivatives_dir / sub_comp / ses_comp / "saved_analysis_results"
+
+    def _session_dir_from_ids() -> Path | None:
+        sub_norm = _normalize_subjid(subjid)
+        date_norm = _normalize_date(date)
+        if not sub_norm or not date_norm:
+            return None
+        subject_dirs = sorted(derivatives_dir.glob(f"{sub_norm}_id-*"))
+        if not subject_dirs:
+            return None
+        # prefer deterministic ordering
+        for subj_dir in subject_dirs:
+            session_dirs = sorted(subj_dir.glob(f"ses-*_date-{date_norm}"))
+            if session_dirs:
+                return session_dirs[0] / "saved_analysis_results"
+        return None
+
+    def _determine_output_dir() -> Path:
+        if results_dir_hint:
+            return Path(results_dir_hint).expanduser().resolve(strict=False)
+        if manifest_results_dir:
+            candidate = Path(manifest_results_dir).expanduser().resolve(strict=False)
+            if _is_relative_to(candidate, derivatives_dir.resolve(strict=False)):
+                return candidate
+        manifest_candidate = _session_dir_from_manifest_parts()
+        if manifest_candidate is not None:
+            return manifest_candidate
+        id_candidate = _session_dir_from_ids()
+        if id_candidate is not None:
+            return id_candidate
+        raise RuntimeError(
+            "Could not determine output directory for metrics. "
+            "Ensure manifest contains valid paths or run load_session_results() before run_all_metrics()."
+        )
+
+    need_output = bool(save_txt or save_json)
+    out_dir: Path | None = None
+    if need_output:
+        out_dir = _determine_output_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
 
     # --- Run metrics and capture output ---
     metrics = {}
@@ -398,13 +435,10 @@ def merged_results_output_dir(subjids, dates, protocol):
     """
     Determine the output directory for merged results based on subjids, dates, and protocol.
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    derivatives_dir = get_derivatives_root()
     subjids = sorted(set(str(s) for s in subjids))
     dates = sorted(set(str(d) for d in dates))
     if len(subjids) == 1:
-        # Single subject: save in that subject's folder under merged_results
         sub_str = f"sub-{str(subjids[0]).zfill(3)}"
         subj_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
         if not subj_dirs:
@@ -412,12 +446,8 @@ def merged_results_output_dir(subjids, dates, protocol):
         subj_dir = subj_dirs[0]
         merged_dir = subj_dir / "merged_results"
     else:
-        # Multiple subjects: save in derivatives/merged/(protocol_merged|merged)
         merged_dir = derivatives_dir / "merged"
-        if protocol:
-            merged_dir = merged_dir / "protocol_merged"
-        else:
-            merged_dir = merged_dir / "merged"
+        merged_dir = merged_dir / ("protocol_merged" if protocol else "merged")
     merged_dir.mkdir(parents=True, exist_ok=True)
     return merged_dir
 
@@ -448,9 +478,7 @@ def batch_run_all_metrics_with_merge(
     Batch run metrics for combinations of subjids and dates, with optional protocol filter.
     Also computes and saves merged metrics across all sessions, per subject, and across all subjects.
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    derivatives_dir = get_derivatives_root()
     results = []
     results_dicts = []
 

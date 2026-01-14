@@ -1,32 +1,15 @@
 import sys
 import os
 from pathlib import Path
-
-
-def _discover_project_root() -> str:
-    env_override = os.environ.get("HYPNOSE_PROJECT_ROOT")
-    if env_override:
-        return os.path.abspath(env_override)
-
-    current = Path(__file__).resolve().parent
-    for candidate in [current] + list(current.parents):
-        if (candidate / "data" / "rawdata").exists():
-            return str(candidate)
-    return os.path.abspath("")
-
-
-project_root = _discover_project_root()
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib import cm
 from typing import Iterable, Optional, Union
-from utils.metrics_utils import load_session_results, run_all_metrics, parse_json_column
+from hypnose_analysis.utils.metrics_utils import load_session_results, run_all_metrics, parse_json_column
 from datetime import timedelta, datetime
-from utils.classification_utils import load_all_streams, load_experiment
+from hypnose_analysis.utils.classification_utils import load_all_streams, load_experiment
+from hypnose_analysis.paths import get_data_root
 import re
 import numpy as np
 import json
@@ -179,9 +162,9 @@ def plot_behavior_metrics(
         raise ValueError("Please provide `variables` (list of metric names or dot-paths).")
 
     rows = []
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    base_path = get_data_root() / "rawdata"
+    server_root = get_data_root()
+    derivatives_dir = get_data_root() / "derivatives"
     # Gather sessions
     for sid, subj_dir in _iter_subject_dirs(derivatives_dir, subjids):
         ses_dirs = _filter_session_dirs(subj_dir, dates)
@@ -367,9 +350,9 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
     fig, ax : matplotlib figure and axes
     """
     rows = []
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    base_path = get_data_root() / "rawdata"
+    server_root = get_data_root()
+    derivatives_dir = get_data_root() / "derivatives"
     
     for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
         ses_dirs = _filter_session_dirs(subj_dir, dates)
@@ -473,9 +456,9 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
     Plot sampling times (poke durations) by position and by odor for completed and aborted trials.
     OPTIMIZED: Vectorized JSON parsing instead of row-by-row loops.
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    base_path = get_data_root() / "rawdata"
+    server_root = get_data_root()
+    derivatives_dir = get_data_root() / "derivatives"
     
     rows = []
     
@@ -770,9 +753,9 @@ def plot_abortion_and_fa_rates(
         - 'All' : all FA types starting with 'FA_'
         (default: 'FA_Time_In')
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    base_path = get_data_root() / "rawdata"
+    server_root = get_data_root()
+    derivatives_dir = get_data_root() / "derivatives"
     
     # DEFINE fa_filter_fn HERE - BEFORE THE LOOPS
     if isinstance(fa_types, str):
@@ -1154,9 +1137,9 @@ def plot_response_times_completed_vs_fa(subjid, dates=None, figsize=(12, 8), y_l
     --------
     fig, ax : matplotlib figure and axes
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    base_path = get_data_root() / "rawdata"
+    server_root = get_data_root()
+    derivatives_dir = get_data_root() / "derivatives"
     
     rows = []
     
@@ -1256,9 +1239,9 @@ def plot_fa_ratio_a_over_sessions(
     
     Parameters similar to original, but now loads only necessary data.
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    base_path = get_data_root() / "rawdata"
+    server_root = get_data_root()
+    derivatives_dir = get_data_root() / "derivatives"
     
     fa_data = {}  # {odor: [(session_num, ratio, n_a, n_b, n_total), ...]}
     
@@ -1439,9 +1422,9 @@ def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), t
         session_info = []
 
         # Find subject directory
-        base_path = Path(project_root) / "data" / "rawdata"
-        server_root = base_path.resolve().parent
-        derivatives_dir = server_root / "derivatives"
+        base_path = get_data_root() / "rawdata"
+        server_root = get_data_root()
+        derivatives_dir = get_data_root() / "derivatives"
         subj_str = f"sub-{str(subjid).zfill(3)}"
         subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
         if not subj_dirs:
@@ -1653,7 +1636,7 @@ def plot_movement_trace(subjid, date, smooth_window=10, linewidth=1, alpha=0.5, 
     fig, ax : matplotlib figure and axis objects
     """
     # Build path to combined tracking CSV
-    base_path = Path(project_root) / "data" / "rawdata"
+    base_path = get_data_root() / "rawdata"
     derivatives_dir = base_path.resolve().parent / "derivatives"
     
     # Find subject directory
@@ -1767,7 +1750,7 @@ def load_tracking_with_behavior(subjid, date):
         - 'tracking_labeled': pd.DataFrame with added 'in_trial' column
     """
     # Load tracking data
-    base_path = Path(project_root) / "data" / "rawdata"
+    base_path = get_data_root() / "rawdata"
     derivatives_dir = base_path.resolve().parent / "derivatives"
     
     sub_str = f"sub-{str(subjid).zfill(3)}"
@@ -1976,7 +1959,7 @@ def _load_tracking_and_behavior(subjid, date, tracking_source='auto'):
     --------
     tracking_df, behavior_dict
     """
-    base_path = Path(project_root) / "data" / "rawdata"
+    base_path = get_data_root() / "rawdata"
     derivatives_dir = base_path.resolve().parent / "derivatives"
 
     sub_str = f"sub-{str(subjid).zfill(3)}"
@@ -2561,7 +2544,7 @@ def add_timestamps_to_sleap_tracking(subjid, date, save_output=True):
     import re
     
     # Build path to derivatives directory
-    base_path = Path(project_root) / "data" / "rawdata"
+    base_path = get_data_root() / "rawdata"
     derivatives_dir = base_path.resolve().parent / "derivatives"
     
     # Find subject and session directories
@@ -2754,9 +2737,9 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     --------
     fig, ax : matplotlib figure and axis objects
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    base_path = get_data_root() / "rawdata"
+    server_root = get_data_root()
+    derivatives_dir = get_data_root() / "derivatives"
     
     subj_str = f"sub-{str(subjid).zfill(3)}"
     subject_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
@@ -3341,9 +3324,9 @@ def get_fa_ratio_a_stats(subjid, dates=None, odors=['C', 'F']):
     --------
     DataFrame with columns: date, odor, fa_ratio_a, n_fa_a, n_fa_b, n_total
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    base_path = get_data_root() / "rawdata"
+    server_root = get_data_root()
+    derivatives_dir = get_data_root() / "derivatives"
     
     rows = []
     
@@ -3494,9 +3477,9 @@ def plot_fa_ratio_by_hr_position(
     --------
     fig, axes : matplotlib figure and axes array
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    base_path = get_data_root() / "rawdata"
+    server_root = get_data_root()
+    derivatives_dir = get_data_root() / "derivatives"
     
     # Parse FA type filter
     if isinstance(fa_types, str):
@@ -3883,9 +3866,9 @@ def plot_fa_ratio_by_abort_odor(
     --------
     fig, axes : matplotlib figure and axes array
     """
-    base_path = Path(project_root) / "data" / "rawdata"
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives"
+    base_path = get_data_root() / "rawdata"
+    server_root = get_data_root()
+    derivatives_dir = get_data_root() / "derivatives"
     
     # Parse FA type filter
     if isinstance(fa_types, str):

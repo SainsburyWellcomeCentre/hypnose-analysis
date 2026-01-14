@@ -1,27 +1,15 @@
 import sys
 import os
 from pathlib import Path
-
-def _discover_project_root() -> str:
-    env_override = os.environ.get("HYPNOSE_PROJECT_ROOT")
-    if env_override:
-        return os.path.abspath(env_override)
-
-    current = Path(__file__).resolve().parent
-    for candidate in [current] + list(current.parents):
-        if (candidate / "data" / "rawdata").exists():
-            return str(candidate)
-    return os.path.abspath("")
+from importlib.resources import files
 
 
-project_root = _discover_project_root()
-if project_root not in sys.path:
-    sys.path.append(project_root)
-
-SCHEMA_DIR = Path(project_root) / "device_schemas"
+SCHEMA_DIR = files("hypnose_analysis.resources.device_schemas")
 BEHAVIOR_SCHEMA_PATH = SCHEMA_DIR / "behavior.yml"
 OLFACTOMETER_SCHEMA_PATH = SCHEMA_DIR / "olfactometer.yml"
 
+
+from hypnose_analysis.paths import get_rawdata_root, get_derivatives_root, get_server_root
 import json
 from dotmap import DotMap
 import pandas as pd
@@ -36,8 +24,8 @@ import harp
 import datetime
 from datetime import timezone
 import zoneinfo
-import src.processing.detect_settings as detect_settings
-import src.processing.detect_stage as detect_stage_module
+import hypnose_analysis.processing.detect_settings as detect_settings
+import hypnose_analysis.processing.detect_stage as detect_stage_module
 from datetime import datetime, timezone, date
 from collections import defaultdict
 from bisect import bisect_left, bisect_right
@@ -282,8 +270,8 @@ def load_experiment(subjid, date, index=None):
     Path object to experiment root, or None if selection needed
     """
     
-    base_path = Path(project_root) / "data" / "rawdata"
-    
+    base_path = get_rawdata_root()    
+
     # Format inputs
     subjid_str = f"sub-{str(subjid).zfill(3)}"  
     date_str = str(date)
@@ -3907,9 +3895,13 @@ def _find_rawdata_root(start: Path) -> Path | None:
 
 def resolve_derivatives_output_dir(root) -> tuple[Path, dict]:
     root = Path(root).resolve()
-    rawdata_dir = _find_rawdata_root(root)
-    if rawdata_dir is None:
-        raise ValueError(f"Could not find 'rawdata' in parents of: {root}")
+    rawdata_dir = get_rawdata_root()
+    try: 
+        rel = root.relative_to(rawdata_dir)
+    except ValueError:
+        rawdata_dir = get_rawdata_root()
+        rel = root
+
 
     hypnose_dir = rawdata_dir.parent
     sub_dir = _find_parent_named(root, "sub-")
@@ -3917,7 +3909,7 @@ def resolve_derivatives_output_dir(root) -> tuple[Path, dict]:
     if sub_dir is None or ses_dir is None:
         raise ValueError(f"Could not resolve sub-/ses- from: {root}")
 
-    out_dir = hypnose_dir / "derivatives" / sub_dir.name / ses_dir.name / "saved_analysis_results"
+    out_dir = get_derivatives_root() / sub_dir.name / ses_dir.name / "saved_analysis_results"
     out_dir.mkdir(parents=True, exist_ok=True)
     return out_dir, {
         "hypnose_dir": str(hypnose_dir),
@@ -5173,7 +5165,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
 
             # Detect stage for THIS run
             try:
-                import src.processing.detect_stage as detect_stage_module
+                import hypnose_analysis.processing.detect_stage as detect_stage_module
                 stage = detect_stage_module.detect_stage(root)
             except Exception:
                 stage = {'stage_name': str(root)}
@@ -5484,7 +5476,7 @@ def batch_analyze_sessions(
     - Handles missing subjects/dates gracefully.
     Returns a dict: {(subjid, date): result_dict}
     """
-    base_path = Path(project_root) / "data" / "rawdata"
+    base_path = get_rawdata_root()
     results = {}
 
     # Discover subjects
@@ -5558,7 +5550,7 @@ def cut_video(subjid, date, start_time, end_time, index=None, fps=30, show_odor_
     """
     Cut a video snippet for a subject and date, given start and end time (HH:MM:SS.s).
     """
-    base_path = Path(project_root) / "data" / "rawdata"
+    base_path = get_rawdata_root()
     subjid_str = f"sub-{str(subjid).zfill(3)}"
     date_str = str(date)
     subject_dirs = list(base_path.glob(f"{subjid_str}_id-*"))
@@ -5788,8 +5780,8 @@ def cut_video(subjid, date, start_time, end_time, index=None, fps=30, show_odor_
             images[i] = frame
     
     # ============ Save video ============
-    server_root = base_path.resolve().parent
-    derivatives_dir = server_root / "derivatives" / subject_dir.name / session_dir.name / "video_analysis"
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root() / subject_dir.name / session_dir.name / "video_analysis"
     derivatives_dir.mkdir(parents=True, exist_ok=True)
     out_mp4 = derivatives_dir / f"video_cut_{start_dt.strftime('%H-%M-%S-%f')}_{end_dt.strftime('%H-%M-%S-%f')}.mp4"
     clip = ImageSequenceClip(images, fps=fps)
