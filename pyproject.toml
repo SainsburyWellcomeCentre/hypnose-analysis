@@ -1,12 +1,30 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "hypnose-analysis"
 version = "0.1.0"
+description = "Analysis tools for hypnose experiments"
+readme = "README.md"
+requires-python = "<=3.11"
+
+dependencies = [
+    "numpy<2",
+    "pandas",
+    "matplotlib",
+    "tqdm",
+    "dotmap",
+    "opencv-python",
+    "Pillow",
+    "ipython",
+    "ipywidgets",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
 [tool.setuptools.package-data]
-hypnose_analysis = ["resources/device_schemas/*.yml"]
+hypnose_analysis = [
+    "resources/device_schemas/*.yml",
+]
