@@ -26,7 +26,11 @@ Within your working directory use a terminal to clone the repo to your local fol
 
 ```python -m ipykernel install --user --name=env-name --display-name="Display Name"```
 
-4. Symlink: 
+4. Install dependencies and editable install of hypnose-analysis package
+
+```pip install -e .```
+
+5. Symlink: 
 
 Directories in this repo are resolved with a symlink inside /data pointing to the mounted server containing data. Depending on local structure of mounting the server, the symlink may need adjusting. 
 
