@@ -7,7 +7,7 @@ name = "hypnose-analysis"
 version = "0.1.0"
 description = "Analysis tools for hypnose experiments"
 readme = "README.md"
-requires-python = "<=3.11"
+requires-python = ">=3.10,<3.13" 
 
 dependencies = [
     "numpy<2",
