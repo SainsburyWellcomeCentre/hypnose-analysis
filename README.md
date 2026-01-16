@@ -34,6 +34,21 @@ Within your working directory use a terminal to clone the repo to your local fol
 
 Directories in this repo are resolved with a symlink inside /data pointing to the mounted server containing data. Depending on local structure of mounting the server, the symlink may need adjusting. 
 
+Create SymLink in Windows (*requirement*: ceph server mounted at Z:): 
+
+- Open a PowerShell Terminal as Administrator
+
+- cd into hypnose-analysis (repo main folder)
+
+- Remove any possible existing items in the symlink folder by running  ```Remove-Item -LiteralPath .\data\rawdata -Recurse -Force```
+
+- Non-persistently map the mounted server for this session by running ```net use Z: "\\ceph-gw02.hpc.swc.ucl.ac.uk\harris" /persistent:no```
+ 
+- Confirm path exists by running ```Test-Path "Z:\hypnose\rawdata" ``` should return True
+
+- Create SymLink to ceph data storage by running ```New-Item -ItemType SymbolicLink -Path ".\data\rawdata" -Target "Z:\hypnose\rawdata" ```
+
+- SymLink should appear in the repo folder
 
 ## Running Analysis: 
 
