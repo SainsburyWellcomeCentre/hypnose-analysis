@@ -5,11 +5,16 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib import cm
-from typing import Iterable, Optional, Union
+from typing import Iterable, Optional, Union, Tuple
 from hypnose_analysis.utils.metrics_utils import load_session_results, run_all_metrics, parse_json_column
 from datetime import timedelta, datetime
 from hypnose_analysis.utils.classification_utils import load_all_streams, load_experiment
-from hypnose_analysis.paths import get_data_root
+from hypnose_analysis.paths import (
+    get_data_root,
+    get_rawdata_root,
+    get_derivatives_root,
+    get_server_root,
+)
 import re
 import numpy as np
 import json
@@ -135,7 +140,9 @@ def plot_behavior_metrics(
     *,
     protocol_filter: Optional[str] = None,
     compute_if_missing: bool = False,
-    verbose: bool = True
+    verbose: bool = True,
+    black_white: bool = False,
+    y_range: Optional[Tuple[float, float]] = None,
 ):
     """
     Plot selected metrics over sessions for one or more subjects.
@@ -154,6 +161,7 @@ def plot_behavior_metrics(
     - protocol_filter: Optional substring to filter sessions by protocol.
     - compute_if_missing: If True, compute metrics if missing.
     - verbose: If True, print progress and warnings.
+    - y_range: Optional tuple (ymin, ymax); if provided, sets y-limits for each plot.
 
     Returns:
     - List of matplotlib Figure objects.
@@ -162,9 +170,9 @@ def plot_behavior_metrics(
         raise ValueError("Please provide `variables` (list of metric names or dot-paths).")
 
     rows = []
-    base_path = get_data_root() / "rawdata"
-    server_root = get_data_root()
-    derivatives_dir = get_data_root() / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     # Gather sessions
     for sid, subj_dir in _iter_subject_dirs(derivatives_dir, subjids):
         ses_dirs = _filter_session_dirs(subj_dir, dates)
@@ -208,17 +216,19 @@ def plot_behavior_metrics(
     unique_subj = sorted(df["subjid"].unique())
     subj_to_marker = {sid: markers_cycle[i % len(markers_cycle)] for i, sid in enumerate(unique_subj)}
 
-    # Protocol -> color mapping
+    # Protocol -> color mapping (or mono if black_white)
+    prot_to_color = {}
     unique_protocols = []
-    for p in df["protocol"]:
-        if p not in unique_protocols and p and p != "Unknown":
-            unique_protocols.append(p)
-    if "Unknown" in df["protocol"].unique():
-        unique_protocols.append("Unknown")
-    cmap = cm.get_cmap("tab10", max(10, len(unique_protocols)))
-    prot_to_color = {p: cmap(i % cmap.N) for i, p in enumerate(unique_protocols)}
-    if "Unknown" in prot_to_color:
-        prot_to_color["Unknown"] = (0.6, 0.6, 0.6, 1.0)
+    if not black_white:
+        for p in df["protocol"]:
+            if p not in unique_protocols and p and p != "Unknown":
+                unique_protocols.append(p)
+        if "Unknown" in df["protocol"].unique():
+            unique_protocols.append("Unknown")
+        cmap = cm.get_cmap("tab10", max(10, len(unique_protocols)))
+        prot_to_color = {p: cmap(i % cmap.N) for i, p in enumerate(unique_protocols)}
+        if "Unknown" in prot_to_color:
+            prot_to_color["Unknown"] = (0.6, 0.6, 0.6, 1.0)
 
     figs = []
     # One plot per variable
@@ -229,7 +239,7 @@ def plot_behavior_metrics(
                 print(f"[plot_behavior_metrics] No data for variable '{var}'.")
             continue
 
-        fig, ax = plt.subplots(figsize=(14, 8))
+        fig, ax = plt.subplots(figsize=(12, 9))
         
         # Plot each subject: black connecting line + colored markers per protocol
         for sid in unique_subj:
@@ -237,8 +247,11 @@ def plot_behavior_metrics(
             if dsub.empty:
                 continue
             ax.plot(dsub["session_num"], dsub["value"], color="black", linewidth=1.0, alpha=0.8, zorder=1)
-            # Scatter with subject marker and protocol color
-            colors = dsub["protocol"].map(lambda p: prot_to_color.get(p, (0.6, 0.6, 0.6, 1.0)))
+            # Scatter with subject marker and protocol color (or black/white)
+            if black_white:
+                colors = [(0, 0, 0, 1.0)] * len(dsub)
+            else:
+                colors = dsub["protocol"].map(lambda p: prot_to_color.get(p, (0.6, 0.6, 0.6, 1.0)))
             ax.scatter(
                 dsub["session_num"], dsub["value"],
                 c=list(colors),
@@ -253,6 +266,7 @@ def plot_behavior_metrics(
         # X-axis: session numbers with sparse labels
         session_nums = sorted(df_var["session_num"].unique())
         n_sessions = len(session_nums)
+        max_session = session_nums[-1] if session_nums else 0
         
         # Determine tick spacing (every 5-10 sessions)
         if n_sessions <= 10:
@@ -270,16 +284,18 @@ def plot_behavior_metrics(
         x_ticks = [i for i in session_nums if i % tick_spacing == 0]
         ax.set_xticks(x_ticks)
         ax.set_xticklabels([str(i) for i in x_ticks])
-        ax.set_xlim([0.5, n_sessions + 0.5])
+        ax.set_xlim([0.5, max_session + 0.5])
+        if y_range is not None and len(y_range) == 2:
+            ax.set_ylim(y_range)
         
         # Format title: split by "_" and capitalize each word
         title_formatted = " ".join(word.capitalize() for word in var.split(".")[0].split("_")) + (f" ({var.split('.')[1].capitalize()})" if '.' in var else "")
 
         
-        ax.set_xlabel("Session Number", fontsize=16, fontweight='bold')
-        ax.set_ylabel(var.replace("_", " ").title(), fontsize=16, fontweight='bold')
-        ax.set_title(title_formatted, fontsize=16, fontweight='bold')
-        ax.tick_params(axis='both', labelsize=12)
+        ax.set_xlabel("Session Number", fontsize=30, fontweight='bold')
+        ax.set_ylabel(var.replace("_", " ").title(), fontsize=30, fontweight='bold')
+        ax.set_title(title_formatted, fontsize=20, fontweight='bold')
+        ax.tick_params(axis='both', labelsize=20)
         
         # Make axes bold
         ax.spines['left'].set_linewidth(2)
@@ -303,11 +319,11 @@ def plot_behavior_metrics(
                    label=f"sub-{sid:03d}")
             for sid in unique_subj
         ]
-        protocol_handles = [
+        protocol_handles = [] if black_white else [
             Line2D([0], [0],
                    marker='o',
                    color='none', linestyle="",
-                   markerfacecolor=prot_to_color[p],
+                   markerfacecolor=prot_to_color.get(p, (0, 0, 0, 1)),
                    markeredgecolor="black",
                    markersize=7,
                    label=p)
@@ -326,7 +342,7 @@ def plot_behavior_metrics(
 
     return figs
 
-def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_path=None, plot_choice_acc=False):
+def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_path=None, plot_choice_acc=False, plot_AB=True):
     """
     Plot decision accuracy by odor (A, B) and total over dates.
     Optionally include global choice accuracy as a separate line.
@@ -344,16 +360,63 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
         Path to save the figure. If None, figure is not saved.
     plot_choice_acc : bool, optional
         If True, also plot global choice accuracy as a dark grey line (default: False)
+    plot_AB : bool, optional
+        If True, plot odor-specific accuracies for A and B (default: True). If False, omit A/B lines.
     
     Returns:
     --------
     fig, ax : matplotlib figure and axes
     """
     rows = []
-    base_path = get_data_root() / "rawdata"
-    server_root = get_data_root()
-    derivatives_dir = get_data_root() / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
+    def _normalize_odor_label(odor_raw):
+        """Map assorted odor keys to canonical labels (A/B/Total/other)."""
+        if isinstance(odor_raw, (int, float)) and not np.isnan(odor_raw):
+            val = int(odor_raw)
+            if val in (0, 1):
+                return "A" if val == 0 else "B"
+        if isinstance(odor_raw, str):
+            raw = odor_raw.strip()
+            lower = raw.lower()
+            base = lower.replace("odor", "").replace("_", "").replace(" ", "")
+            if base in {"a", "1", "01"}:
+                return "A"
+            if base in {"b", "2", "02"}:
+                return "B"
+            if lower in {"total", "overall"}:
+                return "Total"
+        return str(odor_raw)
+
+    def _collect_odor_acc_rows(acc_block, date_int):
+        """Handle both legacy flat dicts and new nested decision_accuracy_by_odor blocks."""
+        collected = []
+
+        def add_from_dict(dct):
+            for odor, acc in dct.items():
+                if isinstance(acc, (int, float)) and not np.isnan(acc):
+                    collected.append({
+                        "date": date_int,
+                        "odor": _normalize_odor_label(odor),
+                        "accuracy": float(acc)
+                    })
+
+        if not isinstance(acc_block, dict):
+            return collected
+
+        if "decision_accuracy_ab" in acc_block:
+            add_from_dict(acc_block.get("decision_accuracy_ab", {}))
+        if "decision_accuracy_total" in acc_block:
+            add_from_dict(acc_block.get("decision_accuracy_total", {}))
+
+        # If neither of the new-schema keys are present, assume legacy flat mapping
+        if not collected:
+            add_from_dict(acc_block)
+
+        return collected
+
     for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
         ses_dirs = _filter_session_dirs(subj_dir, dates)
         for ses in ses_dirs:
@@ -370,14 +433,8 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
             acc_by_odor = metrics.get('decision_accuracy_by_odor', {})
             acc_total = _extract_metric_value(metrics, 'decision_accuracy')
             
-            # Add odor-specific accuracies
-            for odor, acc in acc_by_odor.items():
-                if isinstance(acc, (int, float)) and not np.isnan(acc):
-                    rows.append({
-                        "date": int(date_str),
-                        "odor": str(odor),
-                        "accuracy": float(acc)
-                    })
+            # Add odor-specific accuracies (supports legacy flat dict and new nested schema)
+            rows.extend(_collect_odor_acc_rows(acc_by_odor, int(date_str)))
             
             # Add total accuracy
             if isinstance(acc_total, (int, float)) and not np.isnan(acc_total):
@@ -410,35 +467,49 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
     
     fig, ax = plt.subplots(figsize=figsize)
     
-    colors = {'A': '#FF6B6B', 'B': '#4ECDC4', 'Total': 'black', 'Global Choice Accuracy': '#404040'}
-    linewidths = {'A': 1.5, 'B': 1.5, 'Total': 3, 'Global Choice Accuracy': 2.5}
+    colors = {'A': '#FF6B6B', 'B': '#4ECDC4', 'Total': 'black', 'Global Choice Accuracy': 'darkgreen'}
+    linewidths = {'A': 1.5, 'B': 1.5, 'Total': 4, 'Global Choice Accuracy': 3.5}
     markers = {'A': 'o', 'B': 'o', 'Total': 's', 'Global Choice Accuracy': '^'}
     linestyles = {'A': '-', 'B': '-', 'Total': '-', 'Global Choice Accuracy': '--'}
     
-    # Determine which odors to plot
-    odors_to_plot = ['A', 'B', 'Total']
-    if plot_choice_acc:
-        odors_to_plot.append('Global Choice Accuracy')
+    # Determine which odors to plot (restricted set)
+    unique_odors = set(df["odor"].unique())
+    odors_to_plot = []
+    if plot_AB:
+        for base in ["A", "B"]:
+            if base in unique_odors:
+                odors_to_plot.append(base)
+    if "Total" in unique_odors:
+        odors_to_plot.append("Total")
+    if plot_choice_acc and "Global Choice Accuracy" in unique_odors:
+        odors_to_plot.append("Global Choice Accuracy")
     
     for odor in odors_to_plot:
         subset = df[df["odor"] == odor]
-        if not subset.empty:
-            ax.plot(subset["x"].values, subset["accuracy"].values, 
-                   label=odor,
-                   color=colors.get(odor, '#999999'),
-                   linewidth=linewidths.get(odor, 1.5),
-                   linestyle=linestyles.get(odor, '-'),
-                   marker=markers.get(odor, 'o'),
-                   markersize=4 if odor != 'Total' and odor != 'Global Choice Accuracy' else 6,
-                   alpha=0.7 if odor != 'Total' and odor != 'Global Choice Accuracy' else 0.8,
-                   zorder=10 if odor in ['Total', 'Global Choice Accuracy'] else 1)
+        if subset.empty:
+            continue
+        ax.plot(subset["x"].values, subset["accuracy"].values, 
+                label=odor,
+                color=colors.get(odor, '#999999'),
+                linewidth=linewidths.get(odor, 1.5),
+                linestyle=linestyles.get(odor, '-'),
+                marker=markers.get(odor, 'o'),
+                markersize=4 if odor not in ('Total', 'Global Choice Accuracy') else 6,
+                alpha=0.7 if odor not in ('Total', 'Global Choice Accuracy') else 0.8,
+                zorder=10 if odor in ('Total', 'Global Choice Accuracy') else 1)
     
-    ax.set_xlabel('Days', fontsize=12)
-    ax.set_ylabel('Accuracy', fontsize=12)
+    ax.set_xlabel('Days', fontsize=30, fontweight='bold')
+    ax.set_ylabel('Accuracy', fontsize=30, fontweight='bold')
+    ax.tick_params(axis='both', labelsize=26)
     ax.set_ylim([0, 1.05])
     ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1, alpha=0.3)
-    ax.grid(True, alpha=0.3)
-    ax.legend(loc='best', fontsize=10)
+    ax.legend(loc='best', fontsize=20)
+    ax.spines['left'].set_linewidth(2)
+    ax.spines['bottom'].set_linewidth(2)
+        
+    # Remove upper and right spines
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
     title = f"Subject {str(subjid).zfill(3)} - Decision Accuracy by Odor"
     if plot_choice_acc:
         title += " (with Global Choice Accuracy)"
@@ -456,9 +527,9 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
     Plot sampling times (poke durations) by position and by odor for completed and aborted trials.
     OPTIMIZED: Vectorized JSON parsing instead of row-by-row loops.
     """
-    base_path = get_data_root() / "rawdata"
-    server_root = get_data_root()
-    derivatives_dir = get_data_root() / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
     rows = []
     
@@ -753,9 +824,9 @@ def plot_abortion_and_fa_rates(
         - 'All' : all FA types starting with 'FA_'
         (default: 'FA_Time_In')
     """
-    base_path = get_data_root() / "rawdata"
-    server_root = get_data_root()
-    derivatives_dir = get_data_root() / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
     # DEFINE fa_filter_fn HERE - BEFORE THE LOOPS
     if isinstance(fa_types, str):
@@ -1137,9 +1208,9 @@ def plot_response_times_completed_vs_fa(subjid, dates=None, figsize=(12, 8), y_l
     --------
     fig, ax : matplotlib figure and axes
     """
-    base_path = get_data_root() / "rawdata"
-    server_root = get_data_root()
-    derivatives_dir = get_data_root() / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
     rows = []
     
@@ -1239,9 +1310,9 @@ def plot_fa_ratio_a_over_sessions(
     
     Parameters similar to original, but now loads only necessary data.
     """
-    base_path = get_data_root() / "rawdata"
-    server_root = get_data_root()
-    derivatives_dir = get_data_root() / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
     fa_data = {}  # {odor: [(session_num, ratio, n_a, n_b, n_total), ...]}
     
@@ -1422,9 +1493,9 @@ def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), t
         session_info = []
 
         # Find subject directory
-        base_path = get_data_root() / "rawdata"
-        server_root = get_data_root()
-        derivatives_dir = get_data_root() / "derivatives"
+        base_path = get_rawdata_root()
+        server_root = get_server_root()
+        derivatives_dir = get_derivatives_root()
         subj_str = f"sub-{str(subjid).zfill(3)}"
         subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
         if not subj_dirs:
