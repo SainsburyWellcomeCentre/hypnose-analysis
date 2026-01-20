@@ -263,6 +263,8 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         metrics['hidden_rule_performance'] = hidden_rule_performance(results)
         print("\n--- Hidden Rule Detection Rate ---")
         metrics['hidden_rule_detection_rate'] = hidden_rule_detection_rate(results)
+        print("\n--- Hidden Rule Performance/Detection by Odor ---")
+        metrics['hidden_rule_by_odor'] = hidden_rule_counts_by_odor(results)
         print("\n--- Choice Timeout Rate ---")
         metrics['choice_timeout_rate'] = choice_timeout_rate(results)
         print("\n--- Average Sampling Time per Odor (Completed) ---")
@@ -968,6 +970,283 @@ def hidden_rule_detection_rate(results):
     )
     print(f"Hidden Rule Detection Rate: {n_hr_completed}/{denom} = {n_hr_completed/denom if denom>0 else np.nan:.3f}")
     return n_hr_completed, denom, n_hr_completed / denom if denom > 0 else np.nan
+
+
+def _extract_hr_config(results):
+    """Return (hr_odors, hr_positions) from session metadata or results dict if available."""
+    # Prefer values already attached to results by classification
+    hr_odors = results.get("hidden_rule_odors") or []
+    if isinstance(hr_odors, str):
+        hr_odors = [hr_odors]
+
+    hr_positions = results.get("hidden_rule_positions") or []
+    if isinstance(hr_positions, (int, float)):
+        hr_positions = [hr_positions]
+
+    manifest = results.get("manifest", {}) or {}
+    manifest_params = manifest.get("params", {}) if isinstance(manifest, dict) else {}
+    manifest_session = manifest.get("session", {}) if isinstance(manifest, dict) else {}
+
+    # Fallback to summary params
+    summary = results.get("summary", {}) or {}
+    params = summary.get("params", {}) if isinstance(summary, dict) else {}
+    if not hr_odors:
+        hr_odors = (
+            params.get("hidden_rule_odors")
+            or params.get("hiddenrule_odors")
+            or manifest_params.get("hidden_rule_odors")
+            or manifest_params.get("hiddenrule_odors")
+            or manifest_session.get("hidden_rule_odors")
+            or manifest.get("hidden_rule_odors")
+            or []
+        )
+        if isinstance(hr_odors, str):
+            hr_odors = [hr_odors]
+    hr_odors = [str(o) for o in hr_odors if o]
+
+    if not hr_positions:
+        hr_positions = (
+            params.get("hidden_rule_positions")
+            or params.get("hiddenrule_positions")
+            or manifest_params.get("hidden_rule_positions")
+            or manifest_params.get("hiddenrule_positions")
+            or manifest_session.get("hidden_rule_positions")
+            or manifest.get("hidden_rule_positions")
+            or []
+        )
+        if isinstance(hr_positions, (int, float)):
+            hr_positions = [hr_positions]
+
+    hr_pos_clean = []
+    hr_iter = hr_positions if isinstance(hr_positions, (list, tuple)) else []
+    for pos in hr_iter:
+        try:
+            hr_pos_clean.append(int(pos))
+        except Exception:
+            continue
+    return hr_odors, hr_pos_clean
+
+
+def _is_truthy(val):
+    if isinstance(val, bool):
+        return val
+    if isinstance(val, (int, float)):
+        try:
+            return not math.isnan(val) and val != 0
+        except Exception:
+            return val != 0
+    if isinstance(val, str):
+        return val.strip().lower() in {"1", "true", "t", "yes", "y"}
+    return False
+
+
+def _hr_odors_in_row_from_sequence(row, hr_odors_set):
+    """Return list of HR odors present in the row's odor sequence."""
+
+    def _coerce_list(val):
+        parsed = parse_json_column(val)
+        if isinstance(parsed, (list, tuple)):
+            return list(parsed)
+        if isinstance(parsed, str):
+            try:
+                lit = ast.literal_eval(parsed)
+                if isinstance(lit, (list, tuple)):
+                    return list(lit)
+            except Exception:
+                pass
+            return [parsed]
+        return []
+
+    seq = []
+    for key in ["odor_sequence", "odor_sequence_full", "odor_sequence_list"]:
+        if key in row:
+            seq = _coerce_list(row.get(key))
+            if seq:
+                break
+
+    if not seq and "hidden_rule_odors" in row:
+        seq = _coerce_list(row.get("hidden_rule_odors"))
+
+    hits = []
+    seen = set()
+    allowed = hr_odors_set or None  # None means accept all odors found
+    for od in seq:
+        s = str(od)
+        if allowed is not None and s not in allowed:
+            continue
+        if s not in seen:
+            seen.add(s)
+            hits.append(s)
+    return hits
+
+
+def _infer_hr_odors_from_row(row, hr_odors, hr_positions):
+    """Best-effort identification of HR odor(s) for a trial row. Returns list of candidates."""
+
+    def _parse_seq(val):
+        seq = parse_json_column(val)
+        if isinstance(seq, (list, tuple)):
+            return list(seq)
+        if isinstance(seq, str):
+            try:
+                return list(ast.literal_eval(seq)) if seq.strip() else []
+            except Exception:
+                return [seq]
+        return []
+
+    seq_fields = ["odor_sequence", "odor_sequence_full", "odor_sequence_list"]
+    seq = []
+    for key in seq_fields:
+        if key in row:
+            seq = _parse_seq(row.get(key))
+            if seq:
+                break
+
+    # Per-row hidden rule positions, if present
+    hr_pos_row = _parse_seq(row.get("hidden_rule_positions")) if "hidden_rule_positions" in row else []
+    hr_pos_row_int = []
+    for p in hr_pos_row if isinstance(hr_pos_row, (list, tuple)) else []:
+        try:
+            hr_pos_row_int.append(int(p))
+        except Exception:
+            continue
+
+    positions_to_use = hr_pos_row_int or hr_positions
+
+    found = []
+
+    # Try using positions to pick odor from sequence
+    if seq and positions_to_use:
+        for pos in positions_to_use:
+            idx = pos - 1
+            if 0 <= idx < len(seq):
+                candidate = seq[idx]
+                if candidate is not None:
+                    found.append(candidate)
+
+    # If we have HR odor list, look for unique match in sequence
+    if not found and seq and hr_odors:
+        matches = [o for o in seq if o in hr_odors]
+        if matches:
+            found.extend(matches)
+
+    # Hidden-rule-specific columns
+    for key in ["hidden_rule_odor", "hidden_rule_odors"]:
+        if key in row:
+            vals = _parse_seq(row.get(key))
+            if vals:
+                found.extend(vals)
+
+    # Fallback: last odor name
+    for key in ["last_odor_name", "last_odor"]:
+        if key in row:
+            val = row.get(key)
+            if val:
+                found.append(val)
+
+    # Normalize and deduplicate while preserving order
+    out = []
+    seen = set()
+    for od in found:
+        if od is None:
+            continue
+        s = str(od)
+        if s not in seen:
+            seen.add(s)
+            out.append(s)
+
+    return out or ["Unknown"]
+
+
+def hidden_rule_counts_by_odor(results):
+    """
+    Aggregate HR trials by odor across outcome categories to support per-odor performance/detection.
+    Returns a dict with hr_odors, hr_positions, and per-odor counts plus rates.
+    """
+    hr_odors, hr_positions = _extract_hr_config(results)
+    hr_set = set(hr_odors)
+    counts = defaultdict(lambda: defaultdict(int))
+
+    # Pre-seed known HR odors to ensure they appear even if zero counts
+    for od in hr_odors:
+        _ = counts[od]
+
+    seen_odors = set(hr_odors)
+
+    def _count_df(df, label, require_hit_hidden_rule=False):
+        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+            return
+        for _, row in df.iterrows():
+            if require_hit_hidden_rule and not _is_truthy(row.get("hit_hidden_rule", False)):
+                continue
+            hits = _hr_odors_in_row_from_sequence(row, hr_set)
+            if not hits:
+                continue
+            for od in hits:
+                seen_odors.add(od)
+                counts[od][label] += 1
+
+    # Rewarded / Unrewarded HR trials
+    _count_df(results.get("completed_sequence_HR_rewarded", pd.DataFrame()), "rewarded")
+    _count_df(results.get("completed_sequence_HR_unrewarded", pd.DataFrame()), "unrewarded")
+
+    # Timeout trials: prefer HR-specific table; otherwise filter general timeouts on hit_hidden_rule
+    timeout_df_hr = results.get("completed_sequence_HR_reward_timeout", pd.DataFrame())
+    if isinstance(timeout_df_hr, pd.DataFrame) and not timeout_df_hr.empty:
+        _count_df(timeout_df_hr, "timeout")
+    else:
+        timeout_df = results.get("completed_sequence_reward_timeout", pd.DataFrame())
+        _count_df(timeout_df, "timeout", require_hit_hidden_rule=True)
+
+    # Missed/aborted HR trials (when available)
+    _count_df(results.get("completed_sequences_HR_missed", pd.DataFrame()), "missed")
+    _count_df(results.get("aborted_sequences_HR", pd.DataFrame()), "aborted")
+
+    def _fmt_rate(val):
+        return f"{val:.3f}" if isinstance(val, (int, float, np.floating)) and not np.isnan(val) else "nan"
+
+    by_odor = {}
+    for odor in sorted(seen_odors):
+        c = counts.get(odor, {})
+        rewarded = c.get("rewarded", 0)
+        unrewarded = c.get("unrewarded", 0)
+        timeout = c.get("timeout", 0)
+        missed = c.get("missed", 0)
+        aborted = c.get("aborted", 0)
+
+        completed = rewarded + unrewarded + timeout
+        total_all = completed + missed + aborted
+
+        performance = rewarded / completed if completed > 0 else np.nan
+        detection_rate = completed / total_all if total_all > 0 else np.nan
+
+        print(
+            f"Hidden Rule Odor {odor}: {rewarded} Rewarded, {unrewarded} Unrewarded, {timeout} Timeout, {total_all} Total Presentations."
+        )
+        print(
+            f"  HR Odor {odor} Performance: {rewarded}/{completed} = {_fmt_rate(performance)}, "
+            f"HR Odor {odor} Detection Rate: {completed}/{total_all} = {_fmt_rate(detection_rate)}"
+        )
+
+        by_odor[odor] = {
+            "rewarded": int(rewarded),
+            "unrewarded": int(unrewarded),
+            "timeout": int(timeout),
+            "missed": int(missed),
+            "aborted": int(aborted),
+            "completed_total": int(completed),
+            "total": int(total_all),
+            "performance": performance,
+            "performance_fraction": [int(rewarded), int(completed)],
+            "detection_rate": detection_rate,
+            "detection_fraction": [int(completed), int(total_all)],
+        }
+
+    return {
+        "hr_odors": sorted(seen_odors),
+        "hr_positions": hr_positions,
+        "by_odor": by_odor,
+    }
 
 def choice_timeout_rate(results):
     comp_tmo = results.get("completed_sequence_reward_timeout", pd.DataFrame())
