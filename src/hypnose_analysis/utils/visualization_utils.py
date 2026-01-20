@@ -270,14 +270,47 @@ def plot_behavior_metrics(
 
         # Series handling: when plotting HR detection, allow per-odor series; otherwise single "Total"
         series_values = sorted(df_var["series"].unique()) if "series" in df_var.columns else ["Total"]
-        if black_white:
+
+        # Define default palette for per-HR-odor series (C->B color, F->A color)
+        odor_a_color = '#FF6B6B'  # same as odor A in plot_decision_accuracy_by_odor
+        odor_b_color = '#4ECDC4'  # same as odor B in plot_decision_accuracy_by_odor
+
+        def _map_series_color(series_label: str):
+            lbl = str(series_label).lower()
+            letters = [ch for ch in lbl if ch.isalpha()]
+            last = letters[-1] if letters else ""
+            if lbl == "total":
+                return "black"
+            if last == "f":  # HR odor F -> odor A color
+                return odor_a_color
+            if last == "c":  # HR odor C -> odor B color
+                return odor_b_color
+            if last == "a":
+                return odor_a_color
+            if last == "b":
+                return odor_b_color
+            return None
+
+        hr_series_mode = (plot_HR_separately and var == "hidden_rule_detection_rate")
+
+        if hr_series_mode:
+            # Always use colored series with solid lines; Total is thick black
+            series_to_color = {s: (_map_series_color(s) or "black") for s in series_values}
+            series_to_ls = {s: "-" for s in series_values}
+            series_to_lw = {s: (3.0 if s == "Total" else 1.8) for s in series_values}
+        elif black_white:
             series_to_color = {s: (0, 0, 0, 1.0) for s in series_values}
             linestyle_cycle = ["-", "--", ":", "-."]
             series_to_ls = {s: linestyle_cycle[i % len(linestyle_cycle)] for i, s in enumerate(series_values)}
+            series_to_lw = {s: (2.5 if s == "Total" else 1.2) for s in series_values}
         else:
             series_cmap = cm.get_cmap("tab20", max(3, len(series_values)))
-            series_to_color = {s: series_cmap(i % series_cmap.N) for i, s in enumerate(series_values)}
+            series_to_color = {}
+            for i, s in enumerate(series_values):
+                mapped = _map_series_color(s)
+                series_to_color[s] = mapped if mapped is not None else series_cmap(i % series_cmap.N)
             series_to_ls = {s: "-" for s in series_values}
+            series_to_lw = {s: (2.5 if s == "Total" else 1.5) for s in series_values}
 
         # Plot each series per subject
         for series in series_values:
@@ -288,7 +321,8 @@ def plot_behavior_metrics(
                     continue
                 color = series_to_color.get(series, "black")
                 ls = series_to_ls.get(series, "-")
-                ax.plot(dsub["session_num"], dsub["value"], color=color, linestyle=ls, linewidth=1.0, alpha=0.8, zorder=1)
+                lw = series_to_lw.get(series, 1.0)
+                ax.plot(dsub["session_num"], dsub["value"], color=color, linestyle=ls, linewidth=lw, alpha=0.8, zorder=1)
                 # Scatter with subject marker; color by series to distinguish odors
                 ax.scatter(
                     dsub["session_num"], dsub["value"],
@@ -363,12 +397,14 @@ def plot_behavior_metrics(
             for s in series_values:
                 color = series_to_color.get(s, (0, 0, 0, 1))
                 ls = series_to_ls.get(s, "-")
+                lw = series_to_lw.get(s, 1.0)
                 series_handles.append(
                     Line2D(
                         [0], [0],
                         marker='o',
                         color=color,
                         linestyle=ls,
+                        linewidth=lw,
                         markerfacecolor='white' if black_white else color,
                         markeredgecolor="black",
                         markersize=7,

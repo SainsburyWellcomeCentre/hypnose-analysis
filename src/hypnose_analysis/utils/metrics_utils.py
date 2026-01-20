@@ -1214,18 +1214,19 @@ def hidden_rule_counts_by_odor(results):
         missed = c.get("missed", 0)
         aborted = c.get("aborted", 0)
 
-        completed = rewarded + unrewarded + timeout
-        total_all = completed + missed + aborted
+        completed_no_timeout = rewarded + unrewarded
+        completed_with_timeout = completed_no_timeout + timeout
+        total_all = completed_with_timeout + missed + aborted
 
-        performance = rewarded / completed if completed > 0 else np.nan
-        detection_rate = completed / total_all if total_all > 0 else np.nan
+        performance = rewarded / completed_no_timeout if completed_no_timeout > 0 else np.nan
+        detection_rate = completed_no_timeout / total_all if total_all > 0 else np.nan
 
         print(
             f"Hidden Rule Odor {odor}: {rewarded} Rewarded, {unrewarded} Unrewarded, {timeout} Timeout, {total_all} Total Presentations."
         )
         print(
-            f"  HR Odor {odor} Performance: {rewarded}/{completed} = {_fmt_rate(performance)}, "
-            f"HR Odor {odor} Detection Rate: {completed}/{total_all} = {_fmt_rate(detection_rate)}"
+            f"  HR Odor {odor} Performance: {rewarded}/{completed_no_timeout} = {_fmt_rate(performance)}, "
+            f"HR Odor {odor} Detection Rate: {completed_no_timeout}/{total_all} = {_fmt_rate(detection_rate)}"
         )
 
         by_odor[odor] = {
@@ -1234,12 +1235,13 @@ def hidden_rule_counts_by_odor(results):
             "timeout": int(timeout),
             "missed": int(missed),
             "aborted": int(aborted),
-            "completed_total": int(completed),
+            "completed_total": int(completed_with_timeout),
+            "completed_no_timeout": int(completed_no_timeout),
             "total": int(total_all),
             "performance": performance,
-            "performance_fraction": [int(rewarded), int(completed)],
+            "performance_fraction": [int(rewarded), int(completed_no_timeout)],
             "detection_rate": detection_rate,
-            "detection_fraction": [int(completed), int(total_all)],
+            "detection_fraction": [int(completed_no_timeout), int(total_all)],
         }
 
     return {
