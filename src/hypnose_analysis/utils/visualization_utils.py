@@ -143,6 +143,8 @@ def plot_behavior_metrics(
     verbose: bool = True,
     black_white: bool = False,
     y_range: Optional[Tuple[float, float]] = None,
+    plot_HR_separately: bool = False,
+    show_title: bool = True,
 ):
     """
     Plot selected metrics over sessions for one or more subjects.
@@ -162,6 +164,8 @@ def plot_behavior_metrics(
     - compute_if_missing: If True, compute metrics if missing.
     - verbose: If True, print progress and warnings.
     - y_range: Optional tuple (ymin, ymax); if provided, sets y-limits for each plot.
+    - plot_HR_separately: If True and plotting hidden_rule_detection_rate, also plot per-HR-odor detection alongside total.
+    - show_title: If False, omit the plot title (useful for tighter layouts).
 
     Returns:
     - List of matplotlib Figure objects.
@@ -201,8 +205,29 @@ def plot_behavior_metrics(
                         "date_str": str(date_str),
                         "protocol": str(protocol) if protocol else "Unknown",
                         "variable": var,
-                        "value": float(val)
+                        "value": float(val),
+                        "series": "Total",
                     })
+
+                # If requested, add per-HR-odor detection rates
+                if plot_HR_separately and var == "hidden_rule_detection_rate":
+                    hr_block = metrics.get("hidden_rule_by_odor", {}) if isinstance(metrics, dict) else {}
+                    by_odor = hr_block.get("by_odor", {}) if isinstance(hr_block, dict) else {}
+                    for odor, stats in by_odor.items():
+                        dr = None
+                        if isinstance(stats, dict):
+                            dr = stats.get("detection_rate")
+                        if isinstance(dr, (int, float)) and not np.isnan(dr):
+                            rows.append({
+                                "subjid": int(sid),
+                                "session_num": session_num,
+                                "date": int(date_str) if str(date_str).isdigit() else date_str,
+                                "date_str": str(date_str),
+                                "protocol": str(protocol) if protocol else "Unknown",
+                                "variable": var,
+                                "value": float(dr),
+                                "series": str(odor),
+                            })
 
     if not rows:
         if verbose:
@@ -210,6 +235,8 @@ def plot_behavior_metrics(
         return []
 
     df = pd.DataFrame(rows)
+    if "series" not in df.columns:
+        df["series"] = "Total"
     
     # Subject -> marker mapping
     markers_cycle = ['o', '^', 's', 'X', 'D', 'P', 'v', '>', '<', '*', 'h', 'H', '8', 'p', 'x']
@@ -240,28 +267,38 @@ def plot_behavior_metrics(
             continue
 
         fig, ax = plt.subplots(figsize=(12, 9))
-        
-        # Plot each subject: black connecting line + colored markers per protocol
-        for sid in unique_subj:
-            dsub = df_var[df_var["subjid"] == sid].sort_values("session_num")
-            if dsub.empty:
-                continue
-            ax.plot(dsub["session_num"], dsub["value"], color="black", linewidth=1.0, alpha=0.8, zorder=1)
-            # Scatter with subject marker and protocol color (or black/white)
-            if black_white:
-                colors = [(0, 0, 0, 1.0)] * len(dsub)
-            else:
-                colors = dsub["protocol"].map(lambda p: prot_to_color.get(p, (0.6, 0.6, 0.6, 1.0)))
-            ax.scatter(
-                dsub["session_num"], dsub["value"],
-                c=list(colors),
-                marker=subj_to_marker[sid],
-                edgecolors="black",
-                linewidths=0.5,
-                s=40,
-                zorder=2,
-                label=f"sub-{sid:03d}"
-            )
+
+        # Series handling: when plotting HR detection, allow per-odor series; otherwise single "Total"
+        series_values = sorted(df_var["series"].unique()) if "series" in df_var.columns else ["Total"]
+        if black_white:
+            series_to_color = {s: (0, 0, 0, 1.0) for s in series_values}
+            linestyle_cycle = ["-", "--", ":", "-."]
+            series_to_ls = {s: linestyle_cycle[i % len(linestyle_cycle)] for i, s in enumerate(series_values)}
+        else:
+            series_cmap = cm.get_cmap("tab20", max(3, len(series_values)))
+            series_to_color = {s: series_cmap(i % series_cmap.N) for i, s in enumerate(series_values)}
+            series_to_ls = {s: "-" for s in series_values}
+
+        # Plot each series per subject
+        for series in series_values:
+            df_series = df_var[df_var.get("series", "Total") == series]
+            for sid in unique_subj:
+                dsub = df_series[df_series["subjid"] == sid].sort_values("session_num")
+                if dsub.empty:
+                    continue
+                color = series_to_color.get(series, "black")
+                ls = series_to_ls.get(series, "-")
+                ax.plot(dsub["session_num"], dsub["value"], color=color, linestyle=ls, linewidth=1.0, alpha=0.8, zorder=1)
+                # Scatter with subject marker; color by series to distinguish odors
+                ax.scatter(
+                    dsub["session_num"], dsub["value"],
+                    c=[color] * len(dsub),
+                    marker=subj_to_marker[sid],
+                    edgecolors="black",
+                    linewidths=0.5,
+                    s=40,
+                    zorder=2,
+                )
 
         # X-axis: session numbers with sparse labels
         session_nums = sorted(df_var["session_num"].unique())
@@ -292,9 +329,10 @@ def plot_behavior_metrics(
         title_formatted = " ".join(word.capitalize() for word in var.split(".")[0].split("_")) + (f" ({var.split('.')[1].capitalize()})" if '.' in var else "")
 
         
-        ax.set_xlabel("Session Number", fontsize=30, fontweight='bold')
+        ax.set_xlabel("Days", fontsize=30, fontweight='bold')
         ax.set_ylabel(var.replace("_", " ").title(), fontsize=30, fontweight='bold')
-        ax.set_title(title_formatted, fontsize=20, fontweight='bold')
+        if show_title:
+            ax.set_title(title_formatted, fontsize=20, fontweight='bold')
         ax.tick_params(axis='both', labelsize=20)
         
         # Make axes bold
@@ -308,7 +346,7 @@ def plot_behavior_metrics(
         # No grid
         ax.grid(False)
 
-        # Build separate legends: subjects (markers) and protocols (colors)
+        # Build legends: subjects (markers) and either protocols or series (colors)
         subject_handles = [
             Line2D([0], [0],
                    marker=subj_to_marker[sid],
@@ -319,22 +357,45 @@ def plot_behavior_metrics(
                    label=f"sub-{sid:03d}")
             for sid in unique_subj
         ]
-        protocol_handles = [] if black_white else [
-            Line2D([0], [0],
-                   marker='o',
-                   color='none', linestyle="",
-                   markerfacecolor=prot_to_color.get(p, (0, 0, 0, 1)),
-                   markeredgecolor="black",
-                   markersize=7,
-                   label=p)
-            for p in unique_protocols
-        ]
+
+        series_handles = []
+        if len(series_values) > 1:
+            for s in series_values:
+                color = series_to_color.get(s, (0, 0, 0, 1))
+                ls = series_to_ls.get(s, "-")
+                series_handles.append(
+                    Line2D(
+                        [0], [0],
+                        marker='o',
+                        color=color,
+                        linestyle=ls,
+                        markerfacecolor='white' if black_white else color,
+                        markeredgecolor="black",
+                        markersize=7,
+                        label=s,
+                    )
+                )
+
+        protocol_handles = []
+        if not series_handles and not black_white:
+            protocol_handles = [
+                Line2D([0], [0],
+                       marker='o',
+                       color='none', linestyle="",
+                       markerfacecolor=prot_to_color.get(p, (0, 0, 0, 1)),
+                       markeredgecolor="black",
+                       markersize=7,
+                       label=p)
+                for p in unique_protocols
+            ]
 
         # Place legends
         if subject_handles:
             leg1 = ax.legend(handles=subject_handles, title="Subjects", loc="upper left", bbox_to_anchor=(1.02, 1.0))
             ax.add_artist(leg1)
-        if protocol_handles:
+        if series_handles:
+            ax.legend(handles=series_handles, title="HR Series", loc="lower left", bbox_to_anchor=(1.02, 0.0))
+        elif protocol_handles:
             ax.legend(handles=protocol_handles, title="Protocols", loc="lower left", bbox_to_anchor=(1.02, 0.0))
 
         plt.tight_layout()
