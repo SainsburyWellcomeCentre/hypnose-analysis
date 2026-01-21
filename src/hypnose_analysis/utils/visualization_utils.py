@@ -619,7 +619,7 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
     
     return fig, ax
 
-def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
+def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 18)):
     """
     Plot sampling times (poke durations) by position and by odor for completed and aborted trials.
     OPTIMIZED: Vectorized JSON parsing instead of row-by-row loops.
@@ -632,7 +632,7 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
     
     for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
         ses_dirs = _filter_session_dirs(subj_dir, dates)
-        for ses in ses_dirs:
+        for session_num, ses in enumerate(ses_dirs, start=1):
             date_str = ses.name.split("_date-")[-1]
             results_dir = ses / "saved_analysis_results"
             if not results_dir.exists():
@@ -689,7 +689,9 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
                             "trial_type": "completed",
                             "position": position,
                             "odor": odor,
-                            "poke_time_ms": poke_ms
+                            "poke_time_ms": poke_ms,
+                            "session_num": session_num,
+                            "date": int(date_str) if str(date_str).isdigit() else date_str,
                         })
             
             # ============ ABORTED TRIALS - VECTORIZED ============
@@ -736,7 +738,9 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
                             "trial_type": "aborted",
                             "position": position,
                             "odor": odor,
-                            "poke_time_ms": poke_ms
+                            "poke_time_ms": poke_ms,
+                            "session_num": session_num,
+                            "date": int(date_str) if str(date_str).isdigit() else date_str,
                         })
     
     if not rows:
@@ -747,7 +751,7 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
     df = pd.DataFrame(rows)
     
     # Create figure
-    fig, axes = plt.subplots(2, 2, figsize=figsize)
+    fig, axes = plt.subplots(3, 2, figsize=figsize)
     
     # ============ PLOT 1: Completed by Position ============
     ax = axes[0, 0]
@@ -891,6 +895,86 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 12)):
     ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
+    # ============ PLOT 5: Average Poke Time per Position over Sessions ============
+    ax = axes[2, 0]
+    df_pos_series = df[(df["trial_type"] == "completed") & (df["position"].notna()) & (df["session_num"].notna())].copy()
+
+    if not df_pos_series.empty:
+        grouped = df_pos_series.groupby(["session_num", "position"]).poke_time_ms.mean().reset_index()
+        positions = sorted(grouped["position"].unique())
+
+        # Dark-to-light blue gradient for positions
+        pos_palette = [
+            '#0b3c68',  # dark
+            '#155d8a',
+            '#1f7eac',
+            '#3c99c7',
+            '#65b4d7',  # light
+        ]
+
+        for i, pos in enumerate(positions):
+            pos_data = grouped[grouped["position"] == pos].sort_values("session_num")
+            color = pos_palette[i % len(pos_palette)]
+            ax.plot(pos_data["session_num"], pos_data["poke_time_ms"],
+                    label=f"Pos {pos}",
+                    color=color,
+                    linewidth=2.0,
+                    marker="o",
+                    markersize=5,
+                    alpha=0.85)
+
+        ax.set_xlabel("Session", fontsize=11, fontweight='bold')
+        ax.set_ylabel("Average Poke Time (ms)", fontsize=11, fontweight='bold')
+        ax.set_title(f'Average Poke Time per Position Across Sessions\n(Subject {str(subjid).zfill(3)})',
+                    fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.25, axis='y')
+        ax.legend(loc='best', fontsize=9)
+    else:
+        ax.text(0.5, 0.5, "No data", ha='center', va='center', transform=ax.transAxes)
+        ax.set_axis_off()
+
+    # ============ PLOT 6: Average Poke Time per Odor over Sessions ============
+    ax = axes[2, 1]
+    df_odor_series = df[(df["trial_type"] == "completed") & (df["odor"].notna()) & (df["session_num"].notna())].copy()
+
+    if not df_odor_series.empty:
+        grouped = df_odor_series.groupby(["session_num", "odor"]).poke_time_ms.mean().reset_index()
+        odors = sorted(grouped["odor"].unique())
+
+        def _odor_color(odor_label: str):
+            raw = str(odor_label).strip()
+            lower = raw.lower()
+            base = lower.replace("odor", "").replace("_", "").replace(" ", "")
+            if base in {"a", "1", "01"}:
+                return '#FF6B6B'
+            if base in {"f"}:
+                return '#E63946'  # slightly deeper red
+            if base in {"b", "2", "02"}:
+                return '#4ECDC4'
+            if base in {"c", "3", "03"}:
+                return '#1D9AB3'  # slightly deeper blue
+            return '#888888'
+
+        for odor in odors:
+            odor_data = grouped[grouped["odor"] == odor].sort_values("session_num")
+            ax.plot(odor_data["session_num"], odor_data["poke_time_ms"],
+                    label=str(odor),
+                    color=_odor_color(odor),
+                    linewidth=2.2,
+                    marker="o",
+                    markersize=5,
+                    alpha=0.9)
+
+        ax.set_xlabel("Session", fontsize=11, fontweight='bold')
+        ax.set_ylabel("Average Sampling Time (ms)", fontsize=11, fontweight='bold')
+        ax.set_title(f'Average Sampling Time per Odor Across Sessions\n(Subject {str(subjid).zfill(3)})',
+                    fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.25, axis='y')
+        ax.legend(loc='best', fontsize=9)
+    else:
+        ax.text(0.5, 0.5, "No data", ha='center', va='center', transform=ax.transAxes)
+        ax.set_axis_off()
+
     plt.tight_layout()
     return fig, axes
 

@@ -3990,6 +3990,61 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
     saved_any = False
     saved_names: set[str] = set()
 
+    # Build comprehensive per-trial table (includes aborted + response-time extras)
+    extra_abort_cols = [
+        "last_odor_position",
+        "last_odor_name",
+        "last_odor_valve_duration_ms",
+        "last_odor_poke_time_ms",
+        "last_required_min_sampling_time_ms",
+        "abortion_type",
+        "abortion_time",
+        "fa_label",
+        "fa_time",
+        "fa_latency_ms",
+        "fa_port",
+    ]
+    extra_rt_cols = [
+        "response_time_ms",
+        "response_time_category",
+    ]
+
+    base_trials = classification.get("initiated_sequences") if isinstance(classification, dict) else None
+    if isinstance(base_trials, pd.DataFrame) and not base_trials.empty and "trial_id" in base_trials.columns:
+        trial_df = base_trials.copy()
+
+        def _merge_with_run(df_target, df_extra, cols):
+            """Merge extra cols using (trial_id, run_id) when present to avoid cross-run bleed."""
+            merge_keys = ["trial_id", "run_id"] if all(k in df_extra.columns and k in df_target.columns for k in ["trial_id", "run_id"]) else ["trial_id"]
+            subset_cols = [k for k in merge_keys + cols if k in df_extra.columns]
+            if len(subset_cols) <= len(merge_keys):
+                return df_target
+            dedup = df_extra[subset_cols].drop_duplicates(subset=merge_keys)
+            return df_target.merge(dedup, on=merge_keys, how="left")
+
+        # Attach aborted details (aligned by trial_id and run_id when available)
+        ab_det = classification.get("aborted_sequences_detailed") if isinstance(classification, dict) else None
+        if isinstance(ab_det, pd.DataFrame) and not ab_det.empty and "trial_id" in ab_det.columns:
+            cols = [c for c in extra_abort_cols if c in ab_det.columns]
+            if cols:
+                trial_df = _merge_with_run(trial_df, ab_det, cols)
+
+        # Attach response-time details (aligned by trial_id and run_id when available)
+        comp_rt = classification.get("completed_sequences_with_response_times") if isinstance(classification, dict) else None
+        if isinstance(comp_rt, pd.DataFrame) and not comp_rt.empty and "trial_id" in comp_rt.columns:
+            cols = [c for c in extra_rt_cols if c in comp_rt.columns]
+            if cols:
+                trial_df = _merge_with_run(trial_df, comp_rt, cols)
+
+        # Ensure all expected columns exist
+        for col in extra_abort_cols + extra_rt_cols:
+            if col not in trial_df.columns:
+                trial_df[col] = np.nan
+
+        classification["trial_data"] = trial_df
+    else:
+        classification["trial_data"] = pd.DataFrame()
+
     def _save_df(name: str, df) -> bool:
         if not isinstance(df, pd.DataFrame) or df.empty:
             return False
@@ -4023,6 +4078,7 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         "completed_sequences_HR","completed_sequence_HR_rewarded","completed_sequence_HR_unrewarded","completed_sequence_HR_reward_timeout",
         "completed_sequences_HR_missed","completed_sequence_HR_missed_rewarded","completed_sequence_HR_missed_unrewarded","completed_sequence_HR_missed_reward_timeout",
         "aborted_sequences","aborted_sequences_HR","aborted_sequences_detailed", "non_initiated_FA",
+        "trial_data",
     ]:
         df = classification.get(k) if isinstance(classification, dict) else None
         if _save_df(k, df):
@@ -4126,7 +4182,7 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         "initiated_sequences","non_initiated_sequences","non_initiated_odor1_attempts",
         "completed_sequences","completed_sequences_with_response_times",
         "completed_sequence_rewarded","completed_sequence_unrewarded","completed_sequence_reward_timeout",
-        "aborted_sequences","aborted_sequences_detailed",
+        "aborted_sequences","aborted_sequences_detailed","trial_data",
     ]:
         counts[k] = _n(k)
     # Attach per-run parameters to manifest runs
