@@ -4045,43 +4045,41 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
     else:
         classification["trial_data"] = pd.DataFrame()
 
-    def _save_df(name: str, df) -> bool:
+    def _save_df(name: str, df, *, save_parquet: bool = False) -> bool:
         if not isinstance(df, pd.DataFrame) or df.empty:
             return False
         if name in saved_names:
             return True
         f_csv = out_dir / f"{name}.csv"
         f_schema = out_dir / f"{name}.schema.json"
+        f_parquet = out_dir / f"{name}.parquet"
         try:
             df_norm, json_cols = _normalize_df_for_io(df)
             df_norm.to_csv(f_csv, index=False)
             with open(f_schema, "w", encoding="utf-8") as sf:
                 json.dump({"jsonified_columns": json_cols}, sf, indent=2)
             manifest["tables"][name] = f_csv.name
+            if save_parquet:
+                try:
+                    df_norm.to_parquet(f_parquet, index=False)
+                    manifest.setdefault("tables_parquet", {})[name] = f_parquet.name
+                except Exception as e:
+                    vprint(verbose, f"[save] WARNING: failed writing parquet for {name}: {e}")
             saved_names.add(name)
             return True
         except Exception as e:
             vprint(verbose, f"[save] WARNING: failed writing {name}: {e}")
             return False
 
-    # 1) Save all top-level DataFrames
-    if isinstance(classification, dict):
-        for key, val in classification.items():
-            if _save_df(key, val):
-                saved_any = True
-
-    # 2) Explicit key tables (covers merged dicts)
-    for k in [
-        "initiated_sequences","non_initiated_sequences","non_initiated_odor1_attempts",
-        "completed_sequences","completed_sequences_with_response_times",
-        "completed_sequence_rewarded","completed_sequence_unrewarded","completed_sequence_reward_timeout",
-        "completed_sequences_HR","completed_sequence_HR_rewarded","completed_sequence_HR_unrewarded","completed_sequence_HR_reward_timeout",
-        "completed_sequences_HR_missed","completed_sequence_HR_missed_rewarded","completed_sequence_HR_missed_unrewarded","completed_sequence_HR_missed_reward_timeout",
-        "aborted_sequences","aborted_sequences_HR","aborted_sequences_detailed", "non_initiated_FA",
-        "trial_data",
+    # Save only the streamlined set: trial_data (csv+parquet) plus non-initiated tables
+    for k, save_parquet in [
+        ("trial_data", True),
+        ("non_initiated_sequences", False),
+        ("non_initiated_odor1_attempts", False),
+        ("non_initiated_FA", False),
     ]:
         df = classification.get(k) if isinstance(classification, dict) else None
-        if _save_df(k, df):
+        if _save_df(k, df, save_parquet=save_parquet):
             saved_any = True
 
     # 3) Extract run start and end times
@@ -4179,10 +4177,7 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         df = classification.get(name)
         return int(len(df)) if isinstance(df, pd.DataFrame) else 0
     for k in [
-        "initiated_sequences","non_initiated_sequences","non_initiated_odor1_attempts",
-        "completed_sequences","completed_sequences_with_response_times",
-        "completed_sequence_rewarded","completed_sequence_unrewarded","completed_sequence_reward_timeout",
-        "aborted_sequences","aborted_sequences_detailed","trial_data",
+        "trial_data","non_initiated_sequences","non_initiated_odor1_attempts","non_initiated_FA",
     ]:
         counts[k] = _n(k)
     # Attach per-run parameters to manifest runs
