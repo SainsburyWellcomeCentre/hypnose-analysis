@@ -1804,8 +1804,9 @@ def plot_movement_trace(subjid, date, smooth_window=10, linewidth=1, alpha=0.5, 
     fig, ax : matplotlib figure and axis objects
     """
     # Build path to combined tracking CSV
-    base_path = get_data_root() / "rawdata"
-    derivatives_dir = base_path.resolve().parent / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
     # Find subject directory
     sub_str = f"sub-{str(subjid).zfill(3)}"
@@ -1918,8 +1919,9 @@ def load_tracking_with_behavior(subjid, date):
         - 'tracking_labeled': pd.DataFrame with added 'in_trial' column
     """
     # Load tracking data
-    base_path = get_data_root() / "rawdata"
-    derivatives_dir = base_path.resolve().parent / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
     sub_str = f"sub-{str(subjid).zfill(3)}"
     subject_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
@@ -2127,8 +2129,9 @@ def _load_tracking_and_behavior(subjid, date, tracking_source='auto'):
     --------
     tracking_df, behavior_dict
     """
-    base_path = get_data_root() / "rawdata"
-    derivatives_dir = base_path.resolve().parent / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
 
     sub_str = f"sub-{str(subjid).zfill(3)}"
     date_str = str(date)
@@ -2672,9 +2675,9 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     --------
     fig, ax : matplotlib figure and axis objects
     """
-    base_path = get_data_root() / "rawdata"
-    server_root = get_data_root()
-    derivatives_dir = get_data_root() / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
     subj_str = f"sub-{str(subjid).zfill(3)}"
     subject_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
@@ -3020,9 +3023,9 @@ def get_fa_ratio_a_stats(subjid, dates=None, odors=['C', 'F']):
     --------
     DataFrame with columns: date, odor, fa_ratio_a, n_fa_a, n_fa_b, n_total
     """
-    base_path = get_data_root() / "rawdata"
-    server_root = get_data_root()
-    derivatives_dir = get_data_root() / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
     rows = []
     
@@ -3173,9 +3176,9 @@ def plot_fa_ratio_by_hr_position(
     --------
     fig, axes : matplotlib figure and axes array
     """
-    base_path = get_data_root() / "rawdata"
-    server_root = get_data_root()
-    derivatives_dir = get_data_root() / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
     # Parse FA type filter
     if isinstance(fa_types, str):
@@ -3562,9 +3565,9 @@ def plot_fa_ratio_by_abort_odor(
     --------
     fig, axes : matplotlib figure and axes array
     """
-    base_path = get_data_root() / "rawdata"
-    server_root = get_data_root()
-    derivatives_dir = get_data_root() / "derivatives"
+    base_path = get_rawdata_root()
+    server_root = get_server_root()
+    derivatives_dir = get_derivatives_root()
     
     # Parse FA type filter
     if isinstance(fa_types, str):
