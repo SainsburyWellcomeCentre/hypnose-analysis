@@ -974,7 +974,11 @@ def global_FA_rate(results):
 def FA_odor_bias(results):
     print("FA Odor Bias for FA Time In:")
     df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "fa_label" not in df.columns or "last_odor" not in df.columns:
+    if df.empty or "fa_label" not in df.columns:
+        return {'bias': {}, 'n_fa': {}, 'n_ab': {}, 'total_fa': 0, 'total_ab': 0}
+
+    odor_col = "last_odor_name" if "last_odor_name" in df.columns else "last_odor"
+    if odor_col not in df.columns:
         return {'bias': {}, 'n_fa': {}, 'n_ab': {}, 'total_fa': 0, 'total_ab': 0}
 
     aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
@@ -983,14 +987,14 @@ def FA_odor_bias(results):
         return {'bias': {}, 'n_fa': {}, 'n_ab': {}, 'total_fa': 0, 'total_ab': 0}
 
     fa_mask = aborted["fa_label"] == "FA_time_in"
-    odors = sorted(aborted["last_odor"].dropna().unique())
+    odors = sorted(aborted[odor_col].dropna().unique())
     bias = {}
     n_fa = {}
     n_ab = {}
     total_fa = int(fa_mask.sum())
     total_ab = len(aborted)
     for od in odors:
-        at_od = aborted["last_odor"] == od
+        at_od = aborted[odor_col] == od
         fa_at_od = fa_mask & at_od
         n_fa_od = int(fa_at_od.sum())
         n_ab_od = int(at_od.sum())
@@ -1003,7 +1007,11 @@ def FA_odor_bias(results):
 def FA_position_bias(results):
     print("FA Position Bias for FA Time In:")
     df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "fa_label" not in df.columns or "last_event_index" not in df.columns:
+    if df.empty or "fa_label" not in df.columns:
+        return pd.Series(dtype=float)
+
+    position_col = "last_odor_position" if "last_odor_position" in df.columns else "last_event_index"
+    if position_col not in df.columns:
         return pd.Series(dtype=float)
 
     aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
@@ -1012,17 +1020,18 @@ def FA_position_bias(results):
         return pd.Series(dtype=float)
 
     fa_mask = aborted["fa_label"] == "FA_time_in"
-    positions = sorted(aborted["last_event_index"].dropna().unique())
+    positions = sorted(aborted[position_col].dropna().unique())
     bias = {}
     total_fa = int(fa_mask.sum())
     total_ab = len(aborted)
     for pos in positions:
-        at_pos = aborted["last_event_index"] == pos
+        at_pos = aborted[position_col] == pos
         fa_at_pos = fa_mask & at_pos
         n_fa_pos = int(fa_at_pos.sum())
         n_ab_pos = int(at_pos.sum())
-        bias[pos] = (n_fa_pos / n_ab_pos) / (total_fa / total_ab) if n_ab_pos > 0 and total_ab > 0 and total_fa > 0 else np.nan
-        print(f"Position {pos}: {n_fa_pos}/{n_ab_pos} FA, Bias: {bias[pos]:.3f}")
+        pos_report = int(pos) + 1 if position_col == "last_event_index" else int(pos)
+        bias[pos_report] = (n_fa_pos / n_ab_pos) / (total_fa / total_ab) if n_ab_pos > 0 and total_ab > 0 and total_fa > 0 else np.nan
+        print(f"Position {pos_report}: {n_fa_pos}/{n_ab_pos} FA, Bias: {bias[pos_report]:.3f}")
     return pd.Series(bias).sort_index()
 
 def sequence_completion_rate(results):
@@ -1041,13 +1050,17 @@ def sequence_completion_rate(results):
 
 def odorx_abortion_rate(results):
     df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "presentations" not in df.columns or "last_odor" not in df.columns:
+    if df.empty or "presentations" not in df.columns:
+        return pd.Series(dtype=float)
+
+    odor_col = "last_odor_name" if "last_odor_name" in df.columns else "last_odor"
+    if odor_col not in df.columns:
         return pd.Series(dtype=float)
 
     aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
     aborted = df[aborted_mask]
 
-    abortions = aborted["last_odor"].dropna().value_counts().to_dict()
+    abortions = aborted[odor_col].dropna().value_counts().to_dict()
 
     presentations = {}
     for _, row in df.iterrows():
@@ -1470,17 +1483,21 @@ def abortion_rate_positionX(results):
     aborted = df[aborted_mask]
     completed = df[~aborted_mask]
 
-    if "last_event_index" not in df.columns:
+    position_col = "last_odor_position" if "last_odor_position" in df.columns else "last_event_index"
+    if position_col not in df.columns:
         return pd.Series(dtype=float)
 
-    abortions = (aborted["last_event_index"] + 1).dropna().value_counts().to_dict()
+    abortions = aborted[position_col].dropna().value_counts().to_dict()
 
     reached = {}
 
     for _, row in aborted.iterrows():
-        last_idx = row.get("last_event_index")
-        if pd.notnull(last_idx):
-            last_pos = int(last_idx) + 1
+        last_pos_val = row.get(position_col)
+        if pd.notnull(last_pos_val):
+            try:
+                last_pos = int(last_pos_val)
+            except Exception:
+                continue
             for pos in range(1, last_pos + 1):
                 reached[pos] = reached.get(pos, 0) + 1
 
@@ -1492,9 +1509,12 @@ def abortion_rate_positionX(results):
                 max_pos = max(int(k) for k in ppt.keys())
             except Exception:
                 max_pos = None
-        if max_pos is None and "last_event_index" in row:
-            le = row.get("last_event_index")
-            max_pos = int(le) + 1 if pd.notnull(le) else None
+        if max_pos is None and position_col in row:
+            le = row.get(position_col)
+            try:
+                max_pos = int(le) if pd.notnull(le) else None
+            except Exception:
+                max_pos = None
         if max_pos is not None:
             for pos in range(1, int(max_pos) + 1):
                 reached[pos] = reached.get(pos, 0) + 1
@@ -1663,7 +1683,11 @@ def non_initiation_odor_bias(results):
 
 def odor_initiation_bias(results):
     df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "abortion_type" not in df.columns or "last_odor" not in df.columns:
+    if df.empty or "abortion_type" not in df.columns:
+        return pd.Series(dtype=float)
+
+    odor_col = "last_odor_name" if "last_odor_name" in df.columns else "last_odor"
+    if odor_col not in df.columns:
         return pd.Series(dtype=float)
 
     aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
@@ -1672,27 +1696,41 @@ def odor_initiation_bias(results):
         return pd.Series(dtype=float)
 
     init_mask = aborted["abortion_type"] == "initiation_abortion"
-    odors = aborted["last_odor"].dropna().unique()
+    odors = aborted[odor_col].dropna().unique()
     bias = {}
     total_init = int(init_mask.sum())
     total_ab = len(aborted)
     for od in sorted(odors):
-        n_init_od = int(((aborted["last_odor"] == od) & init_mask).sum())
-        n_ab_od = int((aborted["last_odor"] == od).sum())
+        n_init_od = int(((aborted[odor_col] == od) & init_mask).sum())
+        n_ab_od = int((aborted[odor_col] == od).sum())
         bias[od] = (n_init_od / n_ab_od) / (total_init / total_ab) if n_ab_od > 0 and total_ab > 0 and total_init > 0 else np.nan
         print(f"{od}: {n_init_od}/{n_ab_od} initiation abortions, Bias: {bias[od]:.3f}")
     return pd.Series(bias).sort_index()
 
 def fa_abortion_stats(results, return_df=False):
     df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "fa_label" not in df.columns or "last_odor" not in df.columns or "last_event_index" not in df.columns:
+    if df.empty or "fa_label" not in df.columns:
         print("No FA abortion data available.")
         return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
 
+    odor_col = "last_odor_name" if "last_odor_name" in df.columns else "last_odor"
+    if odor_col not in df.columns:
+        print("No FA abortion data available (missing odor column).")
+        return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+
+    pos_col = "last_odor_position" if "last_odor_position" in df.columns else None
+    if pos_col is None:
+        print("No FA abortion data available (missing last_odor_position).")
+        return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+
     aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    fa_df = df[aborted_mask & df["fa_label"].notna()]
-    if fa_df.empty:
-        print("No FA abortions found.")
+    aborted_all = df[aborted_mask]
+    allowed_fa = {"FA_time_in", "FA_time_out", "FA_late"}
+    fa_mask = aborted_all["fa_label"].isin(allowed_fa)
+    fa_df = aborted_all[fa_mask]
+
+    if aborted_all.empty:
+        print("No aborted trials found.")
         return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
 
     subtype_labels = [
@@ -1703,21 +1741,22 @@ def fa_abortion_stats(results, return_df=False):
 
     # Odor+Position table
     rows = []
-    odors = sorted(fa_df["last_odor"].dropna().unique())
-    positions = sorted((fa_df["last_event_index"] + 1).dropna().unique())
+    odors = sorted(aborted_all[odor_col].dropna().unique())
+    positions = sorted(aborted_all[pos_col].dropna().unique())
     for odor in odors:
         for pos in positions:
-            sub = fa_df[(fa_df["last_odor"] == odor) & ((fa_df["last_event_index"] + 1) == pos)]
-            n_total = len(sub)
-            if n_total == 0:
+            sub_all = aborted_all[(aborted_all[odor_col] == odor) & (aborted_all[pos_col] == pos)]
+            if sub_all.empty:
                 continue
-            fa_labels = sub["fa_label"].astype(str)
+            sub_fa = sub_all[sub_all["fa_label"].isin(allowed_fa)]
+            n_total = len(sub_all)
+            fa_labels = sub_fa["fa_label"].astype(str)
             row = {
                 "Odor": odor,
                 "Position": pos,
                 "Total Abortions": n_total,
             }
-            n_fa = fa_labels.isin([s[0] for s in subtype_labels]).sum()
+            n_fa = len(sub_fa)
             row["FA Abortion Rate"] = f"{n_fa}/{n_total} ({n_fa/n_total:.2f})"
             for subtype, pretty in subtype_labels:
                 count = (fa_labels == subtype).sum()
@@ -1728,16 +1767,17 @@ def fa_abortion_stats(results, return_df=False):
     # Per-odor table
     odor_rows = []
     for odor in odors:
-        sub = fa_df[fa_df["last_odor"] == odor]
-        n_total = len(sub)
-        if n_total == 0:
+        sub_all = aborted_all[aborted_all[odor_col] == odor]
+        if sub_all.empty:
             continue
-        fa_labels = sub["fa_label"].astype(str)
+        sub_fa = sub_all[sub_all["fa_label"].isin(allowed_fa)]
+        n_total = len(sub_all)
+        fa_labels = sub_fa["fa_label"].astype(str)
         row = {
             "Odor": odor,
             "Total Abortions": n_total,
         }
-        n_fa = fa_labels.isin([s[0] for s in subtype_labels]).sum()
+        n_fa = len(sub_fa)
         row["FA Abortion Rate"] = f"{n_fa}/{n_total} ({n_fa/n_total:.2f})"
         for subtype, pretty in subtype_labels:
             count = (fa_labels == subtype).sum()
@@ -1748,16 +1788,17 @@ def fa_abortion_stats(results, return_df=False):
     # Per-position table
     pos_rows = []
     for pos in positions:
-        sub = fa_df[(fa_df["last_event_index"] + 1) == pos]
-        n_total = len(sub)
-        if n_total == 0:
+        sub_all = aborted_all[aborted_all[pos_col] == pos]
+        if sub_all.empty:
             continue
-        fa_labels = sub["fa_label"].astype(str)
+        sub_fa = sub_all[sub_all["fa_label"].isin(allowed_fa)]
+        n_total = len(sub_all)
+        fa_labels = sub_fa["fa_label"].astype(str)
         row = {
             "Position": pos,
             "Total Abortions": n_total,
         }
-        n_fa = fa_labels.isin([s[0] for s in subtype_labels]).sum()
+        n_fa = len(sub_fa)
         row["FA Abortion Rate"] = f"{n_fa}/{n_total} ({n_fa/n_total:.2f})"
         for subtype, pretty in subtype_labels:
             count = (fa_labels == subtype).sum()
@@ -1829,7 +1870,7 @@ def fa_port_ratio_by_odor(results, include_non_initiated=True, fa_type="FA_time_
 
     fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True) if include_non_initiated else fa_ab
 
-    if fa_all.empty or "fa_port" not in fa_all.columns or "last_odor" not in fa_all.columns:
+    if fa_all.empty or "fa_port" not in fa_all.columns or "last_odor_name" not in fa_all.columns:
         print("  No FA data with port and odor information found.")
         return {'by_odor': pd.Series(dtype=float), 'counts': {}, 'total_fa_by_odor': {}}
     
@@ -1838,8 +1879,8 @@ def fa_port_ratio_by_odor(results, include_non_initiated=True, fa_type="FA_time_
     counts = {}
     total_fa_by_odor = {}
     
-    for odor in sorted(fa_all["last_odor"].dropna().unique()):
-        fa_odor = fa_all[fa_all["last_odor"] == odor]
+    for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
+        fa_odor = fa_all[fa_all["last_odor_name"] == odor]
         n_port_a = (fa_odor["fa_port"] == 1).sum()
         n_port_b = (fa_odor["fa_port"] == 2).sum()
         n_total = n_port_a + n_port_b

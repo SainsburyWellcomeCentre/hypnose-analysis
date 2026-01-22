@@ -4356,11 +4356,16 @@ def _coerce_int_like(s):
         return s
 
 def _with_run_id(df: pd.DataFrame, run_id: int) -> pd.DataFrame:
+    """Ensure run_id matches the merged run index and preserve any existing value."""
+
     if not isinstance(df, pd.DataFrame) or df.empty:
         return pd.DataFrame()
+
     out = df.copy()
-    if 'run_id' not in out.columns:
-        out['run_id'] = run_id
+    if 'run_id' in out.columns:
+        # Keep the original numbering (from the raw run index) for debugging/alignment checks
+        out['run_id_original'] = out['run_id']
+    out['run_id'] = run_id
     return out
 
 def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict:
