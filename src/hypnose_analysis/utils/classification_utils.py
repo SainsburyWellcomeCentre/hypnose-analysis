@@ -4064,6 +4064,9 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
             if col not in trial_df.columns:
                 trial_df[col] = np.nan
 
+        # Convenience flag: mark aborted trials (any abortion info present)
+        trial_df["is_aborted"] = trial_df[["abortion_type", "abortion_time"]].notna().any(axis=1)
+
         # Build global_trial_id continuous across runs
         if "run_id" not in trial_df.columns:
             trial_df["run_id"] = 1

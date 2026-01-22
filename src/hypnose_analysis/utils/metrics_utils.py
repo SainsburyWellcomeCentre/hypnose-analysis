@@ -22,7 +22,7 @@ from hypnose_analysis.paths import get_derivatives_root
 def load_session_results(subjid, date):
     """
     Load saved analysis results for a given subject and date.
-    Returns a dict of DataFrames and metadata, matching classification keys.
+    Returns a dict with trial_data, non-initiated tables, and metadata.
     """
     derivatives_dir = get_derivatives_root()
     sub_str = f"sub-{str(subjid).zfill(3)}"
@@ -56,22 +56,25 @@ def load_session_results(subjid, date):
     manifest = json.load(open(results_dir / "manifest.json"))
     summary = json.load(open(results_dir / "summary.json"))
 
-    # Load all CSV tables
-    tables = [
-        "initiated_sequences","non_initiated_sequences","non_initiated_odor1_attempts",
-        "completed_sequences","completed_sequences_with_response_times",
-        "completed_sequence_rewarded","completed_sequence_unrewarded","completed_sequence_reward_timeout",
-        "completed_sequences_HR","completed_sequence_HR_rewarded","completed_sequence_HR_unrewarded","completed_sequence_HR_reward_timeout",
-        "completed_sequences_HR_missed","completed_sequence_HR_missed_rewarded","completed_sequence_HR_missed_unrewarded","completed_sequence_HR_missed_reward_timeout",
-        "aborted_sequences","aborted_sequences_HR","aborted_sequences_detailed", "non_initiated_FA",
-    ]
-    results = {}
-    for t in tables:
+    results: dict = {}
+
+    # Prefer the unified trial_data parquet; fall back to CSV if needed
+    trial_parquet = results_dir / "trial_data.parquet"
+    trial_csv = results_dir / "trial_data.csv"
+    trial_df = pd.DataFrame()
+    if trial_parquet.exists():
+        try:
+            trial_df = pd.read_parquet(trial_parquet)
+        except Exception as e:
+            print(f"Warning: failed to read {trial_parquet}: {e}")
+    if trial_df.empty and trial_csv.exists():
+        trial_df = pd.read_csv(trial_csv)
+    results["trial_data"] = trial_df
+
+    # Tables still saved separately
+    for t in ["non_initiated_sequences", "non_initiated_odor1_attempts", "non_initiated_FA"]:
         f = results_dir / f"{t}.csv"
-        if f.exists():
-            results[t] = pd.read_csv(f)
-        else:
-            results[t] = pd.DataFrame()
+        results[t] = pd.read_csv(f) if f.exists() else pd.DataFrame()
 
     # Attach manifest and summary
     results["manifest"] = manifest
@@ -120,6 +123,133 @@ def parse_json_column(val):
         except Exception:
             return {} if val.strip().startswith("{") else []
     return val
+
+
+def _populate_legacy_results_from_trial_data(results: dict) -> dict:
+    """Backfill legacy classification tables from the unified trial_data table."""
+    trial_df = results.get("trial_data")
+    if not isinstance(trial_df, pd.DataFrame) or trial_df.empty:
+        return results
+
+    df = trial_df.copy()
+
+    # Backfill missing/empty position_poke_times from presentations so downstream metrics count odor presentations
+    def _inject_poke_times_from_presentations(df_in: pd.DataFrame) -> pd.DataFrame:
+        if df_in.empty:
+            return df_in
+        if "presentations" not in df_in.columns:
+            return df_in
+        if "position_poke_times" not in df_in.columns:
+            df_out = df_in.copy()
+            df_out["position_poke_times"] = np.nan
+        else:
+            df_out = df_in.copy()
+
+        for idx, row in df_out.iterrows():
+            ppt = parse_json_column(row.get("position_poke_times", {}))
+            if isinstance(ppt, dict) and len(ppt) > 0:
+                continue  # already populated
+            pres_list = parse_json_column(row.get("presentations", []))
+            if not isinstance(pres_list, list) or not pres_list:
+                continue
+            rebuilt = {}
+            for pres in pres_list:
+                pos = pres.get("position")
+                if pos is None and pres.get("index_in_trial") is not None:
+                    try:
+                        pos = int(pres.get("index_in_trial")) + 1
+                    except Exception:
+                        pos = pres.get("index_in_trial")
+                if pos is None:
+                    continue
+                key = str(pos)
+                rebuilt[key] = {
+                    "odor_name": pres.get("odor_name"),
+                    "poke_time_ms": pres.get("poke_time_ms"),
+                    "poke_first_in": pres.get("poke_first_in"),
+                    "poke_odor_start": pres.get("valve_start"),
+                    "required_min_sampling_time_ms": pres.get("required_min_sampling_time_ms"),
+                }
+            if rebuilt:
+                df_out.at[idx, "position_poke_times"] = rebuilt
+        return df_out
+
+    df = _inject_poke_times_from_presentations(df)
+
+    def _maybe_set(name: str, value: pd.DataFrame) -> None:
+        existing = results.get(name)
+        if isinstance(existing, pd.DataFrame) and not existing.empty:
+            return
+        results[name] = value.copy() if isinstance(value, pd.DataFrame) else value
+
+    _maybe_set("initiated_sequences", df)
+
+    base_mask = pd.Series(False, index=df.index)
+    completed_mask = df["response_time_category"].notna() if "response_time_category" in df.columns else base_mask
+    aborted_mask = base_mask.copy()
+    for col in ["abortion_type", "fa_label"]:
+        if col in df.columns:
+            aborted_mask |= df[col].notna()
+    aborted_mask &= ~completed_mask
+
+    completed_df = df.loc[completed_mask].copy()
+    aborted_df = df.loc[aborted_mask].copy()
+
+    _maybe_set("completed_sequences", completed_df)
+    _maybe_set("completed_sequences_with_response_times", completed_df)
+
+    def _cat_df(label: str) -> pd.DataFrame:
+        if completed_df.empty or "response_time_category" not in completed_df.columns:
+            return pd.DataFrame()
+        return completed_df.loc[completed_df["response_time_category"] == label].copy()
+
+    _maybe_set("completed_sequence_rewarded", _cat_df("rewarded"))
+    _maybe_set("completed_sequence_unrewarded", _cat_df("unrewarded"))
+    _maybe_set("completed_sequence_reward_timeout", _cat_df("timeout_delayed"))
+
+    def _hr_flags(row):
+        hit = _is_truthy(row.get("hit_hidden_rule"))
+        success = _is_truthy(row.get("hidden_rule_success"))
+        return hit, success
+
+    if not completed_df.empty:
+        hr_hit_success = []
+        hr_hit_any = []
+        for _, r in completed_df.iterrows():
+            hit, success = _hr_flags(r)
+            hr_hit_any.append(hit)
+            hr_hit_success.append(hit and success)
+        hr_mask = pd.Series(hr_hit_success, index=completed_df.index)
+        hr_missed_mask = pd.Series(hr_hit_any, index=completed_df.index) & ~hr_mask
+
+        _maybe_set("completed_sequences_HR", completed_df.loc[hr_mask])
+        _maybe_set("completed_sequences_HR_missed", completed_df.loc[hr_missed_mask])
+
+        def _hr_cat_df(cat_mask: pd.Series, rt_label: str) -> pd.DataFrame:
+            if completed_df.empty or "response_time_category" not in completed_df.columns:
+                return pd.DataFrame()
+            return completed_df.loc[cat_mask & (completed_df["response_time_category"] == rt_label)].copy()
+
+        _maybe_set("completed_sequence_HR_rewarded", _hr_cat_df(hr_mask, "rewarded"))
+        _maybe_set("completed_sequence_HR_unrewarded", _hr_cat_df(hr_mask, "unrewarded"))
+        _maybe_set("completed_sequence_HR_reward_timeout", _hr_cat_df(hr_mask, "timeout_delayed"))
+
+        _maybe_set("completed_sequence_HR_missed_rewarded", _hr_cat_df(hr_missed_mask, "rewarded"))
+        _maybe_set("completed_sequence_HR_missed_unrewarded", _hr_cat_df(hr_missed_mask, "unrewarded"))
+        _maybe_set("completed_sequence_HR_missed_reward_timeout", _hr_cat_df(hr_missed_mask, "timeout_delayed"))
+
+    # Always prefer the trial_data-derived aborted details to ensure presentations are present
+    results["aborted_sequences"] = aborted_df.copy()
+    results["aborted_sequences_detailed"] = aborted_df.copy()
+    if not aborted_df.empty:
+        hr_ab_mask = aborted_df.apply(lambda r: _hr_flags(r)[0], axis=1)
+        _maybe_set("aborted_sequences_HR", aborted_df.loc[hr_ab_mask])
+
+    for name in ["non_initiated_sequences", "non_initiated_odor1_attempts", "non_initiated_FA"]:
+        if name not in results:
+            results[name] = pd.DataFrame()
+
+    return results
 
 def run_all_metrics(results, save_txt=True, save_json=True):
     """
@@ -704,110 +834,66 @@ def batch_run_all_metrics_with_merge(
 # ================== Behavioral Metrics Functions =================================================================================================================================
 
 def decision_accuracy(results):
-    comp_rew = results.get("completed_sequence_rewarded", pd.DataFrame())
-    comp_unr = results.get("completed_sequence_unrewarded", pd.DataFrame())
-    n_rew = len(comp_rew)
-    n_unr = len(comp_unr)
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "response_time_category" not in df.columns:
+        print("Decision Accuracy: no trial_data with response_time_category")
+        return 0, 0, np.nan
+
+    rew_mask = df["response_time_category"] == "rewarded"
+    unr_mask = df["response_time_category"] == "unrewarded"
+    n_rew = int(rew_mask.sum())
+    n_unr = int(unr_mask.sum())
     denom = n_rew + n_unr
-    print(f"Decision Accuracy: {n_rew}/{denom} = {n_rew/denom if denom>0 else np.nan:.3f}")
-    return n_rew, denom, n_rew / denom if denom > 0 else np.nan
+    acc = n_rew / denom if denom > 0 else np.nan
+    print(f"Decision Accuracy: {n_rew}/{denom} = {acc:.3f}")
+    return n_rew, denom, acc
 
 
 def global_choice_accuracy(results):
-    """
-    Calculate global choice accuracy: out of all choices made, how many were correct?
-    
-    This metric includes ALL choice events:
-    - Correct choices (completed rewarded trials)
-    - Incorrect choices (completed unrewarded trials)
-    - False alarms during sampling (FA Time In abortions)
-    
-    Numerator: # Correct trials (completed rewarded)
-    Denominator: # Correct + # Incorrect + # FA Time In
-    
-    Returns:
-    --------
-    tuple: (n_correct, n_total, accuracy)
-        - n_correct: number of correct trials
-        - n_total: total number of choice events
-        - accuracy: n_correct / n_total
-    """
-    comp_rew = results.get("completed_sequence_rewarded", pd.DataFrame())
-    comp_unr = results.get("completed_sequence_unrewarded", pd.DataFrame())
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    
-    # Numerator: correct choices
-    n_correct = len(comp_rew)
-    
-    # Denominator: all choices
-    n_incorrect = len(comp_unr)
-    n_fa_time_in = (ab_det["fa_label"] == "FA_time_in").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "response_time_category" not in df.columns:
+        print("Global Choice Accuracy: no trial_data with response_time_category")
+        return 0, 0, np.nan
+
+    n_correct = int((df["response_time_category"] == "rewarded").sum())
+    n_incorrect = int((df["response_time_category"] == "unrewarded").sum())
+    n_fa_time_in = int((df.get("fa_label") == "FA_time_in").sum()) if "fa_label" in df.columns else 0
+
     n_total = n_correct + n_incorrect + n_fa_time_in
-    
     accuracy = n_correct / n_total if n_total > 0 else np.nan
-    
+
     print(f"Global Choice Accuracy: {n_correct}/{n_total} = {accuracy:.3f}")
     print(f"  - Correct choices: {n_correct}")
     print(f"  - Incorrect choices: {n_incorrect}")
     print(f"  - False alarms (FA Time In): {n_fa_time_in}")
-    
+
     return n_correct, n_total, accuracy
 
 def decision_accuracy_by_odor(results):
-    """
-    Calculate decision accuracy separately for each odor (A, B, etc.).
-    Decision accuracy = rewarded / (rewarded + unrewarded) for trials ending with that odor.
-    Also reports totals including timeouts.
-    
-    Returns:
-    --------
-    pd.DataFrame : per-odor counts and accuracies
-    """
-    comp_rew = results.get("completed_sequence_rewarded", pd.DataFrame())
-    comp_unr = results.get("completed_sequence_unrewarded", pd.DataFrame())
-    comp_tmo = results.get("completed_sequence_reward_timeout", pd.DataFrame())
-    
-    if comp_rew.empty and comp_unr.empty and (comp_tmo.empty if isinstance(comp_tmo, pd.DataFrame) else True):
-        print("No completed trials found")
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "response_time_category" not in df.columns or "last_odor" not in df.columns:
+        print("Decision Accuracy by Odor: no trial_data with response_time_category/last_odor")
         return pd.DataFrame()
-    
-    # Extract just the odor letter from 'last_odor' (e.g., 'OdorA' -> 'A')
+
     def extract_odor_letter(odor_str):
         if pd.isna(odor_str):
             return np.nan
-        # Handle both 'OdorA' format and plain 'A' format
-        if isinstance(odor_str, str) and odor_str.startswith('Odor'):
-            return odor_str.replace('Odor', '')
+        if isinstance(odor_str, str) and odor_str.startswith("Odor"):
+            return odor_str.replace("Odor", "")
         return odor_str
-    
-    def add_status(df, status):
-        if df.empty:
-            return pd.DataFrame()
-        out = df.copy()
-        out['reward_status'] = status
-        out['odor_letter'] = out['last_odor'].apply(extract_odor_letter)
-        return out
 
-    comp_rew_copy = add_status(comp_rew, 'rewarded')
-    comp_unr_copy = add_status(comp_unr, 'unrewarded')
-    comp_tmo_copy = add_status(comp_tmo if isinstance(comp_tmo, pd.DataFrame) else pd.DataFrame(), 'timeout')
+    df_local = df.copy()
+    df_local["odor_letter"] = df_local["last_odor"].apply(extract_odor_letter)
 
-    combined = pd.concat([comp_rew_copy, comp_unr_copy, comp_tmo_copy], ignore_index=True)
-
-    if combined.empty:
-        print("No completed trials found")
-        return pd.DataFrame()
-    
-    # Calculate accuracy per odor
     rows = []
-    odors = sorted(combined['odor_letter'].dropna().unique())
+    odors = sorted(df_local["odor_letter"].dropna().unique())
 
     print("Decision Accuracy by Odor:")
     for odor in odors:
-        odor_trials = combined[combined['odor_letter'] == odor]
-        n_rew = int((odor_trials['reward_status'] == 'rewarded').sum())
-        n_unr = int((odor_trials['reward_status'] == 'unrewarded').sum())
-        n_tmo = int((odor_trials['reward_status'] == 'timeout').sum())
+        odor_trials = df_local[df_local["odor_letter"] == odor]
+        n_rew = int((odor_trials["response_time_category"] == "rewarded").sum())
+        n_unr = int((odor_trials["response_time_category"] == "unrewarded").sum())
+        n_tmo = int((odor_trials["response_time_category"] == "timeout_delayed").sum())
         denom_ab = n_rew + n_unr
         denom_total = denom_ab + n_tmo
         acc_ab = n_rew / denom_ab if denom_ab > 0 else np.nan
@@ -833,45 +919,81 @@ def decision_accuracy_by_odor(results):
     return pd.DataFrame(rows).set_index('odor').sort_index()
 
 def premature_response_rate(results):
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    n_fa = (ab_det["fa_label"] == "FA_time_in").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
-    n_total = len(ab_det)
-    print(f"Premature Response Rate: {n_fa}/{n_total} = {n_fa/n_total if n_total>0 else np.nan:.3f}")
-    return n_fa, n_total, n_fa / n_total if n_total > 0 else np.nan
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
+        print("Premature Response Rate: no trial_data")
+        return 0, 0, np.nan
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    aborted = df[aborted_mask]
+    if aborted.empty:
+        print("Premature Response Rate: no aborted trials")
+        return 0, 0, np.nan
+
+    n_fa = int((aborted.get("fa_label") == "FA_time_in").sum()) if "fa_label" in aborted.columns else 0
+    n_total = len(aborted)
+    rate = n_fa / n_total if n_total > 0 else np.nan
+    print(f"Premature Response Rate: {n_fa}/{n_total} = {rate:.3f}")
+    return n_fa, n_total, rate
 
 def response_contingent_FA_rate(results):
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    comp_rew = results.get("completed_sequence_rewarded", pd.DataFrame())
-    comp_unr = results.get("completed_sequence_unrewarded", pd.DataFrame())
-    n_fa = (ab_det["fa_label"] == "FA_time_in").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
-    denom = n_fa + len(comp_rew) + len(comp_unr)
-    print(f"Response-Contingent False Alarm Rate: {n_fa}/{denom} = {n_fa/denom if denom>0 else np.nan:.3f}")
-    return n_fa, denom, n_fa / denom if denom > 0 else np.nan
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "response_time_category" not in df.columns:
+        print("Response-Contingent False Alarm Rate: missing trial_data/response_time_category")
+        return 0, 0, np.nan
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    aborted = df[aborted_mask]
+    n_fa = int((aborted.get("fa_label") == "FA_time_in").sum()) if "fa_label" in aborted.columns else 0
+
+    n_rew = int((df["response_time_category"] == "rewarded").sum())
+    n_unr = int((df["response_time_category"] == "unrewarded").sum())
+
+    denom = n_fa + n_rew + n_unr
+    rate = n_fa / denom if denom > 0 else np.nan
+    print(f"Response-Contingent False Alarm Rate: {n_fa}/{denom} = {rate:.3f}")
+    return n_fa, denom, rate
 
 def global_FA_rate(results):
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    ini = results.get("initiated_sequences", pd.DataFrame())
-    n_fa = (ab_det["fa_label"] == "FA_time_in").sum() if not ab_det.empty and "fa_label" in ab_det.columns else 0
-    n_ini = len(ini)
-    print(f"Global False Alarm Rate: {n_fa}/{n_ini} = {n_fa/n_ini if n_ini>0 else np.nan:.3f}")
-    return n_fa, n_ini, n_fa / n_ini if n_ini > 0 else np.nan
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
+        print("Global False Alarm Rate: no trial_data")
+        return 0, 0, np.nan
+
+    n_fa = int((df.get("fa_label") == "FA_time_in").sum()) if "fa_label" in df.columns else 0
+
+    if "global_trial_id" in df.columns:
+        n_ini = int(df["global_trial_id"].notna().sum())
+    else:
+        n_ini = len(df)
+
+    rate = n_fa / n_ini if n_ini > 0 else np.nan
+    print(f"Global False Alarm Rate: {n_fa}/{n_ini} = {rate:.3f}")
+    return n_fa, n_ini, rate
 
 def FA_odor_bias(results):
     print("FA Odor Bias for FA Time In:")
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    if ab_det.empty or "fa_label" not in ab_det.columns or "last_odor_name" not in ab_det.columns:
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "fa_label" not in df.columns or "last_odor" not in df.columns:
         return {'bias': {}, 'n_fa': {}, 'n_ab': {}, 'total_fa': 0, 'total_ab': 0}
-    fa_mask = ab_det["fa_label"] == "FA_time_in"
-    odors = sorted(ab_det["last_odor_name"].dropna().unique())
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    aborted = df[aborted_mask]
+    if aborted.empty:
+        return {'bias': {}, 'n_fa': {}, 'n_ab': {}, 'total_fa': 0, 'total_ab': 0}
+
+    fa_mask = aborted["fa_label"] == "FA_time_in"
+    odors = sorted(aborted["last_odor"].dropna().unique())
     bias = {}
     n_fa = {}
     n_ab = {}
-    total_fa = fa_mask.sum()
-    total_ab = len(ab_det)
+    total_fa = int(fa_mask.sum())
+    total_ab = len(aborted)
     for od in odors:
-        fa_at_od = fa_mask & (ab_det["last_odor_name"] == od)
-        n_fa_od = fa_at_od.sum()
-        n_ab_od = (ab_det["last_odor_name"] == od).sum()
+        at_od = aborted["last_odor"] == od
+        fa_at_od = fa_mask & at_od
+        n_fa_od = int(fa_at_od.sum())
+        n_ab_od = int(at_od.sum())
         n_fa[od] = n_fa_od
         n_ab[od] = n_ab_od
         bias[od] = (n_fa_od / n_ab_od) / (total_fa / total_ab) if n_ab_od > 0 and total_ab > 0 and total_fa > 0 else np.nan
@@ -880,53 +1002,59 @@ def FA_odor_bias(results):
 
 def FA_position_bias(results):
     print("FA Position Bias for FA Time In:")
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    if ab_det.empty or "fa_label" not in ab_det.columns or "last_odor_position" not in ab_det.columns:
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "fa_label" not in df.columns or "last_event_index" not in df.columns:
         return pd.Series(dtype=float)
-    fa_mask = ab_det["fa_label"] == "FA_time_in" # use != "nFA" for all FA types
-    positions = sorted(ab_det["last_odor_position"].dropna().unique())
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    aborted = df[aborted_mask]
+    if aborted.empty:
+        return pd.Series(dtype=float)
+
+    fa_mask = aborted["fa_label"] == "FA_time_in"
+    positions = sorted(aborted["last_event_index"].dropna().unique())
     bias = {}
-    total_fa = fa_mask.sum()
-    total_ab = len(ab_det)
+    total_fa = int(fa_mask.sum())
+    total_ab = len(aborted)
     for pos in positions:
-        fa_at_pos = fa_mask & (ab_det["last_odor_position"] == pos)
-        n_fa_pos = fa_at_pos.sum()
-        n_ab_pos = (ab_det["last_odor_position"] == pos).sum()
+        at_pos = aborted["last_event_index"] == pos
+        fa_at_pos = fa_mask & at_pos
+        n_fa_pos = int(fa_at_pos.sum())
+        n_ab_pos = int(at_pos.sum())
         bias[pos] = (n_fa_pos / n_ab_pos) / (total_fa / total_ab) if n_ab_pos > 0 and total_ab > 0 and total_fa > 0 else np.nan
         print(f"Position {pos}: {n_fa_pos}/{n_ab_pos} FA, Bias: {bias[pos]:.3f}")
     return pd.Series(bias).sort_index()
 
 def sequence_completion_rate(results):
-    comp = results.get("completed_sequences", pd.DataFrame())
-    ini = results.get("initiated_sequences", pd.DataFrame())
-    print(f"Sequence Completion Rate: {len(comp)}/{len(ini)} = {len(comp)/len(ini) if len(ini)>0 else np.nan:.3f}")
-    return len(comp), len(ini), len(comp) / len(ini) if len(ini) > 0 else np.nan
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
+        print("Sequence Completion Rate: no trial_data")
+        return 0, 0, np.nan
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    n_completed = int((~aborted_mask).sum())
+
+    denom = int(df["global_trial_id"].notna().sum()) if "global_trial_id" in df.columns else len(df)
+    rate = n_completed / denom if denom > 0 else np.nan
+    print(f"Sequence Completion Rate: {n_completed}/{denom} = {rate:.3f}")
+    return n_completed, denom, rate
 
 def odorx_abortion_rate(results):
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    comp = results.get("completed_sequences", pd.DataFrame())
-    if ab_det.empty or "presentations" not in ab_det.columns or "last_odor_name" not in ab_det.columns:
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "presentations" not in df.columns or "last_odor" not in df.columns:
         return pd.Series(dtype=float)
 
-    # Numerator: abortions at odor X (last odor)
-    abortions = ab_det["last_odor_name"].value_counts().to_dict()
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    aborted = df[aborted_mask]
 
-    # Denominator: all presentations of odor X (aborted + completed)
+    abortions = aborted["last_odor"].dropna().value_counts().to_dict()
+
     presentations = {}
-    # Aborted trials
-    for _, row in ab_det.iterrows():
+    for _, row in df.iterrows():
         pres_list = parse_json_column(row.get("presentations", []))
         if isinstance(pres_list, list):
             for pres in pres_list:
-                od = pres.get("odor_name")
-                if od is not None:
-                    presentations[od] = presentations.get(od, 0) + 1
-    # Completed trials
-    for _, row in comp.iterrows():
-        ppt = parse_json_column(row.get("position_poke_times", {}))
-        if isinstance(ppt, dict):
-            for pos, info in ppt.items():
-                od = info.get("odor_name")
+                od = pres.get("odor_name") if isinstance(pres, dict) else None
                 if od is not None:
                     presentations[od] = presentations.get(od, 0) + 1
 
@@ -940,36 +1068,40 @@ def odorx_abortion_rate(results):
     return pd.Series(rates).sort_index()
 
 def hidden_rule_performance(results):
-    # Numerator: rewarded completed HR trials
-    n_hr_rewarded = len(results.get("completed_sequence_HR_rewarded", pd.DataFrame()))
-    # Denominator: any trial with HR presentation
-    denom = (
-        len(results.get("completed_sequence_HR_rewarded", pd.DataFrame())) +
-        len(results.get("completed_sequence_HR_unrewarded", pd.DataFrame())) +
-        len(results.get("completed_sequence_HR_reward_timeout", pd.DataFrame())) +
-        len(results.get("completed_sequences_HR_missed", pd.DataFrame())) +
-        len(results.get("aborted_sequences_HR", pd.DataFrame()))
-    )
-    print(f"Hidden Rule Performance: {n_hr_rewarded}/{denom} = {n_hr_rewarded/denom if denom>0 else np.nan:.3f}")
-    return n_hr_rewarded, denom, n_hr_rewarded / denom if denom > 0 else np.nan
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
+        print("Hidden Rule Performance: no trial_data")
+        return 0, 0, np.nan
+
+    success_mask = df["hidden_rule_success"].apply(_is_truthy) if "hidden_rule_success" in df.columns else pd.Series(False, index=df.index)
+    reward_mask = df["response_time_category"] == "rewarded" if "response_time_category" in df.columns else pd.Series(False, index=df.index)
+    num_mask = success_mask & reward_mask
+    n_hr_rewarded = int(num_mask.sum())
+
+    denom_mask = df["hit_hidden_rule"].apply(_is_truthy) if "hit_hidden_rule" in df.columns else pd.Series(False, index=df.index)
+    denom = int(denom_mask.sum())
+
+    rate = n_hr_rewarded / denom if denom > 0 else np.nan
+    print(f"Hidden Rule Performance: {n_hr_rewarded}/{denom} = {rate:.3f}")
+    return n_hr_rewarded, denom, rate
 
 def hidden_rule_detection_rate(results):
-    # Numerator: completed HR trials (rewarded, unrewarded, timeout) at HR position
-    n_hr_completed = (
-        len(results.get("completed_sequence_HR_rewarded", pd.DataFrame())) +
-        len(results.get("completed_sequence_HR_unrewarded", pd.DataFrame())) +
-        len(results.get("completed_sequence_HR_reward_timeout", pd.DataFrame()))
-    )
-    # Denominator: any trial with HR presentation
-    denom = (
-        len(results.get("completed_sequence_HR_rewarded", pd.DataFrame())) +
-        len(results.get("completed_sequence_HR_unrewarded", pd.DataFrame())) +
-        len(results.get("completed_sequence_HR_reward_timeout", pd.DataFrame())) +
-        len(results.get("completed_sequences_HR_missed", pd.DataFrame())) +
-        len(results.get("aborted_sequences_HR", pd.DataFrame()))
-    )
-    print(f"Hidden Rule Detection Rate: {n_hr_completed}/{denom} = {n_hr_completed/denom if denom>0 else np.nan:.3f}")
-    return n_hr_completed, denom, n_hr_completed / denom if denom > 0 else np.nan
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
+        print("Hidden Rule Detection Rate: no trial_data")
+        return 0, 0, np.nan
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    success_mask = df["hidden_rule_success"].apply(_is_truthy) if "hidden_rule_success" in df.columns else pd.Series(False, index=df.index)
+    num_mask = (~aborted_mask) & success_mask
+    n_hr_completed = int(num_mask.sum())
+
+    denom_mask = df["hit_hidden_rule"].apply(_is_truthy) if "hit_hidden_rule" in df.columns else pd.Series(False, index=df.index)
+    denom = int(denom_mask.sum())
+
+    rate = n_hr_completed / denom if denom > 0 else np.nan
+    print(f"Hidden Rule Detection Rate: {n_hr_completed}/{denom} = {rate:.3f}")
+    return n_hr_completed, denom, rate
 
 
 def _extract_hr_config(results):
@@ -1038,46 +1170,6 @@ def _is_truthy(val):
     if isinstance(val, str):
         return val.strip().lower() in {"1", "true", "t", "yes", "y"}
     return False
-
-
-def _hr_odors_in_row_from_sequence(row, hr_odors_set):
-    """Return list of HR odors present in the row's odor sequence."""
-
-    def _coerce_list(val):
-        parsed = parse_json_column(val)
-        if isinstance(parsed, (list, tuple)):
-            return list(parsed)
-        if isinstance(parsed, str):
-            try:
-                lit = ast.literal_eval(parsed)
-                if isinstance(lit, (list, tuple)):
-                    return list(lit)
-            except Exception:
-                pass
-            return [parsed]
-        return []
-
-    seq = []
-    for key in ["odor_sequence", "odor_sequence_full", "odor_sequence_list"]:
-        if key in row:
-            seq = _coerce_list(row.get(key))
-            if seq:
-                break
-
-    if not seq and "hidden_rule_odors" in row:
-        seq = _coerce_list(row.get("hidden_rule_odors"))
-
-    hits = []
-    seen = set()
-    allowed = hr_odors_set or None  # None means accept all odors found
-    for od in seq:
-        s = str(od)
-        if allowed is not None and s not in allowed:
-            continue
-        if s not in seen:
-            seen.add(s)
-            hits.append(s)
-    return hits
 
 
 def _infer_hr_odors_from_row(row, hr_odors, hr_positions):
@@ -1163,6 +1255,11 @@ def hidden_rule_counts_by_odor(results):
     Aggregate HR trials by odor across outcome categories to support per-odor performance/detection.
     Returns a dict with hr_odors, hr_positions, and per-odor counts plus rates.
     """
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
+        print("Hidden Rule Counts by Odor: no trial_data")
+        return {"hr_odors": [], "hr_positions": [], "by_odor": {}}
+
     hr_odors, hr_positions = _extract_hr_config(results)
     hr_set = set(hr_odors)
     counts = defaultdict(lambda: defaultdict(int))
@@ -1173,34 +1270,43 @@ def hidden_rule_counts_by_odor(results):
 
     seen_odors = set(hr_odors)
 
-    def _count_df(df, label, require_hit_hidden_rule=False):
-        if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+    def _add_counts(mask: pd.Series, label: str):
+        subset = df[mask] if isinstance(mask, pd.Series) else pd.DataFrame()
+        if subset.empty:
             return
-        for _, row in df.iterrows():
-            if require_hit_hidden_rule and not _is_truthy(row.get("hit_hidden_rule", False)):
-                continue
-            hits = _hr_odors_in_row_from_sequence(row, hr_set)
-            if not hits:
-                continue
-            for od in hits:
+        for _, row in subset.iterrows():
+            odors = _infer_hr_odors_from_row(row, hr_odors, hr_positions)
+            for od in odors:
+                if od not in hr_set:
+                    continue
                 seen_odors.add(od)
                 counts[od][label] += 1
 
-    # Rewarded / Unrewarded HR trials
-    _count_df(results.get("completed_sequence_HR_rewarded", pd.DataFrame()), "rewarded")
-    _count_df(results.get("completed_sequence_HR_unrewarded", pd.DataFrame()), "unrewarded")
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    success_mask = df["hidden_rule_success"].apply(_is_truthy) if "hidden_rule_success" in df.columns else pd.Series(False, index=df.index)
+    hit_mask = df["hit_hidden_rule"].apply(_is_truthy) if "hit_hidden_rule" in df.columns else pd.Series(False, index=df.index)
 
-    # Timeout trials: prefer HR-specific table; otherwise filter general timeouts on hit_hidden_rule
-    timeout_df_hr = results.get("completed_sequence_HR_reward_timeout", pd.DataFrame())
-    if isinstance(timeout_df_hr, pd.DataFrame) and not timeout_df_hr.empty:
-        _count_df(timeout_df_hr, "timeout")
-    else:
-        timeout_df = results.get("completed_sequence_reward_timeout", pd.DataFrame())
-        _count_df(timeout_df, "timeout", require_hit_hidden_rule=True)
+    # Completed HR trials by outcome (only count HR successes)
+    if "response_time_category" in df.columns:
+        _add_counts((df["response_time_category"] == "rewarded") & success_mask, "rewarded")
+        _add_counts((df["response_time_category"] == "unrewarded") & success_mask, "unrewarded")
+        _add_counts((df["response_time_category"] == "timeout_delayed") & success_mask, "timeout")
 
-    # Missed/aborted HR trials (when available)
-    _count_df(results.get("completed_sequences_HR_missed", pd.DataFrame()), "missed")
-    _count_df(results.get("aborted_sequences_HR", pd.DataFrame()), "aborted")
+    # Aborted HR trials (any aborted hit)
+    _add_counts(aborted_mask & hit_mask, "aborted")
+
+    # Missed HR trials: not aborted and not successful
+    _add_counts((~aborted_mask) & (~success_mask), "missed")
+
+    # Total presentations per odor (match odorx_abortion_rate logic)
+    presentations = {}
+    for _, row in df.iterrows():
+        pres_list = parse_json_column(row.get("presentations", []))
+        if isinstance(pres_list, list):
+            for pres in pres_list:
+                od = pres.get("odor_name") if isinstance(pres, dict) else None
+                if od is not None and od in hr_set:
+                    presentations[od] = presentations.get(od, 0) + 1
 
     def _fmt_rate(val):
         return f"{val:.3f}" if isinstance(val, (int, float, np.floating)) and not np.isnan(val) else "nan"
@@ -1214,19 +1320,19 @@ def hidden_rule_counts_by_odor(results):
         missed = c.get("missed", 0)
         aborted = c.get("aborted", 0)
 
+        total_presentations = presentations.get(odor, 0)
         completed_no_timeout = rewarded + unrewarded
         completed_with_timeout = completed_no_timeout + timeout
-        total_all = completed_with_timeout + missed + aborted
 
         performance = rewarded / completed_no_timeout if completed_no_timeout > 0 else np.nan
-        detection_rate = completed_no_timeout / total_all if total_all > 0 else np.nan
+        detection_rate = completed_no_timeout / total_presentations if total_presentations > 0 else np.nan
 
         print(
-            f"Hidden Rule Odor {odor}: {rewarded} Rewarded, {unrewarded} Unrewarded, {timeout} Timeout, {total_all} Total Presentations."
+            f"Hidden Rule Odor {odor}: {rewarded} Rewarded, {unrewarded} Unrewarded, {timeout} Timeout, {total_presentations} Total Presentations."
         )
         print(
             f"  HR Odor {odor} Performance: {rewarded}/{completed_no_timeout} = {_fmt_rate(performance)}, "
-            f"HR Odor {odor} Detection Rate: {completed_no_timeout}/{total_all} = {_fmt_rate(detection_rate)}"
+            f"HR Odor {odor} Detection Rate: {completed_no_timeout}/{total_presentations} = {_fmt_rate(detection_rate)}"
         )
 
         by_odor[odor] = {
@@ -1235,13 +1341,13 @@ def hidden_rule_counts_by_odor(results):
             "timeout": int(timeout),
             "missed": int(missed),
             "aborted": int(aborted),
+            "total_presentations": int(total_presentations),
             "completed_total": int(completed_with_timeout),
             "completed_no_timeout": int(completed_no_timeout),
-            "total": int(total_all),
             "performance": performance,
             "performance_fraction": [int(rewarded), int(completed_no_timeout)],
             "detection_rate": detection_rate,
-            "detection_fraction": [int(completed_no_timeout), int(total_all)],
+            "detection_fraction": [int(completed_no_timeout), int(total_presentations)],
         }
 
     return {
@@ -1251,23 +1357,40 @@ def hidden_rule_counts_by_odor(results):
     }
 
 def choice_timeout_rate(results):
-    comp_tmo = results.get("completed_sequence_reward_timeout", pd.DataFrame())
-    comp = results.get("completed_sequences", pd.DataFrame())
-    print(f"Choice Timeout Rate: {len(comp_tmo)}/{len(comp)} = {len(comp_tmo)/len(comp) if len(comp)>0 else np.nan:.3f}")
-    return len(comp_tmo), len(comp), len(comp_tmo) / len(comp) if len(comp) > 0 else np.nan
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "response_time_category" not in df.columns:
+        print("Choice Timeout Rate: no trial_data/response_time_category")
+        return 0, 0, np.nan
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    completed = df[~aborted_mask]
+
+    n_tmo = int((completed["response_time_category"] == "timeout_delayed").sum())
+    denom = len(completed)
+    rate = n_tmo / denom if denom > 0 else np.nan
+    print(f"Choice Timeout Rate: {n_tmo}/{denom} = {rate:.3f}")
+    return n_tmo, denom, rate
 
 def avg_sampling_time_odor_x(results):
-    comp = results.get("completed_sequences", pd.DataFrame())
-    if comp.empty:
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
         return pd.Series(dtype=float)
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    completed = df[~aborted_mask]
+    if completed.empty:
+        return pd.Series(dtype=float)
+
     odor_times = {}
-    for _, row in comp.iterrows():
+    for _, row in completed.iterrows():
         ppt = parse_json_column(row.get("position_poke_times", {}))
-        for pos, info in ppt.items():
-            od = info.get("odor_name")
-            poke_ms = info.get("poke_time_ms")
-            if od is not None and poke_ms is not None:
-                odor_times.setdefault(od, []).append(poke_ms)
+        if isinstance(ppt, dict):
+            for _, info in ppt.items():
+                od = info.get("odor_name") if isinstance(info, dict) else None
+                poke_ms = info.get("poke_time_ms") if isinstance(info, dict) else None
+                if od is not None and poke_ms is not None:
+                    odor_times.setdefault(od, []).append(poke_ms)
+
     avg_times = pd.Series({od: np.mean(times) for od, times in odor_times.items()}).sort_index()
     for odor, avg_time in avg_times.items():
         print(f"{odor} Average Sampling Time: {avg_time:.2f} ms")
@@ -1275,37 +1398,52 @@ def avg_sampling_time_odor_x(results):
     return avg_times
 
 def avg_sampling_time_completed_sequence(results):
-    comp = results.get("completed_sequences", pd.DataFrame())
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
+        return np.nan
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    completed = df[~aborted_mask]
+
     total_time = 0.0
     total_presentations = 0
-    for _, row in comp.iterrows():
+    for _, row in completed.iterrows():
         ppt = parse_json_column(row.get("position_poke_times", {}))
-        for pos, info in ppt.items():
-            poke_ms = info.get("poke_time_ms")
-            if poke_ms is not None:
-                total_time += poke_ms
-                total_presentations += 1
-    print(f"Average Sampling Time (Completed Sequences): {total_time/total_presentations if total_presentations>0 else np.nan:.2f} ms")
-    return total_time / total_presentations if total_presentations > 0 else np.nan
+        if isinstance(ppt, dict):
+            for _, info in ppt.items():
+                poke_ms = info.get("poke_time_ms") if isinstance(info, dict) else None
+                if poke_ms is not None:
+                    total_time += poke_ms
+                    total_presentations += 1
+    avg = total_time / total_presentations if total_presentations > 0 else np.nan
+    print(f"Average Sampling Time (Completed Sequences): {avg:.2f} ms")
+    return avg
 
 def avg_sampling_time_aborted_sequence(results):
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
+        return np.nan
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    aborted = df[aborted_mask]
+    if aborted.empty:
+        return np.nan
+
     total_time = 0.0
     total_presentations = 0
-    if ab_det.empty or "presentations" not in ab_det.columns or "last_event_index" not in ab_det.columns:
-        return np.nan
-    for _, row in ab_det.iterrows():
+    for _, row in aborted.iterrows():
         pres_list = parse_json_column(row.get("presentations", []))
         last_idx = row.get("last_event_index")
         if isinstance(pres_list, list):
             for pres in pres_list:
-                idx = pres.get("index_in_trial")
-                poke_ms = pres.get("poke_time_ms")
-                if idx != last_idx and poke_ms is not None:
+                idx = pres.get("index_in_trial") if isinstance(pres, dict) else None
+                poke_ms = pres.get("poke_time_ms") if isinstance(pres, dict) else None
+                if idx is not None and idx != last_idx and poke_ms is not None:
                     total_time += poke_ms
                     total_presentations += 1
-    print(f"Average Sampling Time (Aborted Sequences): {total_time/total_presentations if total_presentations>0 else np.nan:.2f} ms")
-    return total_time / total_presentations if total_presentations > 0 else np.nan
+    avg = total_time / total_presentations if total_presentations > 0 else np.nan
+    print(f"Average Sampling Time (Aborted Sequences): {avg:.2f} ms")
+    return avg
 
 def avg_sampling_time_initiation_abortion(results):
     def _choose_poke_series(df, columns):
@@ -1324,38 +1462,43 @@ def avg_sampling_time_initiation_abortion(results):
     return all_vals.mean() if not all_vals.empty else np.nan
 
 def abortion_rate_positionX(results):
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    comp = results.get("completed_sequences", pd.DataFrame())
-    comp_hr_missed = results.get("completed_sequences_HR_missed", pd.DataFrame())
-    if ab_det.empty or "last_odor_position" not in ab_det.columns:
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
         return pd.Series(dtype=float)
 
-    # Numerator: abortions at each position
-    abortions = ab_det["last_odor_position"].value_counts().to_dict()
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    aborted = df[aborted_mask]
+    completed = df[~aborted_mask]
 
-    # Denominator: number of trials that reached each position
+    if "last_event_index" not in df.columns:
+        return pd.Series(dtype=float)
+
+    abortions = (aborted["last_event_index"] + 1).dropna().value_counts().to_dict()
+
     reached = {}
 
-    # Aborted trials: count all positions up to and including the abortion position
-    for _, row in ab_det.iterrows():
-        last_pos = row.get("last_odor_position")
-        if pd.notnull(last_pos):
-            for pos in range(1, int(last_pos) + 1):
+    for _, row in aborted.iterrows():
+        last_idx = row.get("last_event_index")
+        if pd.notnull(last_idx):
+            last_pos = int(last_idx) + 1
+            for pos in range(1, last_pos + 1):
                 reached[pos] = reached.get(pos, 0) + 1
 
-    # Completed HR-missed: all 5 positions reached
-    for _, row in comp_hr_missed.iterrows():
-        for pos in range(1, 6):
-            reached[pos] = reached.get(pos, 0) + 1
-
-    # Completed (not HR-missed): only positions up to and including HR position
-    for _, row in comp.iterrows():
+    for _, row in completed.iterrows():
         ppt = parse_json_column(row.get("position_poke_times", {}))
+        max_pos = None
         if isinstance(ppt, dict) and ppt:
-            max_pos = max([int(pos) for pos in ppt.keys() if str(pos).isdigit()])
-            for pos in range(1, max_pos + 1):
+            try:
+                max_pos = max(int(k) for k in ppt.keys())
+            except Exception:
+                max_pos = None
+        if max_pos is None and "last_event_index" in row:
+            le = row.get("last_event_index")
+            max_pos = int(le) + 1 if pd.notnull(le) else None
+        if max_pos is not None:
+            for pos in range(1, int(max_pos) + 1):
                 reached[pos] = reached.get(pos, 0) + 1
-    # Calculate rates
+
     all_positions = sorted(set(list(abortions.keys()) + list(reached.keys())))
     rates = {}
     for pos in all_positions:
@@ -1366,89 +1509,82 @@ def abortion_rate_positionX(results):
     return pd.Series(rates).sort_index()
 
 def avg_response_time(results):
-    comp_rt = results.get("completed_sequences_with_response_times", pd.DataFrame())
-    if comp_rt.empty or "response_time_ms" not in comp_rt.columns or "response_time_category" not in comp_rt.columns:
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "response_time_category" not in df.columns or "response_time_ms" not in df.columns:
         print("No response time data available.")
         return {}
 
+    def avg_for_mask(mask):
+        s = pd.to_numeric(df.loc[mask, "response_time_ms"], errors="coerce").dropna()
+        return float(s.mean()) if not s.empty else np.nan, len(s)
+
     out = {}
-    def print_avg(df, label):
-        s = pd.to_numeric(df["response_time_ms"], errors="coerce").dropna()
-        avg = s.mean() if not s.empty else np.nan
-        print(f"{label}: {avg:.1f} ms (n={len(s)})")
-        return float(avg) if not np.isnan(avg) else np.nan
+    for label, key in [("Rewarded", "rewarded"), ("Unrewarded", "unrewarded"), ("Reward Timeout", "timeout_delayed")]:
+        avg, n = avg_for_mask(df["response_time_category"] == key)
+        print(f"{label}: {avg:.1f} ms (n={n})" if not np.isnan(avg) else f"{label}: nan (n={n})")
+        out[label] = avg
 
-    # Rewarded
-    rew = comp_rt[comp_rt["response_time_category"] == "rewarded"]
-    out["Rewarded"] = print_avg(rew, "Rewarded")
-
-    # Unrewarded
-    unr = comp_rt[comp_rt["response_time_category"] == "unrewarded"]
-    out["Unrewarded"] = print_avg(unr, "Unrewarded")
-
-    # Reward Timeout
-    tmo = comp_rt[comp_rt["response_time_category"] == "timeout_delayed"]
-    out["Reward Timeout"] = print_avg(tmo, "Reward Timeout")
-
-    # Rewarded + Unrewarded (excluding timeouts)
-    both = comp_rt[comp_rt["response_time_category"].isin(["rewarded", "unrewarded"])]
-    out["Average Response Time (Rewarded + Unrewarded)"] = print_avg(both, "Average Response Time (Rewarded + Unrewarded)")
+    mask_both = df["response_time_category"].isin(["rewarded", "unrewarded"])
+    avg_both, n_both = avg_for_mask(mask_both)
+    print(f"Average Response Time (Rewarded + Unrewarded): {avg_both:.1f} ms (n={n_both})" if not np.isnan(avg_both) else f"Average Response Time (Rewarded + Unrewarded): nan (n={n_both})")
+    out["Average Response Time (Rewarded + Unrewarded)"] = avg_both
 
     return out
 
 def FA_avg_response_times(results):
     out = {}
-    # Non-initiated FA
-    fa_noninit_df = results.get("non_initiated_FA", pd.DataFrame())
-    if not fa_noninit_df.empty and "fa_label" in fa_noninit_df.columns and "fa_latency_ms" in fa_noninit_df.columns:
-        print("Non-Initiated FA Response Times:")
-        for label, pretty in [
-            ("FA_time_in", "FA Time In"),
-            ("FA_time_out", "FA Time Out"),
-            ("FA_late", "FA Late"),
-        ]:
-            s = pd.to_numeric(fa_noninit_df.loc[fa_noninit_df["fa_label"] == label, "fa_latency_ms"], errors="coerce").dropna()
-            avg = s.mean() if not s.empty else np.nan
-            print(f"  - {pretty}: avg={avg:.1f} ms, median={s.median():.1f} ms, n={len(s)}" if not s.empty else f"  - {pretty}: n=0")
-            out[f"Non-Initiated {pretty}"] = float(avg) if not np.isnan(avg) else np.nan
-        print()
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "fa_label" not in df.columns or "fa_latency_ms" not in df.columns:
+        return out
 
-    # Aborted trials FA
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    if not ab_det.empty and "fa_label" in ab_det.columns and "fa_latency_ms" in ab_det.columns:
-        print("Aborted Trials FA Response Times:")
-        for label, pretty in [
-            ("FA_time_in", "FA Time In"),
-            ("FA_time_out", "FA Time Out"),
-            ("FA_late", "FA Late"),
-        ]:
-            s = pd.to_numeric(ab_det.loc[ab_det["fa_label"] == label, "fa_latency_ms"], errors="coerce").dropna()
-            avg = s.mean() if not s.empty else np.nan
-            print(f"  - {pretty}: avg={avg:.1f} ms, median={s.median():.1f} ms, n={len(s)}" if not s.empty else f"  - {pretty}: n=0")
-            out[f"Aborted {pretty}"] = float(avg) if not np.isnan(avg) else np.nan
-        print()
+    fa_df = df[df["fa_label"].notna()]
+    for label, pretty in [
+        ("FA_time_in", "FA Time In"),
+        ("FA_time_out", "FA Time Out"),
+        ("FA_late", "FA Late"),
+    ]:
+        s = pd.to_numeric(fa_df.loc[fa_df["fa_label"] == label, "fa_latency_ms"], errors="coerce").dropna()
+        avg = s.mean() if not s.empty else np.nan
+        print(f"{pretty}: avg={avg:.1f} ms (n={len(s)})" if not np.isnan(avg) else f"{pretty}: nan (n={len(s)})")
+        out[pretty] = float(avg) if not np.isnan(avg) else np.nan
     return out
 
 def response_rate(results):
-    comp = results.get("completed_sequences", pd.DataFrame())
-    comp_tmo = results.get("completed_sequence_reward_timeout", pd.DataFrame())
-    n_resp = len(comp) - len(comp_tmo)
-    print(f"Response Rate: {n_resp}/{len(comp)} = {n_resp/len(comp) if len(comp)>0 else np.nan:.3f}")
-    return n_resp, len(comp), n_resp / len(comp) if len(comp) > 0 else np.nan
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "response_time_category" not in df.columns:
+        print("Response Rate: no trial_data/response_time_category")
+        return 0, 0, np.nan
+
+    n_rew = int((df["response_time_category"] == "rewarded").sum())
+    n_unr = int((df["response_time_category"] == "unrewarded").sum())
+    n_tmo = int((df["response_time_category"] == "timeout_delayed").sum())
+
+    denom = n_rew + n_unr + n_tmo
+    num = n_rew + n_unr
+    rate = num / denom if denom > 0 else np.nan
+    print(f"Response Rate: {num}/{denom} = {rate:.3f}")
+    return num, denom, rate
 
 def manual_vs_auto_stop_preference(results):
-    comp = results.get("completed_sequences", pd.DataFrame())
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty:
+        return {"short_valve": 0, "long_valve": 0, "ratio": np.nan}
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    completed = df[~aborted_mask]
+
     short = 0
     long = 0
-    for _, row in comp.iterrows():
+    for _, row in completed.iterrows():
         vts = parse_json_column(row.get("position_valve_times", {}))
-        for pos, info in vts.items():
-            dur = info.get("valve_duration_ms")
-            if dur is not None:
-                if dur <= 1000:
-                    short += 1
-                elif dur >= 1000:
-                    long += 1
+        if isinstance(vts, dict):
+            for _, info in vts.items():
+                dur = info.get("valve_duration_ms") if isinstance(info, dict) else None
+                if dur is not None:
+                    if dur <= 1000:
+                        short += 1
+                    elif dur >= 1000:
+                        long += 1
     ratio = short / long if long > 0 else float('nan')
     print(f"Manual Stops: {short}")
     print(f"Auto Stops: {long}")
@@ -1466,39 +1602,40 @@ def non_initiated_FA_rate(results):
 def non_initiation_odor_bias(results):
     non_ini = results.get("non_initiated_sequences", pd.DataFrame())
     pos1 = results.get("non_initiated_odor1_attempts", pd.DataFrame())
-    ini = results.get("initiated_sequences", pd.DataFrame())
+    trial_df = results.get("trial_data", pd.DataFrame())
 
-    # Only consider first odor attempts
+    # Only consider first odor attempts in non-initiated tables
     non_ini = non_ini[non_ini["odor_position"] == 1] if "odor_position" in non_ini.columns else non_ini
     pos1 = pos1[pos1["odor_position"] == 1] if "odor_position" in pos1.columns else pos1
 
-    # Numerator: non-initiated trials with this odor as first odor
     all_non_init = pd.concat([non_ini, pos1], ignore_index=True)
-    
-    # Handle empty DataFrame or missing odor_name column
-    if all_non_init.empty or "odor_name" not in all_non_init.columns:
-        return pd.Series(dtype=float)
-    
-    count_odors = all_non_init["odor_name"].value_counts()
 
-    # Denominator: all trials with this odor as first odor (initiated or not)
-    # Get from both initiated and non-initiated
+    # Numerator: non-initiated trials with this odor as first odor
+    if all_non_init.empty or "odor_name" not in all_non_init.columns:
+        count_odors = pd.Series(dtype=int)
+    else:
+        count_odors = all_non_init["odor_name"].value_counts()
+
+    # Denominator: all trials (initiated + non-initiated) with first odor = odor
     first_odors = []
 
-    # Initiated
-    for idx, row in ini.iterrows():
-        presentations = row.get("presentations", [])
-        if isinstance(presentations, str):
-            import json
-            try:
-                presentations = json.loads(presentations.replace("'", '"'))
-            except Exception:
-                presentations = []
-        if presentations and isinstance(presentations, list):
-            for pres in presentations:
-                if pres.get("position") == 1:
-                    first_odors.append(pres.get("odor_name"))
-                    break
+    # Initiated trials from trial_data presentations
+    if not trial_df.empty and "presentations" in trial_df.columns:
+        for _, row in trial_df.iterrows():
+            pres_list = parse_json_column(row.get("presentations", []))
+            if isinstance(pres_list, list):
+                for pres in pres_list:
+                    if not isinstance(pres, dict):
+                        continue
+                    pos = pres.get("position")
+                    if pos is None and pres.get("index_in_trial") is not None:
+                        try:
+                            pos = int(pres.get("index_in_trial")) + 1
+                        except Exception:
+                            pos = None
+                    if pos == 1:
+                        first_odors.append(pres.get("odor_name"))
+                        break
 
     # Non-initiated (baseline and pos1)
     for df in [non_ini, pos1]:
@@ -1509,10 +1646,9 @@ def non_initiation_odor_bias(results):
 
     # Global rates for normalization
     total_noninit = len(all_non_init)
-    total_trials = len(total_first_odors) and total_first_odors.sum() or 0
+    total_trials = int(total_first_odors.sum()) if not total_first_odors.empty else 0
     global_rate = total_noninit / total_trials if total_trials > 0 else np.nan
 
-    # Calculate bias for each odor
     bias = {}
     for od in sorted(total_first_odors.index):
         n_noninit = count_odors.get(od, 0)
@@ -1526,25 +1662,38 @@ def non_initiation_odor_bias(results):
     return pd.Series(bias).sort_index()
 
 def odor_initiation_bias(results):
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    if ab_det.empty or "last_odor_name" not in ab_det.columns or "abortion_type" not in ab_det.columns:
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "abortion_type" not in df.columns or "last_odor" not in df.columns:
         return pd.Series(dtype=float)
-    odors = ab_det["last_odor_name"].dropna().unique()
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    aborted = df[aborted_mask]
+    if aborted.empty:
+        return pd.Series(dtype=float)
+
+    init_mask = aborted["abortion_type"] == "initiation_abortion"
+    odors = aborted["last_odor"].dropna().unique()
     bias = {}
-    total_init = (ab_det["abortion_type"] == "initiation_abortion").sum()
-    total_ab = len(ab_det)
+    total_init = int(init_mask.sum())
+    total_ab = len(aborted)
     for od in sorted(odors):
-        n_init_od = ((ab_det["last_odor_name"] == od) & (ab_det["abortion_type"] == "initiation_abortion")).sum()
-        n_ab_od = (ab_det["last_odor_name"] == od).sum()
+        n_init_od = int(((aborted["last_odor"] == od) & init_mask).sum())
+        n_ab_od = int((aborted["last_odor"] == od).sum())
         bias[od] = (n_init_od / n_ab_od) / (total_init / total_ab) if n_ab_od > 0 and total_ab > 0 and total_init > 0 else np.nan
         print(f"{od}: {n_init_od}/{n_ab_od} initiation abortions, Bias: {bias[od]:.3f}")
     return pd.Series(bias).sort_index()
 
 def fa_abortion_stats(results, return_df=False):
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    if ab_det.empty:
-        print("No aborted_sequences_detailed data.")
-        return
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "fa_label" not in df.columns or "last_odor" not in df.columns or "last_event_index" not in df.columns:
+        print("No FA abortion data available.")
+        return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    fa_df = df[aborted_mask & df["fa_label"].notna()]
+    if fa_df.empty:
+        print("No FA abortions found.")
+        return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
 
     subtype_labels = [
         ("FA_time_in", "FA Time In"),
@@ -1554,15 +1703,15 @@ def fa_abortion_stats(results, return_df=False):
 
     # Odor+Position table
     rows = []
-    odors = sorted(ab_det["last_odor_name"].dropna().unique())
-    positions = sorted(ab_det["last_odor_position"].dropna().unique())
+    odors = sorted(fa_df["last_odor"].dropna().unique())
+    positions = sorted((fa_df["last_event_index"] + 1).dropna().unique())
     for odor in odors:
         for pos in positions:
-            df = ab_det[(ab_det["last_odor_name"] == odor) & (ab_det["last_odor_position"] == pos)]
-            n_total = len(df)
+            sub = fa_df[(fa_df["last_odor"] == odor) & ((fa_df["last_event_index"] + 1) == pos)]
+            n_total = len(sub)
             if n_total == 0:
                 continue
-            fa_labels = df["fa_label"].fillna("").astype(str).str.strip()
+            fa_labels = sub["fa_label"].astype(str)
             row = {
                 "Odor": odor,
                 "Position": pos,
@@ -1579,11 +1728,11 @@ def fa_abortion_stats(results, return_df=False):
     # Per-odor table
     odor_rows = []
     for odor in odors:
-        df = ab_det[ab_det["last_odor_name"] == odor]
-        n_total = len(df)
+        sub = fa_df[fa_df["last_odor"] == odor]
+        n_total = len(sub)
         if n_total == 0:
             continue
-        fa_labels = df["fa_label"].fillna("").astype(str).str.strip()
+        fa_labels = sub["fa_label"].astype(str)
         row = {
             "Odor": odor,
             "Total Abortions": n_total,
@@ -1599,11 +1748,11 @@ def fa_abortion_stats(results, return_df=False):
     # Per-position table
     pos_rows = []
     for pos in positions:
-        df = ab_det[ab_det["last_odor_position"] == pos]
-        n_total = len(df)
+        sub = fa_df[(fa_df["last_event_index"] + 1) == pos]
+        n_total = len(sub)
         if n_total == 0:
             continue
-        fa_labels = df["fa_label"].fillna("").astype(str).str.strip()
+        fa_labels = sub["fa_label"].astype(str)
         row = {
             "Position": pos,
             "Total Abortions": n_total,
@@ -1659,24 +1808,28 @@ def fa_port_ratio_by_odor(results, include_non_initiated=True, fa_type="FA_time_
     """
     print(f"FA Port Ratio by Odor ({fa_type}):")
     
-    ab_det = results.get("aborted_sequences_detailed", pd.DataFrame())
-    fa_noninit = results.get("non_initiated_FA", pd.DataFrame())
-    
+    df = results.get("trial_data", pd.DataFrame())
+    fa_noninit = results.get("non_initiated_FA", pd.DataFrame()) if include_non_initiated else pd.DataFrame()
+
+    if df.empty and fa_noninit.empty:
+        print("  No FA data with port and odor information found.")
+        return {'by_odor': pd.Series(dtype=float), 'counts': {}, 'total_fa_by_odor': {}}
+
+    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
+    fa_ab = df[aborted_mask] if not df.empty else pd.DataFrame()
+
     # Define filter function based on fa_type
     if fa_type.lower() == 'all':
         fa_filter = lambda x: x.astype(str).str.startswith('FA_', na=False)
     else:
         fa_filter = lambda x: x.astype(str) == fa_type
-    
-    # Combine FA data based on parameter
-    if include_non_initiated and not fa_noninit.empty:
-        fa_ab = ab_det[fa_filter(ab_det["fa_label"])].copy() if not ab_det.empty and "fa_label" in ab_det.columns else pd.DataFrame()
-        fa_ni = fa_noninit[fa_filter(fa_noninit["fa_label"])].copy() if not fa_noninit.empty and "fa_label" in fa_noninit.columns else pd.DataFrame()
-        fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True)
-    else:
-        fa_all = ab_det[fa_filter(ab_det["fa_label"])].copy() if not ab_det.empty and "fa_label" in ab_det.columns else pd.DataFrame()
-    
-    if fa_all.empty or "fa_port" not in fa_all.columns or "last_odor_name" not in fa_all.columns:
+
+    fa_ab = fa_ab[fa_filter(fa_ab.get("fa_label", pd.Series(dtype=str)))] if not fa_ab.empty else pd.DataFrame()
+    fa_ni = fa_noninit[fa_filter(fa_noninit.get("fa_label", pd.Series(dtype=str)))] if not fa_noninit.empty else pd.DataFrame()
+
+    fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True) if include_non_initiated else fa_ab
+
+    if fa_all.empty or "fa_port" not in fa_all.columns or "last_odor" not in fa_all.columns:
         print("  No FA data with port and odor information found.")
         return {'by_odor': pd.Series(dtype=float), 'counts': {}, 'total_fa_by_odor': {}}
     
@@ -1685,8 +1838,8 @@ def fa_port_ratio_by_odor(results, include_non_initiated=True, fa_type="FA_time_
     counts = {}
     total_fa_by_odor = {}
     
-    for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
-        fa_odor = fa_all[fa_all["last_odor_name"] == odor]
+    for odor in sorted(fa_all["last_odor"].dropna().unique()):
+        fa_odor = fa_all[fa_all["last_odor"] == odor]
         n_port_a = (fa_odor["fa_port"] == 1).sum()
         n_port_b = (fa_odor["fa_port"] == 2).sum()
         n_total = n_port_a + n_port_b

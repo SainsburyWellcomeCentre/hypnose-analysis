@@ -6,7 +6,12 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib import cm
 from typing import Iterable, Optional, Union, Tuple
-from hypnose_analysis.utils.metrics_utils import load_session_results, run_all_metrics, parse_json_column
+from hypnose_analysis.utils.metrics_utils import (
+    load_session_results,
+    run_all_metrics,
+    parse_json_column,
+    _populate_legacy_results_from_trial_data,
+)
 from datetime import timedelta, datetime
 from hypnose_analysis.utils.classification_utils import load_all_streams, load_experiment
 from hypnose_analysis.paths import (
@@ -18,6 +23,38 @@ from hypnose_analysis.paths import (
 import re
 import numpy as np
 import json
+
+
+def _load_table_with_trial_data(results_dir: Path, name: str) -> pd.DataFrame:
+    """Load table by name with fallback to trial_data-derived reconstruction."""
+    csv_path = results_dir / f"{name}.csv"
+    if csv_path.exists():
+        try:
+            return pd.read_csv(csv_path)
+        except Exception:
+            pass
+
+    trial_df = pd.DataFrame()
+    pq = results_dir / "trial_data.parquet"
+    if pq.exists():
+        try:
+            trial_df = pd.read_parquet(pq)
+        except Exception:
+            pass
+    if trial_df.empty:
+        tcsv = results_dir / "trial_data.csv"
+        if tcsv.exists():
+            try:
+                trial_df = pd.read_csv(tcsv)
+            except Exception:
+                pass
+
+    if isinstance(trial_df, pd.DataFrame) and not trial_df.empty:
+        res = {"trial_data": trial_df}
+        _populate_legacy_results_from_trial_data(res)
+        return res.get(name, pd.DataFrame()).copy()
+
+    return pd.DataFrame()
 
 # Load metric results for visualization (NOTE: Previously in metrics_utils.py) ==============================================================================
 
@@ -638,24 +675,8 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 18)):
             if not results_dir.exists():
                 continue
             
-            # Load ONLY the 2 CSVs we need, skip load_session_results()
-            comp_path = results_dir / "completed_sequences.csv"
-            abort_path = results_dir / "aborted_sequences_detailed.csv"
-            
-            comp = pd.DataFrame()
-            aborted = pd.DataFrame()
-            
-            if comp_path.exists():
-                try:
-                    comp = pd.read_csv(comp_path)
-                except Exception:
-                    pass
-            
-            if abort_path.exists():
-                try:
-                    aborted = pd.read_csv(abort_path)
-                except Exception:
-                    pass
+            comp = _load_table_with_trial_data(results_dir, "completed_sequences")
+            aborted = _load_table_with_trial_data(results_dir, "aborted_sequences_detailed")
             
             # ============ COMPLETED TRIALS - VECTORIZED ============
             if not comp.empty and "position_poke_times" in comp.columns:
@@ -1506,32 +1527,17 @@ def plot_fa_ratio_a_over_sessions(
             if not results_dir.exists():
                 continue
             
-            # OPTIMIZATION: Only load the specific CSVs we need
-            ab_det_path = results_dir / "aborted_sequences_detailed.csv"
-            fa_noninit_path = results_dir / "non_initiated_FA.csv"
-            
-            ab_det = pd.DataFrame()
+            ab_det = _load_table_with_trial_data(results_dir, "aborted_sequences_detailed")
+            if not ab_det.empty:
+                needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
+                ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
+
             fa_noninit = pd.DataFrame()
-            
-            # Load aborted sequences detailed - handle mixed dtypes gracefully
-            if ab_det_path.exists():
-                try:
-                    ab_det = pd.read_csv(ab_det_path)
-                    # Filter to only columns we need, if they exist
-                    needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
-                    ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
-                except Exception as e:
-                    pass  # Silently skip if columns don't exist
-            
-            # Load non-initiated FA
-            if include_noninitiated and fa_noninit_path.exists():
-                try:
-                    fa_noninit = pd.read_csv(fa_noninit_path)
-                    # Filter to only columns we need, if they exist
+            if include_noninitiated:
+                fa_noninit = _load_table_with_trial_data(results_dir, "non_initiated_FA")
+                if not fa_noninit.empty:
                     needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
                     fa_noninit = fa_noninit[[col for col in needed_cols if col in fa_noninit.columns]]
-                except Exception as e:
-                    pass  # Silently skip if columns don't exist
             
             # Combine only if we have data
             if ab_det.empty and fa_noninit.empty:
@@ -1692,20 +1698,15 @@ def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), t
             if not results_dir.exists():
                 continue
             
-            # OPTIMIZATION 1: Load ONLY the CSV we need
-            rew_path = results_dir / "completed_sequence_rewarded.csv"
-            if not rew_path.exists():
+            rewarded_trials = _load_table_with_trial_data(results_dir, "completed_sequence_rewarded")
+            if rewarded_trials.empty:
                 continue
-            
             try:
-                rewarded_trials = pd.read_csv(rew_path)
-                if rewarded_trials.empty:
-                    continue
                 rewarded_trials['sequence_start'] = pd.to_datetime(rewarded_trials['sequence_start'])
-                rewarded_trials['date'] = date_str
-                all_rewarded.append(rewarded_trials)
             except Exception:
-                continue
+                pass
+            rewarded_trials['date'] = date_str
+            all_rewarded.append(rewarded_trials)
             
             # OPTIMIZATION 2: Load ONLY manifest.json for session timing
             manifest_path = results_dir / "summary.json"
@@ -3123,28 +3124,15 @@ def get_fa_ratio_a_stats(subjid, dates=None, odors=['C', 'F']):
             if not results_dir.exists():
                 continue
             
-            # Load only the 2 CSVs needed for FA port ratio
-            ab_det_path = results_dir / "aborted_sequences_detailed.csv"
-            fa_noninit_path = results_dir / "non_initiated_FA.csv"
-            
-            ab_det = pd.DataFrame()
-            fa_noninit = pd.DataFrame()
-            
-            if ab_det_path.exists():
-                try:
-                    ab_det = pd.read_csv(ab_det_path)
-                    needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
-                    ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
-                except Exception:
-                    pass
-            
-            if fa_noninit_path.exists():
-                try:
-                    fa_noninit = pd.read_csv(fa_noninit_path)
-                    needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
-                    fa_noninit = fa_noninit[[col for col in needed_cols if col in fa_noninit.columns]]
-                except Exception:
-                    pass
+            ab_det = _load_table_with_trial_data(results_dir, "aborted_sequences_detailed")
+            if not ab_det.empty:
+                needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
+                ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
+
+            fa_noninit = _load_table_with_trial_data(results_dir, "non_initiated_FA")
+            if not fa_noninit.empty:
+                needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
+                fa_noninit = fa_noninit[[col for col in needed_cols if col in fa_noninit.columns]]
             
             # Combine only if we have data
             if ab_det.empty and fa_noninit.empty:
@@ -3286,25 +3274,21 @@ def plot_fa_ratio_by_hr_position(
             if not results_dir.exists():
                 continue
             
-            hr_path = results_dir / "aborted_sequences_HR.csv"
-            ab_det_path = results_dir / "aborted_sequences_detailed.csv"
             summary_path = results_dir / "summary.json"
-            
-            if not hr_path.exists() or not ab_det_path.exists() or not summary_path.exists():
+            if not summary_path.exists():
                 continue
-            
+
             try:
-                # Load summary to get HR odors
                 with open(summary_path) as f:
                     summary = json.load(f)
-                
                 hr_odors = summary.get("params", {}).get("hidden_rule_odors", [])
                 if not hr_odors:
                     continue
-                
-                # Load data
-                df_hr = pd.read_csv(hr_path)
-                df_ab = pd.read_csv(ab_det_path)
+
+                df_hr = _load_table_with_trial_data(results_dir, "aborted_sequences_HR")
+                df_ab = _load_table_with_trial_data(results_dir, "aborted_sequences_detailed")
+                if df_hr.empty or df_ab.empty:
+                    continue
                 
                 # Match HR trials with aborted sequences
                 if "sequence_start" not in df_hr.columns or "sequence_start" not in df_ab.columns:
@@ -3683,25 +3667,22 @@ def plot_fa_ratio_by_abort_odor(
             if not results_dir.exists():
                 continue
             
-            hr_path = results_dir / "aborted_sequences_HR.csv"
-            ab_det_path = results_dir / "aborted_sequences_detailed.csv"
             summary_path = results_dir / "summary.json"
-            
-            if not hr_path.exists() or not ab_det_path.exists() or not summary_path.exists():
+            if not summary_path.exists():
                 continue
-            
+
             try:
-                # Load summary to get HR odors
                 with open(summary_path) as f:
                     summary = json.load(f)
-                
+
                 hr_odors = summary.get("params", {}).get("hidden_rule_odors", [])
                 if not hr_odors:
                     continue
-                
-                # Load data
-                df_hr = pd.read_csv(hr_path)
-                df_ab = pd.read_csv(ab_det_path)
+
+                df_hr = _load_table_with_trial_data(results_dir, "aborted_sequences_HR")
+                df_ab = _load_table_with_trial_data(results_dir, "aborted_sequences_detailed")
+                if df_hr.empty or df_ab.empty:
+                    continue
                 
                 # ===== PROCESS ABORTED HR TRIALS (abortion after HR) =====
                 if "sequence_start" in df_hr.columns and "sequence_start" in df_ab.columns:
