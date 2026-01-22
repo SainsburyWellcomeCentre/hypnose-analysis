@@ -4036,10 +4036,84 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
             if cols:
                 trial_df = _merge_with_run(trial_df, comp_rt, cols)
 
+        # Derive outcome categories from supply/poke counts (avoids response-time dependency)
+        def _has_value(v):
+            try:
+                return pd.notna(v) and v != 0 and v != "0" and str(v).strip().lower() not in {"", "nan"}
+            except Exception:
+                return False
+
+        def _derive_outcome(row):
+            supply = pd.to_numeric(row.get("total_supply_count"), errors="coerce")
+            reward_pokes = pd.to_numeric(row.get("total_reward_pokes"), errors="coerce")
+            await_ts = row.get("await_reward_time")
+
+            if pd.notna(supply) and supply >= 1:
+                return "rewarded"
+            if _has_value(await_ts):
+                if pd.notna(reward_pokes) and reward_pokes >= 1:
+                    return "unrewarded"
+                return "timeout_delayed"
+            return None
+
+        derived_outcomes = trial_df.apply(_derive_outcome, axis=1)
+        trial_df["response_time_category"] = derived_outcomes.where(derived_outcomes.notna(), trial_df.get("response_time_category"))
+
         # Ensure all expected columns exist
         for col in extra_abort_cols + extra_rt_cols:
             if col not in trial_df.columns:
                 trial_df[col] = np.nan
+
+        # Build global_trial_id continuous across runs
+        if "run_id" not in trial_df.columns:
+            trial_df["run_id"] = 1
+        sort_cols = [c for c in ["sequence_start", "run_id", "trial_id"] if c in trial_df.columns]
+        mapping = {}
+        if "trial_id" in trial_df.columns:
+            ordered = trial_df.sort_values(sort_cols, kind="stable") if sort_cols else trial_df
+            for _, r in ordered.iterrows():
+                tid = r.get("trial_id")
+                rid = r.get("run_id", 1)
+                if pd.isna(tid):
+                    continue
+                try:
+                    key = (int(rid) if pd.notna(rid) else 1, int(tid))
+                except Exception:
+                    key = (rid, tid)
+                if key not in mapping:
+                    mapping[key] = len(mapping)
+
+            def _global_id(row):
+                tid = row.get("trial_id")
+                rid = row.get("run_id", 1)
+                try:
+                    return mapping.get((int(rid) if pd.notna(rid) else 1, int(tid)))
+                except Exception:
+                    return mapping.get((rid, tid))
+
+            trial_df = trial_df.copy()
+            gvals = trial_df.apply(_global_id, axis=1)
+            if "global_trial_id" in trial_df.columns:
+                trial_df["global_trial_id"] = gvals
+            else:
+                trial_df.insert(0, "global_trial_id", gvals)
+
+            def _attach_global(df):
+                if not isinstance(df, pd.DataFrame) or df.empty or "trial_id" not in df.columns:
+                    return df
+                out = df.copy()
+                if "run_id" not in out.columns:
+                    out["run_id"] = 1
+                g = out.apply(_global_id, axis=1)
+                if "global_trial_id" in out.columns:
+                    out["global_trial_id"] = g
+                else:
+                    out.insert(0, "global_trial_id", g)
+                return out
+
+            for k, v in list(classification.items()):
+                if isinstance(v, pd.DataFrame) and "trial_id" in v.columns:
+                    classification[k] = _attach_global(v)
 
         classification["trial_data"] = trial_df
     else:
