@@ -10,7 +10,6 @@ from hypnose_analysis.utils.metrics_utils import (
     load_session_results,
     run_all_metrics,
     parse_json_column,
-    _populate_legacy_results_from_trial_data,
 )
 from datetime import timedelta, datetime
 from hypnose_analysis.utils.classification_utils import load_all_streams, load_experiment
@@ -26,34 +25,31 @@ import json
 
 
 def _load_table_with_trial_data(results_dir: Path, name: str) -> pd.DataFrame:
-    """Load table by name with fallback to trial_data-derived reconstruction."""
-    csv_path = results_dir / f"{name}.csv"
-    if csv_path.exists():
-        try:
-            return pd.read_csv(csv_path)
-        except Exception:
-            pass
-
-    trial_df = pd.DataFrame()
-    pq = results_dir / "trial_data.parquet"
-    if pq.exists():
-        try:
-            trial_df = pd.read_parquet(pq)
-        except Exception:
-            pass
-    if trial_df.empty:
+    """Load trial_data (parquet->csv) or a saved CSV table by name."""
+    if name == "trial_data":
+        pq = results_dir / "trial_data.parquet"
+        if pq.exists():
+            try:
+                return pd.read_parquet(pq)
+            except Exception:
+                pass
         tcsv = results_dir / "trial_data.csv"
         if tcsv.exists():
             try:
-                trial_df = pd.read_csv(tcsv)
+                return pd.read_csv(tcsv)
             except Exception:
                 pass
+        return pd.DataFrame()
 
-    if isinstance(trial_df, pd.DataFrame) and not trial_df.empty:
-        res = {"trial_data": trial_df}
-        _populate_legacy_results_from_trial_data(res)
-        return res.get(name, pd.DataFrame()).copy()
-
+    # Only allow the three non-initiated tables to be loaded from CSV
+    allowed_csv = {"non_initiated_sequences", "non_initiated_odor1_attempts", "non_initiated_FA"}
+    if name in allowed_csv:
+        csv_path = results_dir / f"{name}.csv"
+        if csv_path.exists():
+            try:
+                return pd.read_csv(csv_path)
+            except Exception:
+                pass
     return pd.DataFrame()
 
 # Load metric results for visualization (NOTE: Previously in metrics_utils.py) ==============================================================================
