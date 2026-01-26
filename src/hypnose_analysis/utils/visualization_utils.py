@@ -52,6 +52,63 @@ def _load_table_with_trial_data(results_dir: Path, name: str) -> pd.DataFrame:
                 pass
     return pd.DataFrame()
 
+
+def _load_trial_views(results_dir: Path) -> dict[str, pd.DataFrame]:
+    """Load trial_data once and derive commonly used slices for plots.
+
+    Returns keys:
+      - trial_data: full table
+      - completed: is_aborted == False
+      - rewarded / unrewarded / timeout: completed filtered by response_time_category
+      - aborted: is_aborted == True
+      - aborted_fa: aborted with fa_label != nFA (case-insensitive)
+      - aborted_hr: aborted with hit_hidden_rule == True
+    """
+    td = _load_table_with_trial_data(results_dir, "trial_data")
+    if td.empty:
+        return {
+            "trial_data": pd.DataFrame(),
+            "completed": pd.DataFrame(),
+            "rewarded": pd.DataFrame(),
+            "unrewarded": pd.DataFrame(),
+            "timeout": pd.DataFrame(),
+            "aborted": pd.DataFrame(),
+            "aborted_fa": pd.DataFrame(),
+            "aborted_hr": pd.DataFrame(),
+        }
+
+    td = td.copy()
+    # Normalize datetime columns we rely on
+    for col in ["sequence_start", "sequence_end", "timestamp", "initiation_sequence_time", "abortion_time", "fa_time", "await_reward_time", "first_supply_time", "poke_window_end"]:
+        if col in td.columns:
+            td[col] = pd.to_datetime(td[col], errors="coerce")
+
+    td["is_aborted"] = td.get("is_aborted", False).fillna(False)
+    td["response_time_category"] = td.get("response_time_category", "").astype(str)
+
+    completed = td[~td["is_aborted"]].copy()
+    aborted = td[td["is_aborted"]].copy()
+
+    rewarded = completed[completed["response_time_category"] == "rewarded"].copy()
+    unrewarded = completed[completed["response_time_category"] == "unrewarded"].copy()
+    timeout = completed[completed["response_time_category"] == "timeout_delayed"].copy()
+
+    fa_mask = aborted.get("fa_label").astype(str).str.lower().ne("nfa") if "fa_label" in aborted.columns else pd.Series(False, index=aborted.index)
+    aborted_fa = aborted[fa_mask].copy()
+
+    aborted_hr = aborted[aborted.get("hit_hidden_rule", False) == True].copy()
+
+    return {
+        "trial_data": td,
+        "completed": completed,
+        "rewarded": rewarded,
+        "unrewarded": unrewarded,
+        "timeout": timeout,
+        "aborted": aborted,
+        "aborted_fa": aborted_fa,
+        "aborted_hr": aborted_hr,
+    }
+
 # Load metric results for visualization (NOTE: Previously in metrics_utils.py) ==============================================================================
 
 def _extract_metric_value(metrics: dict, var_path: str):
@@ -671,8 +728,9 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 18)):
             if not results_dir.exists():
                 continue
             
-            comp = _load_table_with_trial_data(results_dir, "completed_sequences")
-            aborted = _load_table_with_trial_data(results_dir, "aborted_sequences_detailed")
+            views = _load_trial_views(results_dir)
+            comp = views["completed"]
+            aborted = views["aborted"]
             
             # ============ COMPLETED TRIALS - VECTORIZED ============
             if not comp.empty and "position_poke_times" in comp.columns:
@@ -1523,7 +1581,8 @@ def plot_fa_ratio_a_over_sessions(
             if not results_dir.exists():
                 continue
             
-            ab_det = _load_table_with_trial_data(results_dir, "aborted_sequences_detailed")
+            views = _load_trial_views(results_dir)
+            ab_det = views["aborted_fa"]
             if not ab_det.empty:
                 needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
                 ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
@@ -1694,7 +1753,8 @@ def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), t
             if not results_dir.exists():
                 continue
             
-            rewarded_trials = _load_table_with_trial_data(results_dir, "completed_sequence_rewarded")
+            views = _load_trial_views(results_dir)
+            rewarded_trials = views.get("rewarded", pd.DataFrame())
             if rewarded_trials.empty:
                 continue
             try:
@@ -3120,7 +3180,8 @@ def get_fa_ratio_a_stats(subjid, dates=None, odors=['C', 'F']):
             if not results_dir.exists():
                 continue
             
-            ab_det = _load_table_with_trial_data(results_dir, "aborted_sequences_detailed")
+            views = _load_trial_views(results_dir)
+            ab_det = views["aborted_fa"]
             if not ab_det.empty:
                 needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
                 ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
@@ -3281,8 +3342,9 @@ def plot_fa_ratio_by_hr_position(
                 if not hr_odors:
                     continue
 
-                df_hr = _load_table_with_trial_data(results_dir, "aborted_sequences_HR")
-                df_ab = _load_table_with_trial_data(results_dir, "aborted_sequences_detailed")
+                views = _load_trial_views(results_dir)
+                df_hr = views.get("aborted_hr", pd.DataFrame())
+                df_ab = views.get("aborted", pd.DataFrame())
                 if df_hr.empty or df_ab.empty:
                     continue
                 
@@ -3675,8 +3737,9 @@ def plot_fa_ratio_by_abort_odor(
                 if not hr_odors:
                     continue
 
-                df_hr = _load_table_with_trial_data(results_dir, "aborted_sequences_HR")
-                df_ab = _load_table_with_trial_data(results_dir, "aborted_sequences_detailed")
+                views = _load_trial_views(results_dir)
+                df_hr = views.get("aborted_hr", pd.DataFrame())
+                df_ab = views.get("aborted", pd.DataFrame())
                 if df_hr.empty or df_ab.empty:
                     continue
                 
