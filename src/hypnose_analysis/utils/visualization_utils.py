@@ -1177,51 +1177,29 @@ def plot_abortion_and_fa_rates(
                     "rate": rate_noninit
                 })
 
-            # ============ FA PORT RATIO - Calculate from CSVs (ensures correct include_noninitiated_in_fa_odor behavior) ============
-            ab_det_path = results_dir / "aborted_sequences_detailed.csv"
-            fa_noninit_path = results_dir / "non_initiated_FA.csv"
-            
-            ab_det = pd.DataFrame()
-            fa_noninit = pd.DataFrame()
-            
-            # Load aborted sequences with FA data
-            if ab_det_path.exists():
-                try:
-                    ab_det = pd.read_csv(ab_det_path)
-                    # Filter by fa_label if column exists
-                    if "fa_label" in ab_det.columns:
-                        ab_det = ab_det[fa_filter_fn(ab_det["fa_label"])].copy()
-                    # Keep only needed columns
-                    needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
-                    ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
-                except Exception:
-                    ab_det = pd.DataFrame()
-            
-            # Load non-initiated FA data if requested
-            if include_noninitiated_in_fa_odor and fa_noninit_path.exists():
-                try:
-                    fa_noninit = pd.read_csv(fa_noninit_path)
-                    # Filter by fa_label if column exists
-                    if "fa_label" in fa_noninit.columns:
-                        fa_noninit = fa_noninit[fa_filter_fn(fa_noninit["fa_label"])].copy()
-                    # Keep only needed columns (note: uses 'odor_name' not 'last_odor_name')
-                    needed_cols = ['fa_label', 'odor_name', 'fa_port']
-                    fa_noninit = fa_noninit[[col for col in needed_cols if col in fa_noninit.columns]]
-                    # Rename 'odor_name' to 'last_odor_name' for consistency with aborted data
-                    if 'odor_name' in fa_noninit.columns:
-                        fa_noninit = fa_noninit.rename(columns={'odor_name': 'last_odor_name'})
-                except Exception:
-                    fa_noninit = pd.DataFrame()
-            
-            # Combine data based on include_noninitiated_in_fa_odor parameter
+            # ============ FA PORT RATIO - from trial_data aborted_fa (+ optional non-initiated) ============
             try:
+                views = _load_trial_views(results_dir)
+                ab_det = views.get("aborted_fa", pd.DataFrame())
+                if not ab_det.empty and "fa_label" in ab_det.columns:
+                    ab_det = ab_det[fa_filter_fn(ab_det["fa_label"])]
+                if include_noninitiated_in_fa_odor:
+                    fa_noninit = _load_table_with_trial_data(results_dir, "non_initiated_FA")
+                    if not fa_noninit.empty and "fa_label" in fa_noninit.columns:
+                        fa_noninit = fa_noninit[fa_filter_fn(fa_noninit["fa_label"])]
+                        if "odor_name" in fa_noninit.columns:
+                            fa_noninit = fa_noninit.rename(columns={"odor_name": "last_odor_name"})
+                    else:
+                        fa_noninit = pd.DataFrame()
+                else:
+                    fa_noninit = pd.DataFrame()
+
                 if include_noninitiated_in_fa_odor:
                     fa_all = pd.concat([ab_det, fa_noninit], ignore_index=True)
                 else:
                     fa_all = ab_det.copy()
-                
-                # Calculate FA port ratio per odor
-                if not fa_all.empty and "fa_port" in fa_all.columns and "last_odor_name" in fa_all.columns:
+
+                if not fa_all.empty and {"fa_port", "last_odor_name"}.issubset(fa_all.columns):
                     for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
                         fa_odor = fa_all[fa_all["last_odor_name"] == odor]
                         n_a = (fa_odor["fa_port"] == 1).sum()
@@ -1235,36 +1213,99 @@ def plot_abortion_and_fa_rates(
                         })
             except Exception:
                 pass
-            # ============ ABORTION RATES - from metrics JSON ============
-            
-            # Abortion rate per position
-            ab_pos_data = metrics.get("abortion_rate_positionX", {})
-            if isinstance(ab_pos_data, dict):
-                for pos, rate in ab_pos_data.items():
-                    if rate is not None and isinstance(rate, (int, float)):
-                        try:
-                            rows.append({
-                                "date": int(date_str),
-                                "metric_type": "abortion_rate",
-                                "category": "position",
-                                "position_or_odor": int(pos),
-                                "rate": float(rate)
-                            })
-                        except (ValueError, TypeError):
-                            continue
-            
-            # Abortion rate per odor
-            ab_odor_data = metrics.get("odorx_abortion_rate", {})
-            if isinstance(ab_odor_data, dict):
-                for odor, rate in ab_odor_data.items():
-                    if rate is not None and isinstance(rate, (int, float)):
+            # ============ ABORTION RATES - prioritize fa_abortion_stats.by_position ============
+            fa_by_position_full = fa_stats.get("by_position", [])
+            if isinstance(fa_by_position_full, list):
+                for item in fa_by_position_full:
+                    if not isinstance(item, dict) or "Position" not in item:
+                        continue
+                    pos = item.get("Position")
+
+                    # Prefer explicit numeric field if present
+                    rate_val = item.get("Abortion Rate Value") if isinstance(item.get("Abortion Rate Value"), (int, float)) else None
+
+                    # Next, parse Abortion Rate string (n/d (v))
+                    if rate_val is None:
+                        ab_rate_str = item.get("Abortion Rate", "")
+                        if isinstance(ab_rate_str, str):
+                            if "(" in ab_rate_str and ")" in ab_rate_str:
+                                try:
+                                    rate_val = float(ab_rate_str.split("(")[-1].split(")")[0])
+                                except Exception:
+                                    rate_val = None
+                            if rate_val is None and "/" in ab_rate_str:
+                                try:
+                                    num_s, denom_s = ab_rate_str.split("/")[:2]
+                                    num = float(num_s.strip())
+                                    denom = float(denom_s.split()[0].strip())
+                                    if denom > 0:
+                                        rate_val = num / denom
+                                except Exception:
+                                    pass
+
+                    # Fallback: parse legacy FA Abortion Rate field
+                    if rate_val is None:
+                        fa_abort_str = item.get("FA Abortion Rate", "")
+                        if isinstance(fa_abort_str, str):
+                            if "(" in fa_abort_str and ")" in fa_abort_str:
+                                try:
+                                    rate_val = float(fa_abort_str.split("(")[-1].split(")")[0])
+                                except Exception:
+                                    rate_val = None
+                            if rate_val is None and "/" in fa_abort_str:
+                                try:
+                                    num_s, denom_s = fa_abort_str.split("/")[:2]
+                                    num = float(num_s.strip())
+                                    denom = float(denom_s.split()[0].strip())
+                                    if denom > 0:
+                                        rate_val = num / denom
+                                except Exception:
+                                    pass
+
+                    if rate_val is None:
+                        continue
+
+                    try:
                         rows.append({
                             "date": int(date_str),
                             "metric_type": "abortion_rate",
-                            "category": "odor",
-                            "position_or_odor": str(odor),
+                            "category": "position",
+                            "position_or_odor": int(pos),
+                            "rate": float(rate_val)
+                        })
+                    except Exception:
+                        continue
+
+            # Abortion rate per odor (fallback to legacy metrics fields if present)
+            ab_odor_data = metrics.get("odorx_abortion_rate", {})
+            if isinstance(ab_odor_data, dict):
+                for odor, rate in ab_odor_data.items():
+                    if rate is None or not isinstance(rate, (int, float)):
+                        continue
+                    rows.append({
+                        "date": int(date_str),
+                        "metric_type": "abortion_rate",
+                        "category": "odor",
+                        "position_or_odor": str(odor),
+                        "rate": float(rate)
+                    })
+
+            # Legacy abortion rate per position (if fa_abortion_stats missing)
+            ab_pos_data = metrics.get("abortion_rate_positionX", {})
+            if isinstance(ab_pos_data, dict):
+                for pos, rate in ab_pos_data.items():
+                    if rate is None or not isinstance(rate, (int, float)):
+                        continue
+                    try:
+                        rows.append({
+                            "date": int(date_str),
+                            "metric_type": "abortion_rate",
+                            "category": "position",
+                            "position_or_odor": int(pos),
                             "rate": float(rate)
                         })
+                    except Exception:
+                        continue
     
     if not rows:
         print("No data found")
@@ -1477,29 +1518,52 @@ def plot_response_times_completed_vs_fa(subjid, dates=None, figsize=(12, 8), y_l
             results_dir = ses / "saved_analysis_results"
             if not results_dir.exists():
                 continue
-            
-            metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
-            if metrics is None:
-                continue
-            
-            # Get average response time for completed sequences
-            avg_resp_times = metrics.get("avg_response_time", {})
-            completed_rt = avg_resp_times.get("Average Response Time (Rewarded + Unrewarded)")
+
+            # Prefer trial_data-derived means; fall back to metrics JSON if missing
+            views = _load_trial_views(results_dir)
+
+            # Completed mean response time
+            completed_rt = None
+            comp_df = views.get("completed", pd.DataFrame())
+            if not comp_df.empty:
+                # Match metrics: only rewarded + unrewarded, exclude timeout_delayed
+                if "response_time_category" in comp_df.columns:
+                    comp_df = comp_df[comp_df["response_time_category"].isin(["rewarded", "unrewarded"])]
+                if "response_time_ms" in comp_df.columns and not comp_df.empty:
+                    vals = comp_df["response_time_ms"].dropna().astype(float)
+                    if not vals.empty:
+                        completed_rt = vals.mean()
+            if completed_rt is None:
+                metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
+                if metrics:
+                    avg_resp_times = metrics.get("avg_response_time", {})
+                    completed_rt = avg_resp_times.get("Average Response Time (Rewarded + Unrewarded)")
             if completed_rt is not None and not np.isnan(completed_rt):
                 rows.append({
                     "date": int(date_str),
                     "response_type": "Completed Sequences",
                     "response_time_ms": float(completed_rt)
                 })
-            
-            # Get average response time for FA Time In abortions
-            fa_resp_times = metrics.get("FA_avg_response_times", {})
-            fa_time_in_rt = fa_resp_times.get("Aborted FA Time In")
-            if fa_time_in_rt is not None and not np.isnan(fa_time_in_rt):
+
+            # FA Time In mean latency from trial_data
+            fa_rt = None
+            fa_df = views.get("aborted_fa", pd.DataFrame())
+            if not fa_df.empty and "fa_label" in fa_df.columns:
+                fa_filt = fa_df[fa_df["fa_label"].astype(str).str.lower() == "fa_time_in"].copy()
+                if "fa_latency_ms" in fa_filt.columns:
+                    vals = fa_filt["fa_latency_ms"].dropna().astype(float)
+                    if not vals.empty:
+                        fa_rt = vals.mean()
+            if fa_rt is None:
+                metrics = locals().get("metrics") if "metrics" in locals() else _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
+                if metrics:
+                    fa_resp_times = metrics.get("FA_avg_response_times", {})
+                    fa_rt = fa_resp_times.get("Aborted FA Time In")
+            if fa_rt is not None and not np.isnan(fa_rt):
                 rows.append({
                     "date": int(date_str),
                     "response_type": "FA Time In Abortions",
-                    "response_time_ms": float(fa_time_in_rt)
+                    "response_time_ms": float(fa_rt)
                 })
     
     if not rows:
@@ -1527,19 +1591,19 @@ def plot_response_times_completed_vs_fa(subjid, dates=None, figsize=(12, 8), y_l
         
         if not df_subset.empty:
             values = df_subset["response_time_ms"].values
-            
-            # Scatter with jitter
+
+            # Scatter per session (jitter) using session means already in rows
             x_jitter = np.random.normal(x_pos, 0.08, size=len(values))
             ax.scatter(x_jitter, values, alpha=0.4, s=80, color=color, zorder=3)
-            
-            # Calculate mean and std
+
+            # Calculate mean and SEM across sessions
             mean_rt = values.mean()
-            std_rt = values.std()
-            
-            # Plot mean point with error bars
+            sem_rt = values.std(ddof=1) / np.sqrt(len(values)) if len(values) > 1 else 0.0
+
+            # Plot mean point with SEM bars
             ax.scatter([x_pos], [mean_rt], color='darkred', s=150, zorder=5, marker='D',
-                      edgecolors='black', linewidth=2, label='Mean ± SD' if x_pos == 0 else "")
-            ax.errorbar([x_pos], [mean_rt], yerr=std_rt, fmt='none', ecolor='darkred',
+                      edgecolors='black', linewidth=2, label='Mean ± SEM' if x_pos == 0 else "")
+            ax.errorbar([x_pos], [mean_rt], yerr=sem_rt, fmt='none', ecolor='darkred',
                        capsize=8, capthick=2, linewidth=2.5, zorder=4)
     
     ax.set_xlim([-0.5, 1.5])

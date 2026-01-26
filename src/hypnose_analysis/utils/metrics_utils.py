@@ -1600,6 +1600,7 @@ def fa_abortion_stats(results, return_df=False):
 
     aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
     aborted_all = df[aborted_mask]
+    completed = df[~aborted_mask]
     allowed_fa = {"FA_time_in", "FA_time_out", "FA_late"}
     fa_mask = aborted_all["fa_label"].isin(allowed_fa)
     fa_df = aborted_all[fa_mask]
@@ -1660,7 +1661,39 @@ def fa_abortion_stats(results, return_df=False):
         odor_rows.append(row)
     df_odor = pd.DataFrame(odor_rows)
 
-    # Per-position table
+    # Compute reached counts per position (denominator for overall abortion rate)
+    reached = {}
+    # Aborted trials: all positions up to last aborted position count as reached
+    for _, row in aborted_all.iterrows():
+        last_pos_val = row.get(pos_col)
+        if pd.notnull(last_pos_val):
+            try:
+                last_pos = int(last_pos_val)
+            except Exception:
+                continue
+            for pos in range(1, last_pos + 1):
+                reached[pos] = reached.get(pos, 0) + 1
+
+    # Completed trials: use position_poke_times to infer reached positions; fallback to pos_col
+    for _, row in completed.iterrows():
+        ppt = parse_json_column(row.get("position_poke_times", {}))
+        max_pos = None
+        if isinstance(ppt, dict) and ppt:
+            try:
+                max_pos = max(int(k) for k in ppt.keys())
+            except Exception:
+                max_pos = None
+        if max_pos is None and pos_col in row:
+            le = row.get(pos_col)
+            try:
+                max_pos = int(le) if pd.notnull(le) else None
+            except Exception:
+                max_pos = None
+        if max_pos is not None:
+            for pos in range(1, int(max_pos) + 1):
+                reached[pos] = reached.get(pos, 0) + 1
+
+    # Per-position table (add overall abortion rate using reached counts)
     pos_rows = []
     for pos in positions:
         sub_all = aborted_all[aborted_all[pos_col] == pos]
@@ -1669,9 +1702,16 @@ def fa_abortion_stats(results, return_df=False):
         sub_fa = sub_all[sub_all["fa_label"].isin(allowed_fa)]
         n_total = len(sub_all)
         fa_labels = sub_fa["fa_label"].astype(str)
+        reached_pos = reached.get(int(pos), 0)
+        rate_val = (n_total / reached_pos) if reached_pos > 0 else np.nan
+        rate_str = f"{n_total}/{reached_pos} ({rate_val:.2f})" if reached_pos > 0 else "N/A"
+
         row = {
             "Position": pos,
             "Total Abortions": n_total,
+            "Reached Trials": reached_pos,
+            "Abortion Rate": rate_str,
+            "Abortion Rate Value": rate_val,
         }
         n_fa = len(sub_fa)
         row["FA Abortion Rate"] = f"{n_fa}/{n_total} ({n_fa/n_total:.2f})"
