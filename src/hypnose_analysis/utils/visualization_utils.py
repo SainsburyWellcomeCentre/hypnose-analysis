@@ -2900,133 +2900,89 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     
     for session_idx, ses_dir in enumerate(ses_dirs):
         date_str = ses_dir.name.split("_date-")[-1]
-        
-        try:
-            results = load_session_results(subjid, date_str)
-        except Exception as e:
-            print(f"Warning: Could not load session {date_str}: {e}")
+        results_dir = ses_dir / "saved_analysis_results"
+        if not results_dir.exists():
             continue
-        
-        # Load completed and aborted trials
-        comp_rew = results.get('completed_sequence_rewarded', pd.DataFrame())
-        comp_unr = results.get('completed_sequence_unrewarded', pd.DataFrame())
-        comp_tmo = results.get('completed_sequence_reward_timeout', pd.DataFrame())
-        aborted = results.get('aborted_sequences', pd.DataFrame())
-        
-        # Load Hidden Rule trials
-        hr_rewarded = results.get('completed_sequence_HR_rewarded', pd.DataFrame())
-        hr_unrewarded = results.get('completed_sequence_HR_unrewarded', pd.DataFrame())
-        hr_timeout = results.get('completed_sequence_HR_reward_timeout', pd.DataFrame())
-        hr_missed = results.get('completed_sequences_HR_missed', pd.DataFrame())
-        aborted_hr = results.get('aborted_sequences_HR', pd.DataFrame())
-        
-        # Process completed rewarded trials
-        if not comp_rew.empty:
-            for idx, row in comp_rew.iterrows():
+
+        # Prefer trial_data views (new schema); fallback to legacy load_session_results tables
+        views = _load_trial_views(results_dir)
+
+        def _get_odor(row):
+            for cand in ["last_odor_name", "last_odor", "odor", "odor_name"]:
+                if cand in row and pd.notna(row[cand]):
+                    return row[cand]
+            return "Unknown"
+
+        def _append_trials(df, trial_type, is_hr=False):
+            if df.empty or "sequence_start" not in df.columns:
+                return
+            for _, r in df.iterrows():
                 all_trials.append({
-                    'sequence_start': pd.to_datetime(row['sequence_start']),
-                    'last_odor': row.get('last_odor', 'Unknown'),
-                    'trial_type': 'rewarded',
-                    'is_hr': False,
-                    'date_str': date_str,
-                    'session_idx': session_idx
+                    "sequence_start": pd.to_datetime(r["sequence_start"]),
+                    "last_odor": _get_odor(r),
+                    "trial_type": trial_type,
+                    "is_hr": is_hr,
+                    "date_str": date_str,
+                    "session_idx": session_idx,
                 })
-        
-        # Process completed unrewarded trials
-        if not comp_unr.empty:
-            for idx, row in comp_unr.iterrows():
-                all_trials.append({
-                    'sequence_start': pd.to_datetime(row['sequence_start']),
-                    'last_odor': row.get('last_odor', 'Unknown'),
-                    'trial_type': 'unrewarded',
-                    'is_hr': False,
-                    'date_str': date_str,
-                    'session_idx': session_idx
-                })
-        
-        # Process timeout trials
-        if not comp_tmo.empty:
-            for idx, row in comp_tmo.iterrows():
-                all_trials.append({
-                    'sequence_start': pd.to_datetime(row['sequence_start']),
-                    'last_odor': row.get('last_odor', 'Unknown'),
-                    'trial_type': 'timeout',
-                    'is_hr': False,
-                    'date_str': date_str,
-                    'session_idx': session_idx
-                })
-        
-        # Process aborted trials
-        if not aborted.empty:
-            for idx, row in aborted.iterrows():
-                all_trials.append({
-                    'sequence_start': pd.to_datetime(row['sequence_start']),
-                    'last_odor': row.get('last_odor_name', 'Unknown'),
-                    'trial_type': 'aborted',
-                    'is_hr': False,
-                    'date_str': date_str,
-                    'session_idx': session_idx
-                })
-        
-        # Process HR rewarded trials
-        if not hr_rewarded.empty:
-            for idx, row in hr_rewarded.iterrows():
-                all_trials.append({
-                    'sequence_start': pd.to_datetime(row['sequence_start']),
-                    'last_odor': row.get('last_odor', 'Unknown'),
-                    'trial_type': 'hr_rewarded',
-                    'is_hr': True,
-                    'date_str': date_str,
-                    'session_idx': session_idx
-                })
-        
-        # Process HR unrewarded trials
-        if not hr_unrewarded.empty:
-            for idx, row in hr_unrewarded.iterrows():
-                all_trials.append({
-                    'sequence_start': pd.to_datetime(row['sequence_start']),
-                    'last_odor': row.get('last_odor', 'Unknown'),
-                    'trial_type': 'hr_unrewarded',
-                    'is_hr': True,
-                    'date_str': date_str,
-                    'session_idx': session_idx
-                })
-        
-        # Process HR timeout trials
-        if not hr_timeout.empty:
-            for idx, row in hr_timeout.iterrows():
-                all_trials.append({
-                    'sequence_start': pd.to_datetime(row['sequence_start']),
-                    'last_odor': row.get('last_odor', 'Unknown'),
-                    'trial_type': 'hr_timeout',
-                    'is_hr': True,
-                    'date_str': date_str,
-                    'session_idx': session_idx
-                })
-        
-        # Process HR missed trials
-        if not hr_missed.empty:
-            for idx, row in hr_missed.iterrows():
-                all_trials.append({
-                    'sequence_start': pd.to_datetime(row['sequence_start']),
-                    'last_odor': row.get('last_odor', 'Unknown'),
-                    'trial_type': 'hr_missed',
-                    'is_hr': True,
-                    'date_str': date_str,
-                    'session_idx': session_idx
-                })
-        
-        # Process aborted HR trials
-        if not aborted_hr.empty:
-            for idx, row in aborted_hr.iterrows():
-                all_trials.append({
-                    'sequence_start': pd.to_datetime(row['sequence_start']),
-                    'last_odor': row.get('last_odor', 'Unknown'),
-                    'trial_type': 'hr_aborted',
-                    'is_hr': True,
-                    'date_str': date_str,
-                    'session_idx': session_idx
-                })
+
+        if not views["trial_data"].empty:
+            comp = views.get("completed", pd.DataFrame())
+            aborted = views.get("aborted", pd.DataFrame())
+            aborted_hr = views.get("aborted_hr", pd.DataFrame())
+
+            rewarded = comp[comp.get("response_time_category", "") == "rewarded"] if not comp.empty else pd.DataFrame()
+            unrewarded = comp[comp.get("response_time_category", "") == "unrewarded"] if not comp.empty else pd.DataFrame()
+            timeout = comp[comp.get("response_time_category", "") == "timeout_delayed"] if not comp.empty else pd.DataFrame()
+
+            # Use hidden_rule_success when available; fall back to hit_hidden_rule
+            hr_flag = "hidden_rule_success" if "hidden_rule_success" in comp.columns else "hit_hidden_rule"
+            comp_hr = comp[comp.get(hr_flag, False) == True] if not comp.empty else pd.DataFrame()
+            comp_non_hr = comp[comp.get(hr_flag, False) != True] if not comp.empty else pd.DataFrame()
+
+            hr_rewarded = comp_hr[comp_hr.get("response_time_category", "") == "rewarded"] if not comp_hr.empty else pd.DataFrame()
+            hr_unrewarded = comp_hr[comp_hr.get("response_time_category", "") == "unrewarded"] if not comp_hr.empty else pd.DataFrame()
+            hr_timeout = comp_hr[comp_hr.get("response_time_category", "") == "timeout_delayed"] if not comp_hr.empty else pd.DataFrame()
+
+            # Append non-HR trials
+            _append_trials(rewarded[rewarded.index.isin(comp_non_hr.index)], "rewarded", False)
+            _append_trials(unrewarded[unrewarded.index.isin(comp_non_hr.index)], "unrewarded", False)
+            _append_trials(timeout[timeout.index.isin(comp_non_hr.index)], "timeout", False)
+            _append_trials(aborted[aborted.get("hit_hidden_rule", False) != True], "aborted", False)
+
+            # Append HR trials (only when HR success flag is set)
+            _append_trials(hr_rewarded, "hr_rewarded", True)
+            _append_trials(hr_unrewarded, "hr_unrewarded", True)
+            _append_trials(hr_timeout, "hr_timeout", True)
+            _append_trials(aborted_hr, "hr_aborted", True)
+
+        else:
+            try:
+                results = load_session_results(subjid, date_str)
+            except Exception as e:
+                print(f"Warning: Could not load session {date_str}: {e}")
+                continue
+
+            # Legacy tables fallback
+            comp_rew = results.get('completed_sequence_rewarded', pd.DataFrame())
+            comp_unr = results.get('completed_sequence_unrewarded', pd.DataFrame())
+            comp_tmo = results.get('completed_sequence_reward_timeout', pd.DataFrame())
+            aborted = results.get('aborted_sequences', pd.DataFrame())
+            hr_rewarded = results.get('completed_sequence_HR_rewarded', pd.DataFrame())
+            hr_unrewarded = results.get('completed_sequence_HR_unrewarded', pd.DataFrame())
+            hr_timeout = results.get('completed_sequence_HR_reward_timeout', pd.DataFrame())
+            hr_missed = results.get('completed_sequences_HR_missed', pd.DataFrame())
+            aborted_hr = results.get('aborted_sequences_HR', pd.DataFrame())
+
+            _append_trials(comp_rew, "rewarded", False)
+            _append_trials(comp_unr, "unrewarded", False)
+            _append_trials(comp_tmo, "timeout", False)
+            _append_trials(aborted, "aborted", False)
+            _append_trials(hr_rewarded, "hr_rewarded", True)
+            _append_trials(hr_unrewarded, "hr_unrewarded", True)
+            _append_trials(hr_timeout, "hr_timeout", True)
+            _append_trials(hr_missed, "hr_missed", True)
+            _append_trials(aborted_hr, "hr_aborted", True)
     
     if not all_trials:
         print(f"No trials found for subject {subjid}")
@@ -3136,10 +3092,11 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
             ax.scatter([x], [0.6], color='#888888', s=15, marker='^', alpha=alpha, zorder=2)
         
         elif trial_type == 'hr_aborted':
-            # HR aborted: yellow line with direction from odor
-            y_end = 1.0 * direction
+            # HR aborted: yellow short line like regular aborts, oriented by odor side
+            y_end = 0.6 * direction
+            tri_marker = '^' if direction >= 0 else 'v'
             ax.plot([x, x], [0, y_end], color=color, linewidth=linewidth, alpha=alpha, zorder=1, linestyle=linestyle)
-            ax.scatter([x], [y_end], color=color, s=15, marker='^', alpha=alpha, zorder=2)
+            ax.scatter([x], [y_end], color=color, s=15, marker=tri_marker, alpha=alpha, zorder=2)
         
         else:
             # Completed trials (regular or HR)
@@ -3332,7 +3289,8 @@ def plot_fa_ratio_by_hr_position(
     fa_types='FA_time_in', 
     print_statistics=False,
     exclude_last_pos=False,
-    last_odor_num=5
+    last_odor_num=5,
+    debug=False
 ):
     """
     Plot FA Ratio (A-B)/(A+B) by hidden rule odor position across sessions.
@@ -3402,7 +3360,13 @@ def plot_fa_ratio_by_hr_position(
             try:
                 with open(summary_path) as f:
                     summary = json.load(f)
+                # Prefer params.hidden_rule_odors, fall back to first run.stage.hidden_rule_odors if absent
                 hr_odors = summary.get("params", {}).get("hidden_rule_odors", [])
+                if not hr_odors:
+                    runs = summary.get("session", {}).get("runs", [])
+                    if runs and isinstance(runs[0], dict):
+                        stage = runs[0].get("stage", {}) if isinstance(runs[0].get("stage", {}), dict) else {}
+                        hr_odors = stage.get("hidden_rule_odors", []) or stage.get("hidden_rule_odors".lower(), [])
                 if not hr_odors:
                     continue
 
@@ -3411,27 +3375,42 @@ def plot_fa_ratio_by_hr_position(
                 df_ab = views.get("aborted", pd.DataFrame())
                 if df_hr.empty or df_ab.empty:
                     continue
-                
-                # Match HR trials with aborted sequences
-                if "sequence_start" not in df_hr.columns or "sequence_start" not in df_ab.columns:
+
+                # Require FA detail columns; skip session cleanly if absent
+                needed_cols = {"fa_label", "last_odor_name", "fa_port", "last_odor_position", "sequence_start"}
+                if not needed_cols.issubset(df_ab.columns) or "sequence_start" not in df_hr.columns:
+                    if debug:
+                        missing = needed_cols - set(df_ab.columns)
                     continue
-                
+
+                # Match HR trials with aborted sequences
                 hr_with_fa = df_hr[df_hr["sequence_start"].isin(df_ab["sequence_start"])].copy()
-                
-                # Merge to get FA details
-                merged = hr_with_fa.merge(
-                    df_ab[["sequence_start", "fa_label", "last_odor_name", "fa_port", "last_odor_position"]],
-                    on="sequence_start",
-                    how="left"
-                )
-                
+
+                # Merge to get FA details (avoid duplicate suffixes when hr_with_fa already has these cols)
+                merged = hr_with_fa.copy()
+                fa_cols = ["fa_label", "last_odor_name", "fa_port", "last_odor_position"]
+                missing_fa_cols = [c for c in fa_cols if c not in merged.columns]
+                if missing_fa_cols:
+                    merged = merged.merge(
+                        df_ab[["sequence_start", *missing_fa_cols]],
+                        on="sequence_start",
+                        how="left",
+                        suffixes=("", "_fa")
+                    )
+
+                # Coalesce any suffixed duplicates that may still appear
+                for col in fa_cols:
+                    if col not in merged.columns:
+                        if f"{col}_fa" in merged.columns:
+                            merged[col] = merged[f"{col}_fa"]
+                        elif f"{col}_x" in merged.columns or f"{col}_y" in merged.columns:
+                            merged[col] = merged.get(f"{col}_x", merged.get(f"{col}_y"))
+
                 # Add HR position info and odor_sequence from HR data
                 hr_cols_to_merge = ["sequence_start"]
-                if "hidden_rule_positions" in df_hr.columns:
-                    hr_cols_to_merge.append("hidden_rule_positions")
-                if "odor_sequence" in df_hr.columns:
-                    hr_cols_to_merge.append("odor_sequence")
-                
+                for hr_col in ["hidden_rule_positions", "odor_sequence"]:
+                    if hr_col in df_hr.columns and hr_col not in merged.columns:
+                        hr_cols_to_merge.append(hr_col)
                 if len(hr_cols_to_merge) > 1:
                     merged = merged.merge(
                         df_hr[hr_cols_to_merge],
@@ -3439,21 +3418,31 @@ def plot_fa_ratio_by_hr_position(
                         how="left",
                         suffixes=('', '_hr')
                     )
-                
-                # Filter for actual FAs (not nFA) and apply FA type filter
+
+                if "fa_label" not in merged.columns:
+                    if debug:
+                        print(f"[DEBUG {date_str}] skipped: merged has no fa_label column; merged cols={list(merged.columns)}")
+                    continue
                 merged_fa = merged[
+                    merged["fa_label"].notna() &
                     (merged["fa_label"] != "nFA") & 
                     (merged["fa_label"].apply(fa_filter_fn))
                 ].copy()
+                if merged_fa.empty and debug:
+                    print(f"[DEBUG {date_str}] skipped: no FA rows after filtering (fa_types={fa_types})")
                 
                 # Optionally exclude FAs at the specified last_odor_position
                 if exclude_last_pos:
                     merged_fa = merged_fa[merged_fa["last_odor_position"] != last_odor_num].copy()
+                    if merged_fa.empty and debug:
+                        print(f"[DEBUG {date_str}] skipped: all FAs at excluded position {last_odor_num}")
                 
                 if merged_fa.empty:
                     continue
                 
                 if "hidden_rule_positions" not in merged_fa.columns:
+                    if debug:
+                        print(f"[DEBUG {date_str}] skipped: hidden_rule_positions column missing")
                     continue
                 
                 # Helper functions
@@ -3496,13 +3485,17 @@ def plot_fa_ratio_by_hr_position(
                         fa_for_this_hr = merged_fa.copy()
                     
                     if fa_for_this_hr.empty:
+                        if debug:
+                            print(f"[DEBUG {date_str}] HR odor {hr_odor}: no trials with odor in sequence")
                         continue
                     
                     # Extract HR position
                     fa_for_this_hr["hr_position"] = fa_for_this_hr["hidden_rule_positions"].apply(get_hr_position)
                     fa_for_this_hr = fa_for_this_hr[fa_for_this_hr["hr_position"].notna()]
-                    
+
                     if fa_for_this_hr.empty:
+                        if debug:
+                            print(f"[DEBUG {date_str}] HR odor {hr_odor}: no parsable hr_position")
                         continue
                     
                     # Category 1: FA on HR odor itself at HR position
@@ -3813,22 +3806,43 @@ def plot_fa_ratio_by_abort_odor(
                     hr_with_fa = df_hr[df_hr["sequence_start"].isin(df_ab["sequence_start"])].copy()
                     
                     if not hr_with_fa.empty:
-                        # Merge with FA details
-                        merged_hr = hr_with_fa.merge(
-                            df_ab[["sequence_start", "fa_label", "last_odor_name", "fa_port", "last_odor_position"]],
-                            on="sequence_start",
-                            how="left"
-                        )
-                        
-                        # Add HR position info
-                        if "hidden_rule_positions" in df_hr.columns:
+                        # Merge with FA details while avoiding duplicate suffixes
+                        merged_hr = hr_with_fa.copy()
+                        fa_cols = ["fa_label", "last_odor_name", "fa_port", "last_odor_position"]
+                        missing_fa_cols = [c for c in fa_cols if c not in merged_hr.columns]
+                        if missing_fa_cols:
                             merged_hr = merged_hr.merge(
-                                df_hr[["sequence_start", "hidden_rule_positions"]],
+                                df_ab[["sequence_start", *missing_fa_cols]],
+                                on="sequence_start",
+                                how="left",
+                                suffixes=("", "_fa")
+                            )
+
+                        # Coalesce any suffixed duplicates
+                        for col in fa_cols:
+                            if col not in merged_hr.columns:
+                                if f"{col}_fa" in merged_hr.columns:
+                                    merged_hr[col] = merged_hr[f"{col}_fa"]
+                                elif f"{col}_x" in merged_hr.columns or f"{col}_y" in merged_hr.columns:
+                                    merged_hr[col] = merged_hr.get(f"{col}_x", merged_hr.get(f"{col}_y"))
+
+                        # Add HR position/odor sequence info if missing
+                        hr_cols_to_merge = ["sequence_start"]
+                        for hr_col in ["hidden_rule_positions", "odor_sequence"]:
+                            if hr_col in df_hr.columns and hr_col not in merged_hr.columns:
+                                hr_cols_to_merge.append(hr_col)
+                        if len(hr_cols_to_merge) > 1:
+                            merged_hr = merged_hr.merge(
+                                df_hr[hr_cols_to_merge],
                                 on="sequence_start",
                                 how="left",
                                 suffixes=('', '_hr')
                             )
-                        
+
+                        if "fa_label" not in merged_hr.columns:
+                            # Still no FA column; skip safely
+                            continue
+
                         # Filter for actual FAs and apply FA type filter
                         merged_hr = merged_hr[
                             (merged_hr["fa_label"] != "nFA") & 
