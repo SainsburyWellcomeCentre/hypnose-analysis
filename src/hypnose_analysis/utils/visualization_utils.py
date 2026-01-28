@@ -5,6 +5,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib import cm
+from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
 from hypnose_analysis.utils.metrics_utils import (
     load_session_results,
@@ -2313,26 +2314,9 @@ def plot_movement_by_trial_state(subjid, date, smooth_window=10, linewidth=1, al
     return fig, ax
 
 
-def _load_tracking_and_behavior(subjid, date, tracking_source='auto'):
+def _load_tracking_and_behavior(subjid, date, tracking_source='sleap'):
     """
-    Load combined tracking CSV and behavior results for a session.
-    Supports both ezTrack (*_combined_tracking_with_timestamps.csv) 
-    and SLEAP (*_combined_sleap_tracking_timestamps.csv) formats.
-    
-    Parameters:
-    -----------
-    subjid : int
-        Subject ID
-    date : int or str
-        Session date
-    tracking_source : str, optional
-        'auto' (default): prefer SLEAP if available, else ezTrack
-        'sleap': only load SLEAP
-        'eztrack': only load ezTrack
-    
-    Returns:
-    --------
-    tracking_df, behavior_dict
+    Load combined tracking CSV (SLEAP) and behavior results for a session.
     """
     base_path = get_rawdata_root()
     server_root = get_server_root()
@@ -2355,37 +2339,17 @@ def _load_tracking_and_behavior(subjid, date, tracking_source='auto'):
     if not results_dir.exists():
         raise FileNotFoundError(f"Results directory not found: {results_dir}")
 
-    # Find tracking files
+    # Find tracking files (SLEAP only)
     sleap_files = [f for f in results_dir.glob("*_combined_sleap_tracking_timestamps.csv")
                    if not f.name.startswith("._")]
-    eztrack_files = [f for f in results_dir.glob("*_combined_tracking_with_timestamps.csv")
-                     if not f.name.startswith("._")]
-    
-    csv_path = None
-    source_used = None
-    
-    if tracking_source == 'auto':
-        # Prefer SLEAP if available
-        if sleap_files:
-            csv_path = sleap_files[0]
-            source_used = 'sleap'
-        elif eztrack_files:
-            csv_path = eztrack_files[0]
-            source_used = 'eztrack'
-    elif tracking_source == 'sleap':
-        if sleap_files:
-            csv_path = sleap_files[0]
-            source_used = 'sleap'
-    elif tracking_source == 'eztrack':
-        if eztrack_files:
-            csv_path = eztrack_files[0]
-            source_used = 'eztrack'
-    
-    if csv_path is None:
+
+    if not sleap_files:
         raise FileNotFoundError(
-            f"No tracking file found for {tracking_source}. "
-            f"Available: {len(sleap_files)} SLEAP, {len(eztrack_files)} ezTrack"
+            f"No SLEAP tracking file found in {results_dir}."
         )
+
+    csv_path = sleap_files[0]
+    source_used = 'sleap'
 
     try:
         tracking = pd.read_csv(csv_path, encoding='utf-8')
@@ -2395,19 +2359,45 @@ def _load_tracking_and_behavior(subjid, date, tracking_source='auto'):
     tracking['time'] = pd.to_datetime(tracking['time'], errors='coerce')
 
     # For SLEAP data: use 'centroid_x' and 'centroid_y' if available, else 'X'/'Y'
-    if source_used == 'sleap':
-        if 'centroid_x' in tracking.columns and 'centroid_y' in tracking.columns:
-            tracking['X'] = tracking['centroid_x']
-            tracking['Y'] = tracking['centroid_y']
-        elif 'X' not in tracking.columns:
-            # Try to find any x/y columns
-            x_cols = [c for c in tracking.columns if 'x' in c.lower() and 'score' not in c.lower()]
-            y_cols = [c for c in tracking.columns if 'y' in c.lower() and 'score' not in c.lower()]
-            if x_cols and y_cols:
-                tracking['X'] = tracking[x_cols[0]]
-                tracking['Y'] = tracking[y_cols[0]]
+    if 'centroid_x' in tracking.columns and 'centroid_y' in tracking.columns:
+        tracking['X'] = tracking['centroid_x']
+        tracking['Y'] = tracking['centroid_y']
+    elif 'X' not in tracking.columns:
+        # Try to find any x/y columns
+        x_cols = [c for c in tracking.columns if 'x' in c.lower() and 'score' not in c.lower()]
+        y_cols = [c for c in tracking.columns if 'y' in c.lower() and 'score' not in c.lower()]
+        if x_cols and y_cols:
+            tracking['X'] = tracking[x_cols[0]]
+            tracking['Y'] = tracking[y_cols[0]]
 
     behavior = load_session_results(subjid, date)
+
+    # Fallback: populate key tables from trial_data when legacy tables are missing
+    views = _load_trial_views(results_dir)
+    td = views.get("trial_data", pd.DataFrame())
+    if td is not None and not td.empty:
+        # Completed sequences
+        if behavior.get('completed_sequences', pd.DataFrame()).empty:
+            comp = views.get("completed", pd.DataFrame()).copy()
+            if not comp.empty:
+                if 'last_odor' not in comp.columns and 'last_odor_name' in comp.columns:
+                    comp = comp.rename(columns={'last_odor_name': 'last_odor'})
+                behavior['completed_sequences'] = comp
+        # Completed rewarded
+        if behavior.get('completed_sequence_rewarded', pd.DataFrame()).empty:
+            comp = views.get("completed", pd.DataFrame())
+            if comp is not None and not comp.empty:
+                rew = comp[comp.get("response_time_category", "") == "rewarded"].copy()
+                if not rew.empty:
+                    if 'last_odor' not in rew.columns and 'last_odor_name' in rew.columns:
+                        rew = rew.rename(columns={'last_odor_name': 'last_odor'})
+                    behavior['completed_sequence_rewarded'] = rew
+        # Initiated sequences fallback (use completed as proxy)
+        if behavior.get('initiated_sequences', pd.DataFrame()).empty:
+            init_df = td.copy()
+            if not init_df.empty:
+                behavior['initiated_sequences'] = init_df
+
     
     print(f"Loaded {source_used.upper()} tracking: {len(tracking)} frames from {csv_path.name}")
     
@@ -2846,6 +2836,486 @@ def plot_movement_with_behavior(
         plt.show()
 
     return fig, ax
+
+
+def plot_trial_traces_by_mode(
+    subjid,
+    dates=None,
+    mode="rewarded",
+    xlim=None,
+    ylim=None,
+    show_average=False,
+    highlight_hr=False,
+    figsize=(18, 6),
+    smooth_window=5,
+    linewidth=1.4,
+    alpha=0.35,
+    fa_types="FA_time_in",
+    invert_y=True,
+):
+    """
+    Plot centroid traces (SLEAP) for trials filtered by mode, collapsing multiple dates into one plane.
+
+    Parameters
+    ----------
+    subjid : int
+        Subject ID.
+    dates : list | tuple | None
+        Single date, list of dates, or inclusive range tuple; all sessions are merged into one plot space.
+    mode : str
+        One of: rewarded, rewarded_hr, completed, all_trials, fa_by_response, fa_by_odor, hr, hr_only.
+        "hr" is accepted as an alias for "hr_only".
+    xlim, ylim : tuple | None
+        Axis limits.
+    show_average : bool
+        If True, draw a black mean trace per category with a light-grey SEM tube.
+    highlight_hr : bool
+        Applies to rewarded/all_trials: recolor HR trials with HR palette; ignored elsewhere unless specified.
+    figsize : tuple
+        Figure size.
+    smooth_window : int
+        Rolling window for centroid smoothing (frames).
+    linewidth : float
+        Line width for individual traces.
+    alpha : float
+        Transparency for individual traces.
+    fa_types : str
+        Comma-separated FA labels to include (e.g., "FA_time_in" or "FA_time_in,FA_time_out" or "all").
+    invert_y : bool
+        If True, invert Y-axis to match video coordinates.
+    """
+
+    allowed_modes = {
+        "rewarded",
+        "rewarded_hr",
+        "completed",
+        "all_trials",
+        "fa_by_response",
+        "fa_by_odor",
+        "hr",
+        "hr_only",
+    }
+    if mode not in allowed_modes:
+        raise ValueError(f"mode must be one of {sorted(allowed_modes)}")
+    if mode == "hr":
+        mode = "hr_only"
+
+    # FA filter
+    if isinstance(fa_types, str):
+        fa_types_list = [t.strip().lower() for t in fa_types.split(",")]
+        if fa_types.lower() == "all":
+            def fa_filter_fn(lbl):
+                return str(lbl).startswith("FA_") if pd.notna(lbl) else False
+        else:
+            def fa_filter_fn(lbl):
+                return str(lbl).lower() in fa_types_list if pd.notna(lbl) else False
+    else:
+        def fa_filter_fn(lbl):
+            return True
+
+    # Colors
+    port_colors = {1: "#FF6B6B", 2: "#4ECDC4"}
+    port_colors_hr = {1: "#E53935", 2: "#00796B"}
+    port_colors_fa = {1: "#FF8E8E", 2: "#7EE9DF"}  # slightly altered
+    aborted_color = "#555555"
+    timeout_color = "#9E9E9E"
+    unrewarded_color = "#000000"
+
+    subj_str = f"sub-{str(subjid).zfill(3)}"
+    derivatives_dir = get_derivatives_root()
+    subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+    if not subj_dirs:
+        raise FileNotFoundError(f"No subject directory found for {subj_str}")
+    subj_dir = subj_dirs[0]
+
+    ses_dirs = _filter_session_dirs(subj_dir, dates)
+    if not ses_dirs:
+        raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
+
+    def _odor_letter(val):
+        if pd.isna(val):
+            return "Unknown"
+        s = str(val)
+        return s.replace("Odor", "") if s.startswith("Odor") else s
+
+    def _infer_port(row):
+        for col in [
+            "response_port",
+            "rewarded_port",
+            "reward_port",
+            "supply_port",
+            "choice_port",
+            "port",
+            "fa_port",
+        ]:
+            if col in row and pd.notna(row[col]):
+                try:
+                    return int(row[col])
+                except Exception:
+                    try:
+                        return int(float(row[col]))
+                    except Exception:
+                        continue
+        return None
+
+    def _smooth_tracking(df):
+        def _as_series(col):
+            if isinstance(col, pd.DataFrame):
+                # take the first column when duplicate names exist
+                return col.iloc[:, 0]
+            return pd.Series(col)
+
+        if smooth_window > 1:
+            df = df.copy()
+            df["X"] = _as_series(df["X"]).rolling(window=smooth_window, center=True, min_periods=1).mean()
+            df["Y"] = _as_series(df["Y"]).rolling(window=smooth_window, center=True, min_periods=1).mean()
+        return df
+
+    def _extract_segment(tracking_df, start, end):
+        if pd.isna(start) or pd.isna(end):
+            return None
+        m = (tracking_df["time"] >= start) & (tracking_df["time"] <= end)
+        if not m.any():
+            return None
+        seg = tracking_df.loc[m, ["X", "Y"]]
+        if seg.empty:
+            return None
+        return seg["X"].to_numpy(), seg["Y"].to_numpy()
+
+    def _resample_trace(x, y, n_points=200):
+        if x.size < 2 or y.size < 2:
+            return None
+        t = np.linspace(0, 1, num=x.size)
+        t_new = np.linspace(0, 1, num=n_points)
+        x_new = np.interp(t_new, t, x)
+        y_new = np.interp(t_new, t, y)
+        return x_new, y_new
+
+    def _add_segment(store, axis_key, category, color, x, y):
+        store[axis_key].append({
+            "category": category,
+            "color": color,
+            "x": x,
+            "y": y,
+            "label": category,
+        })
+
+    # Containers
+    segments = defaultdict(list)
+    avg_pool = defaultdict(lambda: defaultdict(list))
+    hr_odors_seen = set()
+
+    for ses in ses_dirs:
+        date_str = ses.name.split("_date-")[-1]
+        results_dir = ses / "saved_analysis_results"
+        if not results_dir.exists():
+            continue
+
+        # Load tracking/behavior
+        tracking, behavior = _load_tracking_and_behavior(subjid, date_str)
+        tracking = tracking.copy()
+        tracking["time"] = pd.to_datetime(tracking["time"], errors="coerce")
+        tracking = tracking.dropna(subset=["time"]).reset_index(drop=True)
+        tracking = tracking.rename(columns={"centroid_x": "X", "centroid_y": "Y"})
+
+        # Resolve possible duplicate X/Y columns (e.g., both X and centroid_x) to a single Series
+        def _resolve_coord(df, candidates):
+            for name in candidates:
+                if name in df.columns:
+                    col = df.loc[:, df.columns == name]
+                    if isinstance(col, pd.DataFrame):
+                        if col.shape[1] == 0:
+                            continue
+                        return col.iloc[:, 0]
+                    return df[name]
+            return None
+
+        x_series = _resolve_coord(tracking, ["X", "centroid_x", "x"])
+        y_series = _resolve_coord(tracking, ["Y", "centroid_y", "y"])
+        if x_series is not None:
+            tracking["X"] = x_series
+        if y_series is not None:
+            tracking["Y"] = y_series
+
+        tracking = tracking.dropna(subset=["X", "Y"])
+        # Drop duplicate columns to avoid DataFrame returns when selecting by name
+        tracking = tracking.loc[:, ~tracking.columns.duplicated()]
+        tracking = _smooth_tracking(tracking)
+
+        views = _load_trial_views(results_dir)
+        td = views.get("trial_data", pd.DataFrame()).copy()
+        if not td.empty:
+            for c in ["sequence_start", "sequence_end"]:
+                if c in td.columns:
+                    td[c] = pd.to_datetime(td[c], errors="coerce")
+        else:
+            td = pd.DataFrame()
+
+        if td.empty:
+            # Fallback to behavior tables if trial_data is unavailable
+            comp = behavior.get("completed_sequences", pd.DataFrame()).copy()
+            if not comp.empty:
+                comp["is_aborted"] = False
+            aborted = behavior.get("aborted_sequences", pd.DataFrame()).copy()
+            if not aborted.empty:
+                aborted["is_aborted"] = True
+            td = pd.concat([comp, aborted], ignore_index=True) if not comp.empty or not aborted.empty else pd.DataFrame()
+            if not td.empty:
+                for c in ["sequence_start", "sequence_end"]:
+                    if c in td.columns:
+                        td[c] = pd.to_datetime(td[c], errors="coerce")
+
+        if td.empty:
+            continue
+
+        hr_flag = "hidden_rule_success" if "hidden_rule_success" in td.columns else ("hit_hidden_rule" if "hit_hidden_rule" in td.columns else None)
+        hr_mask = td[hr_flag] == True if hr_flag else pd.Series(False, index=td.index)
+
+        # Helper to iterate trials
+        def iter_trials(df):
+            for _, row in df.iterrows():
+                start = row.get("sequence_start")
+                # For false alarms, use fa_time as end since sequence_end can be much later
+                fa_label = str(row.get("fa_label", "")).lower()
+                fa_time = row.get("fa_time")
+                if pd.notna(fa_time) and fa_label.startswith("fa_"):
+                    end = fa_time
+                else:
+                    end = row.get("sequence_end")
+                seg = _extract_segment(tracking, start, end)
+                if seg is None:
+                    continue
+                yield row, seg
+
+        # Mode-specific selection
+        if mode in {"rewarded", "rewarded_hr"}:
+            trials = td[(td.get("response_time_category") == "rewarded") & (td.get("is_aborted") == False)]
+            include_hr = (mode == "rewarded_hr") or highlight_hr
+            if hr_flag and not include_hr:
+                trials = trials[~hr_mask]
+            for row, seg in iter_trials(trials):
+                port = _infer_port(row)
+                odor = _odor_letter(row.get("last_odor_name") or row.get("last_odor"))
+                category = "A" if odor in {"A", "OdorA"} or port == 1 else "B"
+                color_map = port_colors_hr if (highlight_hr and hr_flag and bool(row.get(hr_flag, False))) else port_colors
+                color = color_map.get(port, port_colors[1 if category == "A" else 2])
+                _add_segment(segments, "combined", category, color, seg[0], seg[1])
+                _add_segment(segments, category, category, color, seg[0], seg[1])
+                resampled = _resample_trace(seg[0], seg[1])
+                if resampled is not None:
+                    avg_pool["combined"][category].append(resampled)
+                    avg_pool[category][category].append(resampled)
+
+        elif mode == "completed":
+            trials = td[td.get("is_aborted") == False]
+            for row, seg in iter_trials(trials):
+                port = _infer_port(row)
+                odor = _odor_letter(row.get("last_odor_name") or row.get("last_odor"))
+                category = "A" if odor in {"A", "OdorA"} or port == 1 else "B"
+                rtc = str(row.get("response_time_category", "")).lower()
+                if rtc == "rewarded":
+                    color = port_colors.get(port, port_colors[1 if category == "A" else 2])
+                elif rtc == "timeout_delayed":
+                    color = timeout_color
+                elif rtc == "unrewarded":
+                    color = unrewarded_color
+                else:
+                    color = timeout_color
+                _add_segment(segments, "combined", category, color, seg[0], seg[1])
+                _add_segment(segments, category, category, color, seg[0], seg[1])
+                resampled = _resample_trace(seg[0], seg[1])
+                if resampled is not None:
+                    avg_pool["combined"][category].append(resampled)
+                    avg_pool[category][category].append(resampled)
+
+        elif mode == "all_trials":
+            trials = td.copy()
+            for row, seg in iter_trials(trials):
+                port = _infer_port(row)
+                odor = _odor_letter(row.get("last_odor_name") or row.get("last_odor"))
+                category = "A" if odor in {"A", "OdorA"} or port == 1 else "B"
+                if row.get("is_aborted"):
+                    color = aborted_color
+                    if highlight_hr and hr_flag and bool(row.get(hr_flag, False)):
+                        color = "#000000"
+                else:
+                    color_map = port_colors_hr if (highlight_hr and hr_flag and bool(row.get(hr_flag, False))) else port_colors
+                    color = color_map.get(port, port_colors[1 if category == "A" else 2])
+                _add_segment(segments, "combined", category, color, seg[0], seg[1])
+                resampled = _resample_trace(seg[0], seg[1])
+                if resampled is not None:
+                    avg_pool["combined"][category].append(resampled)
+
+        elif mode == "fa_by_response":
+            # Only aborted FA trials, filtered by fa_types; plot sequence_start -> fa_time
+            fa_df = td[(td.get("is_aborted") == True) & (td.get("fa_label").notna())].copy()
+            if not fa_df.empty:
+                fa_df = fa_df[fa_df["fa_label"].apply(fa_filter_fn)]
+                # Require fa_time for window end
+                if "fa_time" in fa_df.columns:
+                    fa_df["fa_time"] = pd.to_datetime(fa_df["fa_time"], errors="coerce")
+                    fa_df = fa_df.dropna(subset=["fa_time"])
+            if fa_df.empty:
+                continue
+            for row, seg in iter_trials(fa_df):
+                # Use FA port first, then supply/response port
+                port = row.get("fa_port") if pd.notna(row.get("fa_port")) else _infer_port(row)
+                if port not in {1, 2}:
+                    continue
+                category = "A" if port == 1 else "B"
+                color = port_colors_fa.get(port, port_colors_fa[1])
+                _add_segment(segments, "combined", category, color, seg[0], seg[1])
+                _add_segment(segments, category, category, color, seg[0], seg[1])
+                resampled = _resample_trace(seg[0], seg[1])
+                if resampled is not None:
+                    avg_pool["combined"][category].append(resampled)
+                    avg_pool[category][category].append(resampled)
+
+        elif mode == "fa_by_odor":
+            fa_df = td[(td.get("fa_label").notna()) & (td.get("fa_label") != "nFA")].copy()
+            fa_df = fa_df[fa_df["fa_label"].apply(fa_filter_fn)] if not fa_df.empty else fa_df
+            if fa_df.empty:
+                continue
+            for row, seg in iter_trials(fa_df):
+                odor_name = row.get("last_odor_name") or row.get("last_odor")
+                odor = _odor_letter(odor_name)
+                if odor in {"A", "B", "OdorA", "OdorB"}:
+                    continue
+                port = _infer_port(row)
+                color = port_colors_fa.get(port, port_colors_fa[1])
+                _add_segment(segments, odor, odor, color, seg[0], seg[1])
+                resampled = _resample_trace(seg[0], seg[1])
+                if resampled is not None:
+                    avg_pool[odor][odor].append(resampled)
+
+        elif mode == "hr_only":
+            if hr_flag is None:
+                continue
+            hr_trials = td[(hr_mask) & (td.get("is_aborted") == False)]
+            if hr_trials.empty:
+                continue
+            for row, seg in iter_trials(hr_trials):
+                odor_name = row.get("last_odor_name") or row.get("last_odor")
+                odor = _odor_letter(odor_name)
+                hr_odors_seen.add(odor)
+                port = _infer_port(row)
+                rtc = str(row.get("response_time_category", "")).lower()
+                if rtc == "rewarded":
+                    color = port_colors_hr.get(port, port_colors_hr[1])
+                    axis_key = f"HR {odor}"
+                    _add_segment(segments, axis_key, f"{odor} rewarded", color, seg[0], seg[1])
+                    _add_segment(segments, "HR Summary", f"{odor} rewarded", color, seg[0], seg[1])
+                    resampled = _resample_trace(seg[0], seg[1])
+                    if resampled is not None:
+                        avg_pool[axis_key][f"{odor} rewarded"].append(resampled)
+                        avg_pool["HR Summary"][f"{odor} rewarded"].append(resampled)
+                else:
+                    color = unrewarded_color
+                    axis_key = f"HR {odor}"
+                    _add_segment(segments, axis_key, f"{odor} incorrect", color, seg[0], seg[1])
+                    resampled = _resample_trace(seg[0], seg[1])
+                    if resampled is not None:
+                        avg_pool[axis_key][f"{odor} incorrect"].append(resampled)
+
+    if not segments:
+        print("No matching trials found for the requested mode.")
+        return None, None
+
+    def _plot_axis(ax, axis_key):
+        segs = segments.get(axis_key, [])
+        used_labels = set()
+        for seg in segs:
+            label = seg["label"] if seg["label"] not in used_labels else None
+            ax.plot(seg["x"], seg["y"], color=seg["color"], alpha=alpha, linewidth=linewidth, label=label)
+            used_labels.add(seg["label"])
+        if show_average and axis_key in avg_pool:
+            for category, traces in avg_pool[axis_key].items():
+                if not traces:
+                    continue
+                xs = [t[0] for t in traces if t is not None]
+                ys = [t[1] for t in traces if t is not None]
+                if not xs or not ys:
+                    continue
+                xs = np.vstack(xs)
+                ys = np.vstack(ys)
+                mean_x = np.nanmean(xs, axis=0)
+                mean_y = np.nanmean(ys, axis=0)
+                sem_x = np.nanstd(xs, axis=0) / np.sqrt(xs.shape[0])
+                sem_y = np.nanstd(ys, axis=0) / np.sqrt(ys.shape[0])
+                sem_r = np.sqrt(np.square(sem_x) + np.square(sem_y))
+
+                dx = np.gradient(mean_x)
+                dy = np.gradient(mean_y)
+                norm = np.hypot(dx, dy)
+                norm[norm == 0] = 1.0
+                nx = -dy / norm
+                ny = dx / norm
+
+                poly_x = np.concatenate([mean_x + nx * sem_r, (mean_x - nx * sem_r)[::-1]])
+                poly_y = np.concatenate([mean_y + ny * sem_r, (mean_y - ny * sem_r)[::-1]])
+
+                ax.fill(poly_x, poly_y, color="#DDDDDD", alpha=0.35, linewidth=0)
+                ax.plot(mean_x, mean_y, color="black", linewidth=2.0, label=f"{category} mean")
+
+        ax.set_xlabel("X Position (px)")
+        ax.set_ylabel("Y Position (px)")
+        if xlim:
+            ax.set_xlim(xlim)
+        if ylim:
+            ax.set_ylim(ylim)
+        if invert_y:
+            ax.invert_yaxis()
+        ax.set_aspect('equal', adjustable='box')
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+    # Layout by mode
+    if mode in {"rewarded", "rewarded_hr", "completed", "fa_by_response"}:
+        fig, axes = plt.subplots(1, 3, figsize=figsize)
+        axis_order = ["combined", "A", "B"]
+        for ax, axis_key, title in zip(axes, axis_order, ["Combined", "Odor A / Port 1", "Odor B / Port 2"]):
+            _plot_axis(ax, axis_key)
+            ax.set_title(title)
+    elif mode == "all_trials":
+        fig, ax = plt.subplots(1, 1, figsize=figsize)
+        _plot_axis(ax, "combined")
+        ax.set_title("All trials")
+        axes = ax
+    elif mode == "fa_by_odor":
+        odor_keys = [k for k in segments.keys()]
+        if not odor_keys:
+            print("No FA trials found for fa_by_odor")
+            return None, None
+        n = len(odor_keys)
+        ncols = min(3, n)
+        nrows = int(np.ceil(n / ncols))
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(figsize[0], figsize[1]))
+        axes = np.atleast_1d(axes).flatten()
+        for ax, key in zip(axes, odor_keys):
+            _plot_axis(ax, key)
+            ax.set_title(f"Odor {key}")
+        for ax in axes[len(odor_keys):]:
+            ax.axis('off')
+    elif mode == "hr_only":
+        axis_keys = [k for k in segments.keys() if k.startswith("HR ")]
+        if "HR Summary" in segments:
+            axis_keys.append("HR Summary")
+        if not axis_keys:
+            print("No HR trials found.")
+            return None, None
+        n = len(axis_keys)
+        ncols = min(3, n)
+        nrows = int(np.ceil(n / ncols))
+        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(figsize[0], figsize[1]))
+        axes = np.atleast_1d(axes).flatten()
+        for ax, key in zip(axes, axis_keys):
+            _plot_axis(ax, key)
+            ax.set_title(key)
+        for ax in axes[len(axis_keys):]:
+            ax.axis('off')
+
+    plt.tight_layout()
+    return fig, axes
 
 
 def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_path=None):
