@@ -2909,6 +2909,10 @@ def plot_trial_traces_by_mode(
         else:
             def fa_filter_fn(lbl):
                 return str(lbl).lower() in fa_types_list if pd.notna(lbl) else False
+    elif isinstance(fa_types, (list, tuple, set)):
+        fa_set = {str(t).lower() for t in fa_types}
+        def fa_filter_fn(lbl):
+            return str(lbl).lower() in fa_set if pd.notna(lbl) else False
     else:
         def fa_filter_fn(lbl):
             return True
@@ -3155,6 +3159,9 @@ def plot_trial_traces_by_mode(
                 if "fa_time" in fa_df.columns:
                     fa_df["fa_time"] = pd.to_datetime(fa_df["fa_time"], errors="coerce")
                     fa_df = fa_df.dropna(subset=["fa_time"])
+            if not fa_df.empty:
+                label_counts = fa_df["fa_label"].value_counts().to_dict()
+                print(f"[fa_by_response] session {date_str}: trials after filter={len(fa_df)}, fa_label counts={label_counts}")
             if fa_df.empty:
                 continue
             for row, seg in iter_trials(fa_df):
@@ -3172,8 +3179,13 @@ def plot_trial_traces_by_mode(
                     avg_pool[category][category].append(resampled)
 
         elif mode == "fa_by_odor":
-            fa_df = td[(td.get("fa_label").notna()) & (td.get("fa_label") != "nFA")].copy()
-            fa_df = fa_df[fa_df["fa_label"].apply(fa_filter_fn)] if not fa_df.empty else fa_df
+            # Only aborted FA trials; require fa_time for window end
+            fa_df = td[(td.get("is_aborted") == True) & (td.get("fa_label").notna())].copy()
+            if not fa_df.empty:
+                fa_df = fa_df[fa_df["fa_label"].apply(fa_filter_fn)]
+                if "fa_time" in fa_df.columns:
+                    fa_df["fa_time"] = pd.to_datetime(fa_df["fa_time"], errors="coerce")
+                    fa_df = fa_df.dropna(subset=["fa_time"])
             if fa_df.empty:
                 continue
             for row, seg in iter_trials(fa_df):
