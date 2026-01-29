@@ -5,6 +5,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib import cm
+from matplotlib.collections import LineCollection
+from matplotlib.colors import Normalize
 from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
 from hypnose_analysis.utils.metrics_utils import (
@@ -2846,6 +2848,7 @@ def plot_trial_traces_by_mode(
     ylim=None,
     show_average=False,
     highlight_hr=False,
+    color_by_index=False,
     figsize=(18, 6),
     smooth_window=5,
     linewidth=1.4,
@@ -2871,6 +2874,8 @@ def plot_trial_traces_by_mode(
         If True, draw a black mean trace per category with a light-grey SEM tube.
     highlight_hr : bool
         Applies to rewarded/all_trials: recolor HR trials with HR palette; ignored elsewhere unless specified.
+    color_by_index : bool
+        Debug: ignore A/B colors and instead color each trace by normalized sample index (start→end) using a gradient.
     figsize : tuple
         Figure size.
     smooth_window : int
@@ -2924,6 +2929,8 @@ def plot_trial_traces_by_mode(
     aborted_color = "#555555"
     timeout_color = "#9E9E9E"
     unrewarded_color = "#000000"
+    index_cmap = cm.get_cmap("plasma")
+    index_norm = Normalize(vmin=0.0, vmax=1.0)
 
     subj_str = f"sub-{str(subjid).zfill(3)}"
     derivatives_dir = get_derivatives_root()
@@ -2972,6 +2979,20 @@ def plot_trial_traces_by_mode(
             return 2
         return None
 
+    def _port_from_first_supply(row):
+        return _hr_port_from_identity(row.get("first_supply_odor_identity"))
+
+    def _category_from_row(row):
+        # Priority: explicit first_supply_odor_identity -> inferred port -> odor letter fallback
+        port = _port_from_first_supply(row)
+        if port is None:
+            port = _infer_port(row)
+        if port in {1, 2}:
+            return ("A" if port == 1 else "B"), port
+        odor = _odor_letter(row.get("last_odor_name") or row.get("last_odor"))
+        category = "A" if odor in {"A", "OdorA"} else "B"
+        return category, port
+
     def _smooth_tracking(df):
         def _as_series(col):
             if isinstance(col, pd.DataFrame):
@@ -2997,12 +3018,24 @@ def plot_trial_traces_by_mode(
         return seg["X"].to_numpy(), seg["Y"].to_numpy()
 
     def _resample_trace(x, y, n_points=200):
+        """Resample a trajectory onto a normalized arc-length grid [0,1]."""
+        x = np.asarray(x, dtype=float)
+        y = np.asarray(y, dtype=float)
         if x.size < 2 or y.size < 2:
             return None
-        t = np.linspace(0, 1, num=x.size)
-        t_new = np.linspace(0, 1, num=n_points)
-        x_new = np.interp(t_new, t, x)
-        y_new = np.interp(t_new, t, y)
+        if not np.isfinite(x).all() or not np.isfinite(y).all():
+            return None
+        dx = np.diff(x)
+        dy = np.diff(y)
+        seg_len = np.hypot(dx, dy)
+        cumlen = np.concatenate(([0.0], np.cumsum(seg_len)))
+        total_len = cumlen[-1]
+        if total_len <= 0:
+            return None
+        s = cumlen / total_len  # normalized arc length in [0,1]
+        s_new = np.linspace(0.0, 1.0, num=n_points)
+        x_new = np.interp(s_new, s, x)
+        y_new = np.interp(s_new, s, y)
         return x_new, y_new
 
     def _add_segment(store, axis_key, category, color, x, y):
@@ -3089,11 +3122,16 @@ def plot_trial_traces_by_mode(
         def iter_trials(df):
             for _, row in df.iterrows():
                 start = row.get("sequence_start")
-                # For false alarms, use fa_time as end since sequence_end can be much later
+                # For false alarms, use fa_time as end; for rewarded, prefer first_supply_time to cap at reward delivery
                 fa_label = str(row.get("fa_label", "")).lower()
                 fa_time = row.get("fa_time")
+                resp_cat = str(row.get("response_time_category", "")).lower()
+                first_supply_time = row.get("first_supply_time")
+
                 if pd.notna(fa_time) and fa_label.startswith("fa_"):
                     end = fa_time
+                elif resp_cat == "rewarded" and pd.notna(first_supply_time):
+                    end = first_supply_time
                 else:
                     end = row.get("sequence_end")
                 seg = _extract_segment(tracking, start, end)
@@ -3110,11 +3148,10 @@ def plot_trial_traces_by_mode(
             for row, seg in iter_trials(trials):
                 port = None
                 if hr_flag and bool(row.get(hr_flag, False)):
-                    port = _hr_port_from_identity(row.get("first_supply_odor_identity"))
+                    port = _port_from_first_supply(row) or _infer_port(row)
+                category, port_fallback = _category_from_row(row)
                 if port is None:
-                    port = _infer_port(row)
-                odor = _odor_letter(row.get("last_odor_name") or row.get("last_odor"))
-                category = "A" if odor in {"A", "OdorA"} or port == 1 else "B"
+                    port = port_fallback
                 color_map = port_colors_hr if (highlight_hr and hr_flag and bool(row.get(hr_flag, False))) else port_colors
                 color = color_map.get(port, port_colors[1 if category == "A" else 2])
                 _add_segment(segments, "combined", category, color, seg[0], seg[1])
@@ -3127,9 +3164,7 @@ def plot_trial_traces_by_mode(
         elif mode == "completed":
             trials = td[td.get("is_aborted") == False]
             for row, seg in iter_trials(trials):
-                port = _infer_port(row)
-                odor = _odor_letter(row.get("last_odor_name") or row.get("last_odor"))
-                category = "A" if odor in {"A", "OdorA"} or port == 1 else "B"
+                category, port = _category_from_row(row)
                 rtc = str(row.get("response_time_category", "")).lower()
                 if rtc == "rewarded":
                     color = port_colors.get(port, port_colors[1 if category == "A" else 2])
@@ -3149,9 +3184,7 @@ def plot_trial_traces_by_mode(
         elif mode == "all_trials":
             trials = td.copy()
             for row, seg in iter_trials(trials):
-                port = _infer_port(row)
-                odor = _odor_letter(row.get("last_odor_name") or row.get("last_odor"))
-                category = "A" if odor in {"A", "OdorA"} or port == 1 else "B"
+                category, port = _category_from_row(row)
                 if row.get("is_aborted"):
                     color = aborted_color
                     if highlight_hr and hr_flag and bool(row.get(hr_flag, False)):
@@ -3160,9 +3193,11 @@ def plot_trial_traces_by_mode(
                     color_map = port_colors_hr if (highlight_hr and hr_flag and bool(row.get(hr_flag, False))) else port_colors
                     color = color_map.get(port, port_colors[1 if category == "A" else 2])
                 _add_segment(segments, "combined", category, color, seg[0], seg[1])
-                resampled = _resample_trace(seg[0], seg[1])
-                if resampled is not None:
-                    avg_pool["combined"][category].append(resampled)
+                # Only include completed trials in the averages for all_trials
+                if not row.get("is_aborted"):
+                    resampled = _resample_trace(seg[0], seg[1])
+                    if resampled is not None:
+                        avg_pool["combined"][category].append(resampled)
 
         elif mode == "fa_by_response":
             # Only aborted FA trials, filtered by fa_types; plot sequence_start -> fa_time
@@ -3207,12 +3242,13 @@ def plot_trial_traces_by_mode(
                 odor = _odor_letter(odor_name)
                 if odor in {"A", "B", "OdorA", "OdorB"}:
                     continue
-                port = _infer_port(row)
+                port = row.get("fa_port") if pd.notna(row.get("fa_port")) else _infer_port(row)
                 color = port_colors_fa.get(port, port_colors_fa[1])
-                _add_segment(segments, odor, odor, color, seg[0], seg[1])
+                label = "FA to A" if port == 1 else ("FA to B" if port == 2 else "FA")
+                _add_segment(segments, odor, label, color, seg[0], seg[1])
                 resampled = _resample_trace(seg[0], seg[1])
                 if resampled is not None:
-                    avg_pool[odor][odor].append(resampled)
+                    avg_pool[odor][label].append(resampled)
 
         elif mode == "hr_only":
             if hr_flag is None:
@@ -3252,10 +3288,30 @@ def plot_trial_traces_by_mode(
     def _plot_axis(ax, axis_key):
         segs = segments.get(axis_key, [])
         used_labels = set()
+
+        def _plot_segment(seg, label=None):
+            x = np.asarray(seg["x"])
+            y = np.asarray(seg["y"])
+            if color_by_index:
+                if x.size < 2 or y.size < 2:
+                    return
+                points = np.array([x, y]).T.reshape(-1, 1, 2)
+                if points.shape[0] < 2:
+                    return
+                seg_arr = np.concatenate([points[:-1], points[1:]], axis=1)
+                idx_vals = np.linspace(0, 1, len(seg_arr))
+                lc = LineCollection(seg_arr, cmap=index_cmap, norm=index_norm, linewidth=linewidth, alpha=alpha)
+                lc.set_array(idx_vals)
+                ax.add_collection(lc)
+            else:
+                ax.plot(x, y, color=seg["color"], alpha=alpha, linewidth=linewidth, label=label)
+
         for seg in segs:
-            label = seg["label"] if seg["label"] not in used_labels else None
-            ax.plot(seg["x"], seg["y"], color=seg["color"], alpha=alpha, linewidth=linewidth, label=label)
-            used_labels.add(seg["label"])
+            label = None
+            if (not color_by_index) and (seg["label"] not in used_labels):
+                label = seg["label"]
+                used_labels.add(seg["label"])
+            _plot_segment(seg, label)
         if show_average and axis_key in avg_pool:
             for category, traces in avg_pool[axis_key].items():
                 if not traces:
@@ -3285,6 +3341,12 @@ def plot_trial_traces_by_mode(
                 ax.fill(poly_x, poly_y, color="#DDDDDD", alpha=0.35, linewidth=0)
                 ax.plot(mean_x, mean_y, color="black", linewidth=2.0, label=f"{category} mean")
 
+        if color_by_index:
+            sm = cm.ScalarMappable(norm=index_norm, cmap=index_cmap)
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label("Normalized sample index")
+
         ax.set_xlabel("X Position (px)")
         ax.set_ylabel("Y Position (px)")
         if xlim:
@@ -3295,7 +3357,9 @@ def plot_trial_traces_by_mode(
             ax.invert_yaxis()
         ax.set_aspect('equal', adjustable='box')
         ax.grid(True, alpha=0.3)
-        ax.legend()
+        handles, labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend()
 
     # Layout by mode
     if mode in {"rewarded", "rewarded_hr", "completed", "fa_by_response"}:
