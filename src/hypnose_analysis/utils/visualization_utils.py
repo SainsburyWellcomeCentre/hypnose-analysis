@@ -2962,6 +2962,16 @@ def plot_trial_traces_by_mode(
                         continue
         return None
 
+    def _hr_port_from_identity(val):
+        if pd.isna(val):
+            return None
+        s = str(val).strip().upper()
+        if s in {"A", "ODORA", "1"}:
+            return 1
+        if s in {"B", "ODORB", "2"}:
+            return 2
+        return None
+
     def _smooth_tracking(df):
         def _as_series(col):
             if isinstance(col, pd.DataFrame):
@@ -3098,7 +3108,11 @@ def plot_trial_traces_by_mode(
             if hr_flag and not include_hr:
                 trials = trials[~hr_mask]
             for row, seg in iter_trials(trials):
-                port = _infer_port(row)
+                port = None
+                if hr_flag and bool(row.get(hr_flag, False)):
+                    port = _hr_port_from_identity(row.get("first_supply_odor_identity"))
+                if port is None:
+                    port = _infer_port(row)
                 odor = _odor_letter(row.get("last_odor_name") or row.get("last_odor"))
                 category = "A" if odor in {"A", "OdorA"} or port == 1 else "B"
                 color_map = port_colors_hr if (highlight_hr and hr_flag and bool(row.get(hr_flag, False))) else port_colors
@@ -3210,7 +3224,9 @@ def plot_trial_traces_by_mode(
                 odor_name = row.get("last_odor_name") or row.get("last_odor")
                 odor = _odor_letter(odor_name)
                 hr_odors_seen.add(odor)
-                port = _infer_port(row)
+                port = _hr_port_from_identity(row.get("first_supply_odor_identity"))
+                if port is None:
+                    port = _infer_port(row)
                 rtc = str(row.get("response_time_category", "")).lower()
                 if rtc == "rewarded":
                     color = port_colors_hr.get(port, port_colors_hr[1])
