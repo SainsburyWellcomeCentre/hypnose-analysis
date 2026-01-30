@@ -25,24 +25,79 @@ from hypnose_analysis.paths import (
 import re
 import numpy as np
 import json
+from collections import OrderedDict
 
+CACHE = OrderedDict()
+CACHE_MAX_ITEMS = 40  # Maximum number of cached items
+
+def _update_cache(subjid, dates, data, kind="trial_data"):
+    """
+    Update the cache with data for each (subjid, date) pair, with a specified kind.
+    Only updates/overwrites the dates provided. Keeps other cached dates for the subject.
+    If the cache exceeds the maximum size, remove the oldest entries.
+    """
+    global CACHE
+    for date in dates:
+        key = (subjid, date, kind)
+        if key in CACHE:
+            del CACHE[key]
+        CACHE[key] = {
+            "kind": kind,
+            "data": data[date]
+        }
+    while len(CACHE) > CACHE_MAX_ITEMS:
+        CACHE.popitem(last=False)
+
+def _get_from_cache(subjid, date, kind):
+    """
+    Retrieve cached data for (subjid, date) and kind. Returns the data or None.
+    """
+    key = (subjid, date, kind)
+    if key in CACHE and CACHE[key]["kind"] == kind:
+        return CACHE[key]["data"]
+    return None
 
 def _load_table_with_trial_data(results_dir: Path, name: str) -> pd.DataFrame:
-    """Load trial_data (parquet->csv) or a saved CSV table by name."""
+    """Load trial_data (parquet->csv) or a saved CSV table by name, using cache if available."""
+    # Try cache for trial_data only
     if name == "trial_data":
+        # Extract subjid and date from results_dir path
+        # Expect path: .../sub-XXX_id-YYY/ses-*_date-ZZZZ/saved_analysis_results
+        parts = results_dir.parts
+        try:
+            subj_part = [p for p in parts if p.startswith("sub-")][0]
+            subjid = int(subj_part.split("-")[1])
+            ses_part = [p for p in parts if p.startswith("ses-")][0]
+            date_str = ses_part.split("_date-")[-1]
+            date = int(date_str) if date_str.isdigit() else date_str
+        except Exception:
+            subjid = None
+            date = None
+        if subjid is not None and date is not None:
+            cached_td = _get_from_cache(subjid, date, kind="trial_data")
+            if cached_td is not None:
+                print(f"[CACHE HIT] trial_data for {subjid}, {date}")
+                return cached_td
+        # Fallback to disk and cache once loaded
+        df = None
         pq = results_dir / "trial_data.parquet"
         if pq.exists():
             try:
-                return pd.read_parquet(pq)
+                df = pd.read_parquet(pq)
             except Exception:
-                pass
-        tcsv = results_dir / "trial_data.csv"
-        if tcsv.exists():
-            try:
-                return pd.read_csv(tcsv)
-            except Exception:
-                pass
-        return pd.DataFrame()
+                df = None
+        if df is None:
+            tcsv = results_dir / "trial_data.csv"
+            if tcsv.exists():
+                try:
+                    df = pd.read_csv(tcsv)
+                except Exception:
+                    df = None
+        if df is None:
+            return pd.DataFrame()
+        if subjid is not None and date is not None:
+            _update_cache(subjid, [date], {date: df}, kind="trial_data")
+        return df
 
     # Only allow the three non-initiated tables to be loaded from CSV
     allowed_csv = {"non_initiated_sequences", "non_initiated_odor1_attempts", "non_initiated_FA"}
@@ -111,6 +166,92 @@ def _load_trial_views(results_dir: Path) -> dict[str, pd.DataFrame]:
         "aborted_fa": aborted_fa,
         "aborted_hr": aborted_hr,
     }
+
+def load_tracking_with_behavior(subjid, date):
+    """
+    Load combined tracking data and behavior results for a session, using cache if available.
+    
+    Parameters:
+    -----------
+    subjid : int
+        Subject ID
+    date : int or str
+        Session date (e.g., 20251017)
+    
+    Returns:
+    --------
+    dict containing:
+        - 'tracking': pd.DataFrame with tracking data (X, Y, time)
+        - 'behavior': dict from load_session_results()
+        - 'tracking_labeled': pd.DataFrame with added 'in_trial' column
+    """
+    # Try cache for full session data
+    session_data = _get_from_cache(subjid, date, kind="session_data")
+    if session_data is not None:
+        print(f"[CACHE HIT] Session data for subjid={subjid}, date={date} loaded from cache.")
+        tracking = session_data['tracking']
+        behavior = session_data['behavior']
+        tracking_labeled = session_data['tracking_labeled']
+    else:
+        print(f"[CACHE MISS] Loading session data for subjid={subjid}, date={date} from disk.")
+        # Load tracking data from disk
+        base_path = get_rawdata_root()
+        server_root = get_server_root()
+        derivatives_dir = get_derivatives_root()
+        sub_str = f"sub-{str(subjid).zfill(3)}"
+        subject_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
+        if not subject_dirs:
+            raise FileNotFoundError(f"No subject directory found for {sub_str}")
+        subject_dir = subject_dirs[0]
+        date_str = str(date)
+        session_dirs = list(subject_dir.glob(f"ses-*_date-{date_str}"))
+        if not session_dirs:
+            raise FileNotFoundError(f"No session found for date {date_str}")
+        session_dir = session_dirs[0]
+        results_dir = session_dir / "saved_analysis_results"
+        tracking_files = [f for f in results_dir.glob(f"*_combined_tracking_with_timestamps.csv") 
+                          if not f.name.startswith('._')]
+        if not tracking_files:
+            raise FileNotFoundError(
+                f"No combined tracking file found. Run add_timestamps_to_tracking({subjid}, {date}) first."
+            )
+        try:
+            tracking = pd.read_csv(tracking_files[0], encoding='utf-8')
+        except UnicodeDecodeError:
+            tracking = pd.read_csv(tracking_files[0], encoding='latin1')
+        tracking['time'] = pd.to_datetime(tracking['time'])
+        behavior = load_session_results(subjid, date)
+        tracking_labeled = tracking.copy()
+        tracking_labeled['in_trial'] = False
+        tracking_labeled['trial_type'] = None
+        trials = behavior.get('completed_sequences', pd.DataFrame())
+        if not trials.empty:
+            trials = trials.copy()
+            trials['sequence_start'] = pd.to_datetime(trials['sequence_start'])
+            trials['sequence_end'] = pd.to_datetime(trials['sequence_end'])
+            for idx, trial in trials.iterrows():
+                mask = (tracking_labeled['time'] >= trial['sequence_start']) & \
+                       (tracking_labeled['time'] <= trial['sequence_end'])
+                tracking_labeled.loc[mask, 'in_trial'] = True
+                tracking_labeled.loc[mask, 'trial_type'] = trial.get('trial_type', 'trial')
+        # Cache the full session data
+        session_data = {
+            'tracking': tracking,
+            'behavior': behavior,
+            'tracking_labeled': tracking_labeled
+        }
+        _update_cache(subjid, [date], {date: session_data}, kind="session_data")
+    return {
+        'tracking': tracking,
+        'behavior': behavior,
+        'tracking_labeled': tracking_labeled
+    }
+
+    # Utility function to print current cache keys
+def print_cache_keys():
+    print("[CACHE CONTENTS] Current cache keys:")
+    for k in CACHE.keys():
+        print(f"  {k}")
 
 # Load metric results for visualization (NOTE: Previously in metrics_utils.py) ==============================================================================
 
@@ -1081,7 +1222,7 @@ def plot_abortion_and_fa_rates(
         - 'FA_Time_In' : only FA_Time_In
         - 'FA_Time_In,FA_Time_Out' : multiple specific types (comma-separated)
         - 'All' : all FA types starting with 'FA_'
-        (default: 'FA_Time_In')
+        (default: 'FA_time_in')
     """
     base_path = get_rawdata_root()
     server_root = get_server_root()
@@ -2108,87 +2249,6 @@ def plot_movement_trace(subjid, date, smooth_window=10, linewidth=1, alpha=0.5, 
     return fig, ax
 
 
-def load_tracking_with_behavior(subjid, date):
-    """
-    Load combined tracking data and behavior results for a session.
-    
-    Parameters:
-    -----------
-    subjid : int
-        Subject ID
-    date : int or str
-        Session date (e.g., 20251017)
-    
-    Returns:
-    --------
-    dict containing:
-        - 'tracking': pd.DataFrame with tracking data (X, Y, time)
-        - 'behavior': dict from load_session_results()
-        - 'tracking_labeled': pd.DataFrame with added 'in_trial' column
-    """
-    # Load tracking data
-    base_path = get_rawdata_root()
-    server_root = get_server_root()
-    derivatives_dir = get_derivatives_root()
-    
-    sub_str = f"sub-{str(subjid).zfill(3)}"
-    subject_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
-    if not subject_dirs:
-        raise FileNotFoundError(f"No subject directory found for {sub_str}")
-    subject_dir = subject_dirs[0]
-    
-    date_str = str(date)
-    session_dirs = list(subject_dir.glob(f"ses-*_date-{date_str}"))
-    if not session_dirs:
-        raise FileNotFoundError(f"No session found for date {date_str}")
-    session_dir = session_dirs[0]
-    
-    results_dir = session_dir / "saved_analysis_results"
-    tracking_files = [f for f in results_dir.glob(f"*_combined_tracking_with_timestamps.csv") 
-                      if not f.name.startswith('._')]
-    if not tracking_files:
-        raise FileNotFoundError(
-            f"No combined tracking file found. Run add_timestamps_to_tracking({subjid}, {date}) first."
-        )
-    
-    # Load tracking CSV
-    try:
-        tracking = pd.read_csv(tracking_files[0], encoding='utf-8')
-    except UnicodeDecodeError:
-        tracking = pd.read_csv(tracking_files[0], encoding='latin1')
-    
-    # Convert time column to datetime
-    tracking['time'] = pd.to_datetime(tracking['time'])
-    
-    # Load behavior data
-    behavior = load_session_results(subjid, date)
-    
-    # Label tracking frames as in_trial or not
-    tracking_labeled = tracking.copy()
-    tracking_labeled['in_trial'] = False
-    tracking_labeled['trial_type'] = None
-    
-    # Get all completed trials (can customize this to use different trial types)
-    trials = behavior.get('completed_sequences', pd.DataFrame())
-    
-    if not trials.empty:
-        trials = trials.copy()
-        trials['sequence_start'] = pd.to_datetime(trials['sequence_start'])
-        trials['sequence_end'] = pd.to_datetime(trials['sequence_end'])
-        
-        # Mark frames that fall within any trial
-        for idx, trial in trials.iterrows():
-            mask = (tracking_labeled['time'] >= trial['sequence_start']) & \
-                   (tracking_labeled['time'] <= trial['sequence_end'])
-            tracking_labeled.loc[mask, 'in_trial'] = True
-            tracking_labeled.loc[mask, 'trial_type'] = trial.get('trial_type', 'trial')
-    
-    return {
-        'tracking': tracking,
-        'behavior': behavior,
-        'tracking_labeled': tracking_labeled
-    }
-
 
 def plot_movement_by_trial_state(subjid, date, smooth_window=10, linewidth=1, alpha=0.6, 
                                  figsize=(10, 10), xlim=None, ylim=None, invert_y=True,
@@ -2320,6 +2380,12 @@ def _load_tracking_and_behavior(subjid, date, tracking_source='sleap'):
     """
     Load combined tracking CSV (SLEAP) and behavior results for a session.
     """
+    # Try cache first
+    cached = _get_from_cache(subjid, date, kind="sleap_session")
+    if cached is not None:
+        print(f"[CACHE HIT] SLEAP session for subjid={subjid}, date={date}")
+        return cached["tracking"], cached["behavior"]
+
     base_path = get_rawdata_root()
     server_root = get_server_root()
     derivatives_dir = get_derivatives_root()
@@ -2402,7 +2468,14 @@ def _load_tracking_and_behavior(subjid, date, tracking_source='sleap'):
 
     
     print(f"Loaded {source_used.upper()} tracking: {len(tracking)} frames from {csv_path.name}")
-    
+
+    # Cache the processed session (tracking+behavior)
+    session_data = {
+        "tracking": tracking,
+        "behavior": behavior,
+    }
+    _update_cache(subjid, [date], {date: session_data}, kind="sleap_session")
+
     return tracking, behavior
 
 def plot_movement_with_behavior(
@@ -3127,11 +3200,14 @@ def plot_trial_traces_by_mode(
                 fa_time = row.get("fa_time")
                 resp_cat = str(row.get("response_time_category", "")).lower()
                 first_supply_time = row.get("first_supply_time")
+                first_reward_poke_time = row.get("first_reward_poke_time")
 
                 if pd.notna(fa_time) and fa_label.startswith("fa_"):
                     end = fa_time
                 elif resp_cat == "rewarded" and pd.notna(first_supply_time):
                     end = first_supply_time
+                elif resp_cat == "unrewarded" and pd.notna(first_reward_poke_time):
+                    end = first_reward_poke_time
                 else:
                     end = row.get("sequence_end")
                 seg = _extract_segment(tracking, start, end)
@@ -3253,33 +3329,86 @@ def plot_trial_traces_by_mode(
         elif mode == "hr_only":
             if hr_flag is None:
                 continue
+            # Determine hidden-rule odors for this session (from summary.json)
+            hr_odors_raw = []
+            summary_path = results_dir / "summary.json"
+            if summary_path.exists():
+                try:
+                    with open(summary_path, "r", encoding="utf-8") as f:
+                        summary = json.load(f)
+                    hr_odors_raw = summary.get("params", {}).get("hidden_rule_odors", []) or []
+                    if not hr_odors_raw:
+                        runs = summary.get("session", {}).get("runs", [])
+                        if runs and isinstance(runs[0], dict):
+                            stage = runs[0].get("stage", {}) if isinstance(runs[0].get("stage", {}), dict) else {}
+                            hr_odors_raw = stage.get("hidden_rule_odors", []) or stage.get("hidden_rule_odors".lower(), []) or []
+                except Exception:
+                    hr_odors_raw = []
+            hr_targets = [_odor_letter(o) for o in hr_odors_raw if o is not None]
+            hr_targets = hr_targets[:2]  # only need first two hidden-rule odors
+
+            def _parse_odor_sequence(val):
+                if isinstance(val, list):
+                    return val
+                if pd.isna(val):
+                    return []
+                if isinstance(val, str):
+                    try:
+                        obj = json.loads(val)
+                        if isinstance(obj, list):
+                            return obj
+                    except Exception:
+                        pass
+                    # fallback: split by comma/semicolon
+                    return [s.strip().strip("[]'\"") for s in re.split(r"[;,]", val) if s.strip()]
+                return []
+
             hr_trials = td[(hr_mask) & (td.get("is_aborted") == False)]
             if hr_trials.empty:
                 continue
             for row, seg in iter_trials(hr_trials):
-                odor_name = row.get("last_odor_name") or row.get("last_odor")
-                odor = _odor_letter(odor_name)
-                hr_odors_seen.add(odor)
+                odor_seq = _parse_odor_sequence(row.get("odor_sequence"))
+                odor_match = None
+                for o in odor_seq:
+                    ol = _odor_letter(o)
+                    if hr_targets and ol in hr_targets:
+                        odor_match = ol
+                        break
+                if odor_match is None:
+                    # fallback to last_odor if no sequence match
+                    odor_match = _odor_letter(row.get("last_odor_name") or row.get("last_odor"))
+                hr_odors_seen.add(odor_match)
+
                 port = _hr_port_from_identity(row.get("first_supply_odor_identity"))
                 if port is None:
                     port = _infer_port(row)
                 rtc = str(row.get("response_time_category", "")).lower()
+
+                axis_key = f"HR {odor_match}"
+                label_base = f"{odor_match}"
                 if rtc == "rewarded":
                     color = port_colors_hr.get(port, port_colors_hr[1])
-                    axis_key = f"HR {odor}"
-                    _add_segment(segments, axis_key, f"{odor} rewarded", color, seg[0], seg[1])
-                    _add_segment(segments, "HR Summary", f"{odor} rewarded", color, seg[0], seg[1])
+                    _add_segment(segments, axis_key, f"{label_base} rewarded", color, seg[0], seg[1])
+                    _add_segment(segments, "HR Summary", f"{label_base} rewarded", color, seg[0], seg[1])
                     resampled = _resample_trace(seg[0], seg[1])
                     if resampled is not None:
-                        avg_pool[axis_key][f"{odor} rewarded"].append(resampled)
-                        avg_pool["HR Summary"][f"{odor} rewarded"].append(resampled)
-                else:
+                        avg_pool[axis_key][f"{label_base} rewarded"].append(resampled)
+                        avg_pool["HR Summary"][f"{label_base} rewarded"].append(resampled)
+                elif rtc == "timeout_delayed":
+                    color = timeout_color
+                    _add_segment(segments, axis_key, f"{label_base} timeout", color, seg[0], seg[1])
+                    _add_segment(segments, "HR Summary", f"{label_base} timeout", color, seg[0], seg[1])
+                    resampled = _resample_trace(seg[0], seg[1])
+                    if resampled is not None:
+                        avg_pool[axis_key][f"{label_base} timeout"].append(resampled)
+                        avg_pool["HR Summary"][f"{label_base} timeout"].append(resampled)
+                else:  # unrewarded / other
                     color = unrewarded_color
-                    axis_key = f"HR {odor}"
-                    _add_segment(segments, axis_key, f"{odor} incorrect", color, seg[0], seg[1])
+                    _add_segment(segments, axis_key, f"{label_base} unrewarded", color, seg[0], seg[1])
+                    _add_segment(segments, "HR Summary", f"{label_base} unrewarded", color, seg[0], seg[1])
                     resampled = _resample_trace(seg[0], seg[1])
                     if resampled is not None:
-                        avg_pool[axis_key][f"{odor} incorrect"].append(resampled)
+                        avg_pool[axis_key][f"{label_base} unrewarded"].append(resampled)
 
     if not segments:
         print("No matching trials found for the requested mode.")
