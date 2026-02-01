@@ -30,6 +30,45 @@ from collections import OrderedDict
 CACHE = OrderedDict()
 CACHE_MAX_ITEMS = 40  # Maximum number of cached items
 
+
+def _clean_graph(ax, *, xlabel: Optional[str] = None, ylabel: Optional[str] = None):
+    """
+    Hide title, axis labels, tick labels, and legend while printing them for external editing.
+
+    - Leaves ticks/spines in place so layout remains.
+    - Prints axis labels and tick values to stdout for reference.
+    """
+    try:
+        title = ax.get_title()
+        x_lab = xlabel if xlabel is not None else ax.get_xlabel()
+        y_lab = ylabel if ylabel is not None else ax.get_ylabel()
+        x_ticks = [round(float(t), 3) for t in ax.get_xticks()]
+        y_ticks = [round(float(t), 3) for t in ax.get_yticks()]
+        if title:
+            print(f"[_clean_graph] title: {title}")
+        if x_lab:
+            print(f"[_clean_graph] x label: {x_lab}")
+        if y_lab:
+            print(f"[_clean_graph] y label: {y_lab}")
+        print(f"[_clean_graph] x ticks: {x_ticks}")
+        print(f"[_clean_graph] y ticks: {y_ticks}")
+    except Exception:
+        pass
+
+    # Clear visible annotations but keep ticks present
+    ax.set_title("")
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+    ax.set_xticklabels([])
+    ax.set_yticklabels([])
+
+    leg = ax.get_legend()
+    if leg is not None:
+        try:
+            leg.remove()
+        except Exception:
+            pass
+
 def _update_cache(subjid, dates, data, kind="trial_data"):
     """
     Update the cache with data for each (subjid, date) pair, with a specified kind.
@@ -378,7 +417,7 @@ def plot_behavior_metrics(
     black_white: bool = False,
     y_range: Optional[Tuple[float, float]] = None,
     plot_HR_separately: bool = False,
-    show_title: bool = True,
+    clean_graph: bool = False,
 ):
     """
     Plot selected metrics over sessions for one or more subjects.
@@ -399,7 +438,7 @@ def plot_behavior_metrics(
     - verbose: If True, print progress and warnings.
     - y_range: Optional tuple (ymin, ymax); if provided, sets y-limits for each plot.
     - plot_HR_separately: If True and plotting hidden_rule_detection_rate, also plot per-HR-odor detection alongside total.
-    - show_title: If False, omit the plot title (useful for tighter layouts).
+    - clean_graph: If True, hide title/labels/tick labels/legend while printing labels & tick values.
 
     Returns:
     - List of matplotlib Figure objects.
@@ -592,19 +631,16 @@ def plot_behavior_metrics(
         ax.set_xlim([0.5, max_session + 0.5])
         if y_range is not None and len(y_range) == 2:
             ax.set_ylim(y_range)
+        y_ticks = ax.get_yticks()
         
         # Format title: split by "_" and capitalize each word
         title_formatted = " ".join(word.capitalize() for word in var.split(".")[0].split("_")) + (f" ({var.split('.')[1].capitalize()})" if '.' in var else "")
 
         
-        ax.set_xlabel("Days", fontsize=30, fontweight='bold')
-        ax.set_ylabel(var.replace("_", " ").title(), fontsize=30, fontweight='bold')
-        if show_title:
+        if not clean_graph:
+            ax.set_xlabel("Days", fontsize=30, fontweight='bold')
+            ax.set_ylabel(var.replace("_", " ").title(), fontsize=30, fontweight='bold')
             ax.set_title(title_formatted, fontsize=20, fontweight='bold')
-        ax.tick_params(axis='both', labelsize=20)
-        
-        # Make axes bold
-        ax.spines['left'].set_linewidth(2)
         ax.spines['bottom'].set_linewidth(2)
         
         # Remove upper and right spines
@@ -660,20 +696,24 @@ def plot_behavior_metrics(
             ]
 
         # Place legends
-        if subject_handles:
-            leg1 = ax.legend(handles=subject_handles, title="Subjects", loc="upper left", bbox_to_anchor=(1.02, 1.0))
-            ax.add_artist(leg1)
-        if series_handles:
-            ax.legend(handles=series_handles, title="HR Series", loc="lower left", bbox_to_anchor=(1.02, 0.0))
-        elif protocol_handles:
-            ax.legend(handles=protocol_handles, title="Protocols", loc="lower left", bbox_to_anchor=(1.02, 0.0))
+        if not clean_graph:
+            if subject_handles:
+                leg1 = ax.legend(handles=subject_handles, title="Subjects", loc="upper left", bbox_to_anchor=(1.02, 1.0))
+                ax.add_artist(leg1)
+            if series_handles:
+                ax.legend(handles=series_handles, title="HR Series", loc="lower left", bbox_to_anchor=(1.02, 0.0))
+            elif protocol_handles:
+                ax.legend(handles=protocol_handles, title="Protocols", loc="lower left", bbox_to_anchor=(1.02, 0.0))
+
+        if clean_graph:
+            _clean_graph(ax, xlabel="Days", ylabel=var.replace("_", " ").title())
 
         plt.tight_layout()
         figs.append(fig)
 
     return figs
 
-def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_path=None, plot_choice_acc=False, plot_AB=True):
+def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_path=None, plot_choice_acc=False, plot_AB=True, clean_graph=False):
     """
     Plot decision accuracy by odor (A, B) and total over dates.
     Optionally include global choice accuracy as a separate line.
@@ -693,6 +733,8 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
         If True, also plot global choice accuracy as a dark grey line (default: False)
     plot_AB : bool, optional
         If True, plot odor-specific accuracies for A and B (default: True). If False, omit A/B lines.
+    clean_graph : bool, optional
+        If True, print and clear title/labels/ticks/legend for external editing.
     
     Returns:
     --------
@@ -833,6 +875,7 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
     ax.set_ylabel('Accuracy', fontsize=30, fontweight='bold')
     ax.tick_params(axis='both', labelsize=26)
     ax.set_ylim([0, 1.05])
+    ax.set_xlim([-0.1, len(unique_dates) + 0.1])
     ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1, alpha=0.3)
     ax.legend(loc='best', fontsize=20)
     ax.spines['left'].set_linewidth(2)
@@ -846,6 +889,9 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
         title += " (with Global Choice Accuracy)"
     ax.set_title(title, fontsize=14, fontweight='bold')
     
+    if clean_graph:
+        _clean_graph(ax, xlabel="Days", ylabel="Accuracy")
+
     plt.tight_layout()
     
     if save_path:
@@ -3490,33 +3536,31 @@ def plot_trial_traces_by_mode(
         if handles:
             ax.legend()
 
-    # Layout by mode
-    if mode in {"rewarded", "rewarded_hr", "completed", "fa_by_response"}:
-        fig, axes = plt.subplots(1, 3, figsize=figsize)
-        axis_order = ["combined", "A", "B"]
-        for ax, axis_key, title in zip(axes, axis_order, ["Combined", "Odor A / Port 1", "Odor B / Port 2"]):
-            _plot_axis(ax, axis_key)
-            ax.set_title(title)
-    elif mode == "all_trials":
+    figs = []
+    axes_out = []
+
+    def _make_fig(axis_key, title=None):
         fig, ax = plt.subplots(1, 1, figsize=figsize)
-        _plot_axis(ax, "combined")
-        ax.set_title("All trials")
-        axes = ax
+        _plot_axis(ax, axis_key)
+        if title:
+            ax.set_title(title)
+        plt.tight_layout()
+        figs.append(fig)
+        axes_out.append(ax)
+
+    # Layout by mode (separate figure per axis)
+    if mode in {"rewarded", "rewarded_hr", "completed", "fa_by_response"}:
+        for axis_key, title in zip(["combined", "A", "B"], ["Combined", "Odor A / Port 1", "Odor B / Port 2"]):
+            _make_fig(axis_key, title)
+    elif mode == "all_trials":
+        _make_fig("combined", "All trials")
     elif mode == "fa_by_odor":
         odor_keys = [k for k in segments.keys()]
         if not odor_keys:
             print("No FA trials found for fa_by_odor")
             return None, None
-        n = len(odor_keys)
-        ncols = min(3, n)
-        nrows = int(np.ceil(n / ncols))
-        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(figsize[0], figsize[1]))
-        axes = np.atleast_1d(axes).flatten()
-        for ax, key in zip(axes, odor_keys):
-            _plot_axis(ax, key)
-            ax.set_title(f"Odor {key}")
-        for ax in axes[len(odor_keys):]:
-            ax.axis('off')
+        for key in odor_keys:
+            _make_fig(key, f"Odor {key}")
     elif mode == "hr_only":
         axis_keys = [k for k in segments.keys() if k.startswith("HR ")]
         if "HR Summary" in segments:
@@ -3524,19 +3568,10 @@ def plot_trial_traces_by_mode(
         if not axis_keys:
             print("No HR trials found.")
             return None, None
-        n = len(axis_keys)
-        ncols = min(3, n)
-        nrows = int(np.ceil(n / ncols))
-        fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=(figsize[0], figsize[1]))
-        axes = np.atleast_1d(axes).flatten()
-        for ax, key in zip(axes, axis_keys):
-            _plot_axis(ax, key)
-            ax.set_title(key)
-        for ax in axes[len(axis_keys):]:
-            ax.axis('off')
+        for key in axis_keys:
+            _make_fig(key, key)
 
-    plt.tight_layout()
-    return fig, axes
+    return figs if len(figs) > 1 else (figs[0], axes_out[0])
 
 
 def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_path=None):
