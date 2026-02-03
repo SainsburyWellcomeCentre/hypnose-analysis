@@ -646,6 +646,7 @@ def plot_behavior_metrics(
         # Remove upper and right spines
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
+        ax.spines["left"].set_linewidth(3)
 
         # No grid
         ax.grid(False)
@@ -881,6 +882,16 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
     ax.spines['left'].set_linewidth(2)
     ax.spines['bottom'].set_linewidth(2)
         
+    # Shift tick positions left by 1 while keeping labels unchanged (day 1 plotted at x=0)
+    orig_xticks = ax.get_xticks()
+    # Use existing tick labels if present; otherwise derive from original tick values
+    existing_labels = [lbl.get_text() for lbl in ax.get_xticklabels()]
+    labels = existing_labels if any(existing_labels) else [str(int(tick)) if tick.is_integer() else f"{tick:g}" for tick in orig_xticks]
+    ax.set_xticks(orig_xticks - 1)
+    ax.set_xticklabels(labels)
+    # Re-affirm limits so the left edge stays near 0 despite shifted ticks
+    ax.set_xlim([-0.1, len(unique_dates) - 1 + 0.1])
+
     # Remove upper and right spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
