@@ -251,6 +251,10 @@ def load_tracking_with_behavior(subjid, date):
         tracking_files = [f for f in results_dir.glob(f"*_combined_tracking_with_timestamps.csv") 
                           if not f.name.startswith('._')]
         if not tracking_files:
+            # Fallback to SLEAP combined file
+            tracking_files = [f for f in results_dir.glob(f"*_combined_sleap_tracking_timestamps.csv") 
+                              if not f.name.startswith('._')]
+        if not tracking_files:
             raise FileNotFoundError(
                 f"No combined tracking file found. Run add_timestamps_to_tracking({subjid}, {date}) first."
             )
@@ -258,6 +262,11 @@ def load_tracking_with_behavior(subjid, date):
             tracking = pd.read_csv(tracking_files[0], encoding='utf-8')
         except UnicodeDecodeError:
             tracking = pd.read_csv(tracking_files[0], encoding='latin1')
+        # Normalize coordinate columns
+        if 'X' not in tracking.columns and 'centroid_x' in tracking.columns:
+            tracking['X'] = tracking['centroid_x']
+        if 'Y' not in tracking.columns and 'centroid_y' in tracking.columns:
+            tracking['Y'] = tracking['centroid_y']
         tracking['time'] = pd.to_datetime(tracking['time'])
         behavior = load_session_results(subjid, date)
         tracking_labeled = tracking.copy()

@@ -1611,7 +1611,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     
     def window_poke_summary(window_start, window_end):
         if window_start is None or window_end is None or window_start >= window_end:
-            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start, 'poke_odor_end': None}
         
         s_bool = poke_series_full
         prev = s_bool.loc[:window_start]
@@ -1619,7 +1619,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         w = s_bool.loc[window_start:window_end]
         
         if w.empty and not in_at_start:
-            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start, 'poke_odor_end': None}
         
         rises = w & ~w.shift(1, fill_value=in_at_start)
         falls = ~w & w.shift(1, fill_value=in_at_start)
@@ -1640,7 +1640,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             intervals.append((cur, window_end))
         
         if not intervals:
-            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
+            return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start, 'poke_odor_end': None}
         
         # Merge across gaps <= sample_offset_time_ms
         merged = [intervals[0]]
@@ -1847,17 +1847,19 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 else:
                     merged.append((start, end))
 
-            first_block_ms = (merged[0][1] - merged[0][0]).total_seconds() * 1000.0
+            first_block_start, first_block_end = merged[0]
+            first_block_ms = (first_block_end - first_block_start).total_seconds() * 1000.0
             consolidated_poke_time_ms = first_block_ms
-            first_poke_in = merged[0][0] if merged else None
+            first_poke_in = first_block_start if merged else None
 
             if consolidated_poke_time_ms > 0:
                 position_poke_times[position] = {
                     'position': position,
                     'odor_name': loc['odor_name'],
                     'poke_time_ms': consolidated_poke_time_ms,
-                    'poke_odor_start': odor_start,
-                    'poke_odor_end': odor_end,
+                    # Use actual poke entry/exit times rather than valve window edges
+                    'poke_odor_start': first_block_start,
+                    'poke_odor_end': first_block_end,
                     'poke_first_in': first_poke_in,
                     'required_min_sampling_time_ms': resolve_min_sampling_time_ms(loc['odor_name'])
                 }
@@ -3048,8 +3050,15 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
                 merged[-1] = (ls, max(le, e2))
             else:
                 merged.append((s2, e2))
-        first_block_ms = (merged[0][1] - merged[0][0]).total_seconds() * 1000.0
-        return {'poke_time_ms': float(first_block_ms), 'poke_first_in': first_in, 'poke_odor_start': window_start}
+
+        first_block_start, first_block_end = merged[0]
+        first_block_ms = (first_block_end - first_block_start).total_seconds() * 1000.0
+        return {
+            'poke_time_ms': float(first_block_ms),
+            'poke_first_in': first_in,
+            'poke_odor_start': first_block_start,
+            'poke_odor_end': first_block_end
+        }
 
     # InitiationSequence times (for FA end window)
     init_times = []
