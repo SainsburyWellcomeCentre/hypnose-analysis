@@ -910,7 +910,7 @@ def detect_trials(data, events, root, odor_map, verbose=True, stage=None):
             stage_name = None
 
     protocol_name = (stage_name or "").lower()
-    is_odour_discrimination = "odourdiscrimination" in protocol_name
+    is_odour_discrimination = "odourdiscrimination" in protocol_name.lower()
 
     olfactometer_valves = (odor_map or {}).get('olfactometer_valves', {}) if odor_map is not None else {}
     valve_to_odor = (odor_map or {}).get('valve_to_odor', {}) if odor_map is not None else {}
@@ -1427,6 +1427,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         print(f"Response time window: {response_time_sec} s")
 
     hidden_rule_indices, sequence_name = _resolve_hidden_rule_from_stage(stage)
+    protocol_name = (sequence_name or str(stage) or "").lower()
+    is_odour_discrimination = "odourdiscrimination" in protocol_name
     schema_settings = {}
     schema_err: Exception | None = None
     try:
@@ -1468,7 +1470,16 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     # Base trial data
     initiated_trials = trial_counts['initiated_sequences'].copy()
     non_initiated_trials = trial_counts['non_initiated_sequences'].copy()
+    # Sorted initiation starts (canonical list). Use ONLY initiation_sequence_time.
+    init_series_raw = initiated_trials.get('initiation_sequence_time')
+    initiation_starts_sorted = pd.to_datetime(init_series_raw, errors='coerce').dropna().sort_values().reset_index(drop=True)
 
+    # Ground-truth initiation events (kept for compatibility; should mirror initiation_starts_sorted)
+    init_events_df = events.get('combined_initiation_sequence_df', pd.DataFrame())
+    initiation_event_times_sorted = pd.to_datetime(
+        init_events_df.get('Time', pd.Series(dtype='datetime64[ns]')),
+        errors='coerce'
+    ).dropna().sort_values().reset_index(drop=True)
     # Events
     await_reward_times = events['combined_await_reward_df']['Time'].tolist() if 'combined_await_reward_df' in events else []
 
@@ -1490,6 +1501,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     _falls = ~poke_series_full & poke_series_full.shift(1, fill_value=False)
     _starts = list(poke_series_full.index[_rises])
     _ends = list(poke_series_full.index[_falls])
+    cue_poke_starts_sorted = pd.Series(_starts, dtype='datetime64[ns]').sort_values() if _starts else pd.Series(dtype='datetime64[ns]')
     poke_intervals = []
     i = j = 0
     while i < len(_starts) and j < len(_ends):
@@ -1984,6 +1996,160 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_dict['hidden_rule_success'] = hr_success
         trial_dict['hidden_rule_success_position'] = hr_success_position
 
+        # Special-case logic for odourdiscrimination protocols: classify using AwaitReward and supply events only
+        if is_odour_discrimination:
+            last_valve_event = valve_activations[-1] if valve_activations else None
+            last_valve_start = (last_valve_event or {}).get('start_time')
+            trial_dict['odourdiscrimination_mode'] = True
+            trial_dict['last_valve_start'] = last_valve_start
+
+            current_init_ts = pd.to_datetime(trial.get('initiation_sequence_time'), errors='coerce') if trial.get('initiation_sequence_time') is not None else pd.NaT
+            fallback_start = trial_start if trial_start is not None else last_valve_start
+            await_window_start = current_init_ts if not pd.isna(current_init_ts) else fallback_start
+
+            if await_window_start is None or pd.isna(await_window_start):
+                aborted_sequences.append(trial_dict.copy())
+                initiated_trials_list.append(trial_dict)
+                continue
+
+            # Pre-compute next anchors
+            next_init = None
+            if not initiation_starts_sorted.empty and not pd.isna(current_init_ts):
+                idx = initiation_starts_sorted.searchsorted(current_init_ts, side='right')
+                if idx < len(initiation_starts_sorted):
+                    next_init = initiation_starts_sorted.iloc[idx]
+
+            next_cue_poke = None
+            if not cue_poke_starts_sorted.empty:
+                future_cues = cue_poke_starts_sorted[cue_poke_starts_sorted > await_window_start]
+                if not future_cues.empty:
+                    next_cue_poke = future_cues.iloc[0]
+
+            recording_end_candidates = [
+                initiation_starts_sorted.iloc[-1] if not initiation_starts_sorted.empty else None,
+                cue_poke_starts_sorted.iloc[-1] if not cue_poke_starts_sorted.empty else None,
+                supply_port1_times[-1] if supply_port1_times else None,
+                supply_port2_times[-1] if supply_port2_times else None,
+                port1_pokes.index.max() if not port1_pokes.empty else None,
+                port2_pokes.index.max() if not port2_pokes.empty else None,
+                trial_end
+            ]
+            recording_end_candidates = [c for c in recording_end_candidates if c is not None and not pd.isna(c)]
+            recording_end = max(recording_end_candidates) if recording_end_candidates else trial_end
+
+            await_upper_bound = next_init if next_init is not None else recording_end
+            await_in_window = [t for t in await_reward_times if await_window_start <= t <= await_upper_bound]
+            if not await_in_window:
+                trial_dict['abort_reason'] = 'no_await_reward'
+                aborted_sequences.append(trial_dict.copy())
+                initiated_trials_list.append(trial_dict)
+                continue
+
+            await_time = min(await_in_window)
+            trial_dict['await_reward_time'] = await_time
+
+            # Reward window: start at await_time and end at the later of
+            #   (a) the next initiation time
+            #   (b) the first cue-poke strictly AFTER that next initiation time
+            # If no next initiation exists, fall back to the first cue after await_time, else to recording_end.
+            next_cue_after_next_init = None
+            if next_init is not None and not cue_poke_starts_sorted.empty:
+                cues_after_next_init = cue_poke_starts_sorted[cue_poke_starts_sorted > next_init]
+                if not cues_after_next_init.empty:
+                    next_cue_after_next_init = cues_after_next_init.iloc[0]
+
+            if next_init is not None:
+                reward_window_end_candidates = [next_init, next_cue_after_next_init]
+                reward_window_end_candidates = [c for c in reward_window_end_candidates if c is not None]
+                reward_window_end = max(reward_window_end_candidates) if reward_window_end_candidates else next_init
+                next_cue_poke = next_cue_after_next_init
+            else:
+                next_cue_poke = None
+                if not cue_poke_starts_sorted.empty:
+                    future_cues = cue_poke_starts_sorted[cue_poke_starts_sorted > await_time]
+                    if not future_cues.empty:
+                        next_cue_poke = future_cues.iloc[0]
+                reward_window_end = next_cue_poke if next_cue_poke is not None else recording_end
+
+            if reward_window_end < await_time:
+                reward_window_end = await_time
+
+            trial_dict['next_initiation_time'] = next_init
+            trial_dict['next_cue_poke_start'] = next_cue_poke
+            trial_dict['reward_window_end'] = reward_window_end
+
+            supply1_after = [t for t in supply_port1_times if await_time <= t <= reward_window_end]
+            supply2_after = [t for t in supply_port2_times if await_time <= t <= reward_window_end]
+            all_supply_after = []
+            if supply1_after:
+                all_supply_after.extend([(t, 1, 'A') for t in supply1_after])
+            if supply2_after:
+                all_supply_after.extend([(t, 2, 'B') for t in supply2_after])
+            all_supply_after.sort(key=lambda x: x[0])
+
+            def _rises(series):
+                return series & ~series.shift(1, fill_value=False)
+
+            port1_pokes_in_window = []
+            port2_pokes_in_window = []
+            if not port1_pokes.empty:
+                p1 = _rises(port1_pokes[await_time:reward_window_end])
+                port1_pokes_in_window = p1[p1 == True].index.tolist()
+            if not port2_pokes.empty:
+                p2 = _rises(port2_pokes[await_time:reward_window_end])
+                port2_pokes_in_window = p2[p2 == True].index.tolist()
+
+            if verbose:
+                def _head(seq, n=5):
+                    return seq[:n] if isinstance(seq, list) else seq
+                print(
+                    "[odourdisc] window",
+                    f"init={await_window_start}",
+                    f"await={await_time}",
+                    f"next_init={next_init}",
+                    f"next_cue={next_cue_poke}",
+                    f"reward_end={reward_window_end}",
+                    f"supply_counts=({len(supply1_after)},{len(supply2_after)})",
+                )
+                if supply_port1_times or supply_port2_times:
+                    print(
+                        "[odourdisc] raw supply tails",
+                        f"s1_total={len(supply_port1_times)} last={supply_port1_times[-1] if supply_port1_times else None}",
+                        f"s2_total={len(supply_port2_times)} last={supply_port2_times[-1] if supply_port2_times else None}",
+                    )
+                if supply1_after or supply2_after:
+                    print("[odourdisc] supply in window", _head(supply1_after + supply2_after, 5))
+
+            if all_supply_after:
+                first_supply_time, first_supply_port, first_supply_odor = all_supply_after[0]
+                trial_dict['first_supply_time'] = first_supply_time
+                trial_dict['first_supply_port'] = first_supply_port
+                trial_dict['first_supply_odor_identity'] = first_supply_odor
+                trial_dict['supply1_count'] = len(supply1_after)
+                trial_dict['supply2_count'] = len(supply2_after)
+                trial_dict['total_supply_count'] = len(all_supply_after)
+                completed_rewarded.append(trial_dict.copy())
+            elif port1_pokes_in_window or port2_pokes_in_window:
+                all_reward_pokes = []
+                if port1_pokes_in_window:
+                    all_reward_pokes.extend([(t, 1, 'A') for t in port1_pokes_in_window])
+                if port2_pokes_in_window:
+                    all_reward_pokes.extend([(t, 2, 'B') for t in port2_pokes_in_window])
+                all_reward_pokes.sort(key=lambda x: x[0])
+                if all_reward_pokes:
+                    trial_dict['first_reward_poke_time'], trial_dict['first_reward_poke_port'], trial_dict['first_reward_poke_odor_identity'] = all_reward_pokes[0]
+                trial_dict['port1_pokes_count'] = len(port1_pokes_in_window)
+                trial_dict['port2_pokes_count'] = len(port2_pokes_in_window)
+                trial_dict['total_reward_pokes'] = len(all_reward_pokes)
+                completed_unrewarded.append(trial_dict.copy())
+            else:
+                completed_timeout.append(trial_dict.copy())
+
+            completed_sequences.append(trial_dict.copy())
+            initiated_trials_list.append(trial_dict)
+            # skip standard classification path
+            continue
+
         initiated_trials_list.append(trial_dict)
         if trial_await_rewards:
             # Aggregate ranges for completed trials
@@ -2388,6 +2554,22 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
     initiated_trials = trial_counts['initiated_sequences']
     await_reward_times = events['combined_await_reward_df']['Time'].tolist() if 'combined_await_reward_df' in events else []
 
+    # Odour-discrimination flag (use same detection as classify_trials)
+    protocol_name = (sequence_name or str(stage) or "").lower()
+    is_odour_discrimination = "odourdiscrimination" in protocol_name
+
+    # Canonical initiation starts and cue-poke starts (Port0 rising edges), used for odourdiscrimination reward windows
+    init_series_raw = initiated_trials.get('initiation_sequence_time')
+    initiation_starts_sorted = pd.to_datetime(init_series_raw, errors='coerce').dropna().sort_values().reset_index(drop=True)
+
+    poke_series_full = data['digital_input_data'].get('DIPort0', pd.Series(dtype=bool)).astype(bool)
+    poke_series_full = poke_series_full.sort_index()
+    cue_poke_starts_sorted = pd.Series(dtype='datetime64[ns]')
+    if not poke_series_full.empty:
+        rises = poke_series_full & ~poke_series_full.shift(1, fill_value=False)
+        starts = list(rises[rises == True].index)
+        cue_poke_starts_sorted = pd.Series(starts, dtype='datetime64[ns]').sort_values().reset_index(drop=True)
+
     # Get supply port activities for reward classification
     supply_port1_times = data['pulse_supply_1'].index.tolist() if not data['pulse_supply_1'].empty else []
     supply_port2_times = data['pulse_supply_2'].index.tolist() if not data['pulse_supply_2'].empty else []
@@ -2601,8 +2783,54 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
             continue
 
         # Reward window and search for reward pokes
-        poke_window_end = await_reward_time + pd.Timedelta(seconds=response_time_sec)
-        search_start = max(last_poke_out_time, await_reward_time)
+        if is_odour_discrimination:
+            current_init_ts = pd.to_datetime(trial_dict.get('initiation_sequence_time'), errors='coerce') if trial_dict.get('initiation_sequence_time') is not None else pd.NaT
+            next_init = None
+            if not initiation_starts_sorted.empty and not pd.isna(current_init_ts):
+                idx = initiation_starts_sorted.searchsorted(current_init_ts, side='right')
+                if idx < len(initiation_starts_sorted):
+                    next_init = initiation_starts_sorted.iloc[idx]
+
+            next_cue_after_next_init = None
+            if next_init is not None and not cue_poke_starts_sorted.empty:
+                cues_after_next_init = cue_poke_starts_sorted[cue_poke_starts_sorted > next_init]
+                if not cues_after_next_init.empty:
+                    next_cue_after_next_init = cues_after_next_init.iloc[0]
+
+            recording_end_candidates = [
+                initiation_starts_sorted.iloc[-1] if not initiation_starts_sorted.empty else None,
+                cue_poke_starts_sorted.iloc[-1] if not cue_poke_starts_sorted.empty else None,
+                supply_port1_times[-1] if supply_port1_times else None,
+                supply_port2_times[-1] if supply_port2_times else None,
+                port1_pokes.index.max() if not port1_pokes.empty else None,
+                port2_pokes.index.max() if not port2_pokes.empty else None,
+                trial_end
+            ]
+            recording_end_candidates = [c for c in recording_end_candidates if c is not None and not pd.isna(c)]
+            recording_end = max(recording_end_candidates) if recording_end_candidates else trial_end
+
+            if next_init is not None:
+                rw_candidates = [next_init, next_cue_after_next_init]
+                rw_candidates = [c for c in rw_candidates if c is not None]
+                reward_window_end = max(rw_candidates) if rw_candidates else next_init
+            else:
+                next_cue_after_await = None
+                if not cue_poke_starts_sorted.empty:
+                    future_cues = cue_poke_starts_sorted[cue_poke_starts_sorted > await_reward_time]
+                    if not future_cues.empty:
+                        next_cue_after_await = future_cues.iloc[0]
+                reward_window_end = next_cue_after_await if next_cue_after_await is not None else recording_end
+
+            if reward_window_end < await_reward_time:
+                reward_window_end = await_reward_time
+
+            poke_window_end = reward_window_end
+            search_start = max(last_poke_out_time, await_reward_time)
+            reward_window_cap = reward_window_end
+        else:
+            poke_window_end = await_reward_time + pd.Timedelta(seconds=response_time_sec)
+            search_start = max(last_poke_out_time, await_reward_time)
+            reward_window_cap = trial_end
 
         port1_pokes_in_window = []
         port2_pokes_in_window = []
@@ -2625,8 +2853,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
             response_time_ms = (first_reward_poke - last_poke_out_time).total_seconds() * 1000
 
         # Determine reward status (same as main classification)
-        supply1_after_await = [t for t in supply_port1_times if await_reward_time <= t <= trial_end]
-        supply2_after_await = [t for t in supply_port2_times if await_reward_time <= t <= trial_end]
+        supply1_after_await = [t for t in supply_port1_times if await_reward_time <= t <= reward_window_cap]
+        supply2_after_await = [t for t in supply_port2_times if await_reward_time <= t <= reward_window_cap]
 
         # NEW: authoritative per-trial categorization + row capture
         is_rewarded = bool(supply1_after_await or supply2_after_await)
