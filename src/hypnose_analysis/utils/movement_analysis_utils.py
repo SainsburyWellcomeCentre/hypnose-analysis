@@ -1791,6 +1791,15 @@ def plot_epoch_speeds_by_condition(
                     crossing_time = t_zero + pd.Timedelta(seconds=float(mids_trial[k]))
                     trial_data.at[idx_row, "speed_threshold_time"] = crossing_time
 
+        parquet_path = results_dir / f"speed_threshold.parquet"
+        try:
+            parquet_path.parent.mkdir(parents=True, exist_ok=True)
+            trial_data.to_parquet(parquet_path, index=False)
+        except Exception as e:
+            print(f"Warning: failed to write {parquet_path.name}: {e}")
+        else:
+            _update_cache(subjid, [date_str], {date_str: trial_data.copy()}, kind="speed_threshold")
+
         # Per-session violin plot
         fig_violin, ax_violin = plt.subplots(figsize=figsize)
         data = [speeds_flat[c] for c in conds_with_data]
@@ -1876,7 +1885,6 @@ def plot_traces_with_speed_threshold(
     dates=None,
     *,
     fa_types="FA_time_in",
-    epoch_result=None,
     bin_ms: int = 100,
     pre_buffer_s: float = 0.2,
     threshold_alpha: float = 6.0,
@@ -1892,8 +1900,9 @@ def plot_traces_with_speed_threshold(
     across sessions. Each trial trace gets a black dot at the first time after last poke-out when
     speed exceeds vthresh = max(alpha*mu, mu+beta*sigma), where mu/sigma come from the pooled
     baseline window [-0.15s, -0.05s] relative to last poke-out across all trials in the session.
-    If `speed_threshold_time` is already present in `trial_data` (e.g., from
-    plot_epoch_speeds_by_condition), that cached crossing time is preferred over recomputation.
+    If a parquet with `speed_threshold_time` exists for the session (written by
+    plot_epoch_speeds_by_condition), it is loaded (and cached) and used directly; otherwise the
+    threshold is recomputed and the result is saved + cached.
 
     Parameters
     ----------
@@ -1903,11 +1912,6 @@ def plot_traces_with_speed_threshold(
         Dates list or inclusive range; None uses all available for the subject.
     fa_types : str | Iterable
         FA labels to include (default "FA_time_in"). Case-insensitive; accepts comma/semicolon list.
-    epoch_result : dict | None
-        Optional output from plot_epoch_speeds_by_condition. When provided, the function will use the
-        cached per-session trial_data_with_threshold to place markers strictly at the stored
-        speed_threshold_time values (no recomputation). Sessions are matched by date string in the
-        epoch_result["per_session"] entries.
     bin_ms : int
         Epoch/bin width in milliseconds for speed aggregation (default 100).
     pre_buffer_s : float
@@ -2049,25 +2053,29 @@ def plot_traces_with_speed_threshold(
 
     traces = {"rewarded": [], "unrewarded": [], "fa": []}
     markers = {"rewarded": [], "unrewarded": [], "fa": []}
-    epoch_td_by_date = {}
-    if epoch_result and isinstance(epoch_result, dict) and "per_session" in epoch_result:
-        for entry in epoch_result.get("per_session", []):
-            d = entry.get("date")
-            td = entry.get("trial_data_with_threshold")
-            if d is not None and td is not None:
-                epoch_td_by_date[str(d)] = td.copy()
-
     for ses in ses_dirs:
         date_str = ses.name.split("_date-")[-1]
         results_dir = ses / "saved_analysis_results"
         if not results_dir.exists():
             continue
+        parquet_path = results_dir / f"speed_threshold.parquet"
 
-        # If epoch_result provided and has this date, use its trial_data_with_threshold directly
-        use_epoch_td = date_str in epoch_td_by_date
-        if use_epoch_td:
-            trial_data = epoch_td_by_date[date_str].copy()
-        else:
+        trial_data = None
+        use_saved_thresholds = False
+
+        cached_td = _get_from_cache(subjid, date_str, kind="speed_threshold")
+        if cached_td is not None:
+            trial_data = cached_td.copy()
+            use_saved_thresholds = True
+        elif parquet_path.exists():
+            try:
+                trial_data = pd.read_parquet(parquet_path)
+                use_saved_thresholds = True
+                _update_cache(subjid, [date_str], {date_str: trial_data.copy()}, kind="speed_threshold")
+            except Exception as e:
+                print(f"Failed to read {parquet_path.name}: {e}")
+
+        if trial_data is None:
             views = _load_trial_views(results_dir)
             trial_data = views.get("trial_data", pd.DataFrame()).copy()
         if trial_data.empty:
@@ -2097,8 +2105,8 @@ def plot_traces_with_speed_threshold(
         if tracking.empty:
             continue
         tracking = _smooth_tracking(tracking)
-        
-        if use_epoch_td:
+
+        if use_saved_thresholds:
             # Strictly use stored threshold times; no recomputation
             for idx, row in trial_data.iterrows():
                 rtc = str(row.get("response_time_category", "")).lower()
@@ -2202,6 +2210,9 @@ def plot_traces_with_speed_threshold(
         thr_mu_plus_beta_sigma = mu + threshold_beta * sigma
         vthresh = max(thr_alpha_mu, thr_mu_plus_beta_sigma)
 
+        if "speed_threshold_time" not in trial_data.columns:
+            trial_data["speed_threshold_time"] = pd.NaT
+
         # Second pass: build traces and threshold markers using computed threshold
         for idx, meta in trial_cache.items():
             cond = meta["cond"]
@@ -2233,6 +2244,7 @@ def plot_traces_with_speed_threshold(
             y = seg["Y"].to_numpy()
 
             marker = None
+            trial_data.at[idx, "speed_threshold_time"] = thr_time
             if pd.notna(thr_time):
                 nearest_idx = int(np.argmin(np.abs((seg["time"] - thr_time).dt.total_seconds())))
                 marker = (x[nearest_idx], y[nearest_idx])
@@ -2246,6 +2258,14 @@ def plot_traces_with_speed_threshold(
             traces[cond].append({"x": x, "y": y, "color": color, "session": date_str})
             if marker is not None:
                 markers[cond].append({"xy": marker, "color": "black", "session": date_str})
+
+        try:
+            parquet_path.parent.mkdir(parents=True, exist_ok=True)
+            trial_data.to_parquet(parquet_path, index=False)
+        except Exception as e:
+            print(f"Warning: failed to write {parquet_path.name}: {e}")
+        else:
+            _update_cache(subjid, [date_str], {date_str: trial_data.copy()}, kind="speed_threshold")
 
     figs = {}
     for cond, label in [("rewarded", "Rewarded"), ("unrewarded", "Unrewarded"), ("fa", "False Alarms")]:
