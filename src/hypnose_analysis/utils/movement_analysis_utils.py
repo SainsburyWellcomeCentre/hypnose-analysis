@@ -1461,6 +1461,9 @@ def plot_epoch_speeds_by_condition(
     pre_buffer_s: float = 0.0,
     fa_label_filter=None,
     mode: str = "max",
+    threshold: bool = False,
+    threshold_alpha: float = 6.0,
+    threshold_beta: float = 6.0,
     figsize=(8, 5),
 ):
     """Plot cue-port speed epochs aligned to last poke-out for rewarded, unrewarded, and FA trials.
@@ -1486,6 +1489,14 @@ def plot_epoch_speeds_by_condition(
         string or any iterable (e.g., ["fa_time_in", "fa_time_out"]). Case-insensitive.
     mode : {"max", "mean"}
         Aggregation per epoch: max speed (current behavior) or mean speed.
+    threshold : bool
+        If True, compute baseline (mu, sigma) from [-0.15s, -0.05s] pooled across all trials
+        in the session, and overlay baseline plus the single threshold line
+        vthresh = max(alpha*mu, mu+beta*sigma).
+    threshold_alpha : float
+        Multiplier for mu when threshold is enabled (default 6.0).
+    threshold_beta : float
+        Multiplier for sigma when threshold is enabled (default 6.0).
     figsize : tuple
         Figure size for per-session plots.
 
@@ -1493,7 +1504,7 @@ def plot_epoch_speeds_by_condition(
     -------
     dict with:
                 - "per_session": list of dicts per session with keys date, figs (violin, traces)
-                    where traces is a dict of condition -> figure
+                    where traces is a dict of condition -> figure, and baseline stats when threshold=True
         - "combined": dict of condition -> fig (only when multiple sessions and data present)
     """
 
@@ -1525,6 +1536,7 @@ def plot_epoch_speeds_by_condition(
         raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
 
     bin_s = bin_ms / 1000.0
+    baseline_window = (-0.15, -0.05)  # seconds relative to last poke-out
 
     def _safe_dt(val):
         try:
@@ -1583,7 +1595,11 @@ def plot_epoch_speeds_by_condition(
         seg = tracking_df[(tracking_df["time"] >= start_dt) & (tracking_df["time"] <= end_dt)].copy()
         if seg.empty or {"X", "Y", "time"} - set(seg.columns):
             return None
+        if len(seg) < 2:
+            return None
         t_rel = (seg["time"] - zero_dt).dt.total_seconds().to_numpy()
+        if not np.isfinite(t_rel).all() or np.ptp(t_rel) == 0:
+            return None
         x = seg["X"].to_numpy()
         y = seg["Y"].to_numpy()
         vx = np.gradient(x, t_rel)
@@ -1668,12 +1684,18 @@ def plot_epoch_speeds_by_condition(
 
         epoch_series = {"rewarded": [], "unrewarded": [], "fa": []}
         speeds_flat = {"rewarded": [], "unrewarded": [], "fa": []}
+        baseline_vals = []
+        baseline_mask = None
 
         for cond, t_zero, t_end, _ in trials_info:
             res = _speed_by_bins(tracking, t_zero, t_end, edges)
             if res is None:
                 continue
             mids, arr = res
+            if baseline_mask is None:
+                baseline_mask = (mids >= baseline_window[0]) & (mids <= baseline_window[1])
+            if threshold and baseline_mask is not None and baseline_mask.any():
+                baseline_vals.extend([v for v in arr[baseline_mask] if not np.isnan(v)])
             epoch_series[cond].append(arr)
             speeds_flat[cond].extend([v for v in arr if not np.isnan(v)])
 
@@ -1681,6 +1703,20 @@ def plot_epoch_speeds_by_condition(
         if not conds_with_data:
             print(f"No epoch data for {date_str}")
             continue
+
+        baseline_mean = np.nanmean(baseline_vals) if baseline_vals else None
+        baseline_sd = np.nanstd(baseline_vals) if baseline_vals else None
+        thr_alpha_mu = baseline_mean * threshold_alpha if baseline_mean is not None else None
+        thr_mu_plus_beta_sigma = (
+            baseline_mean + threshold_beta * baseline_sd
+            if baseline_mean is not None and baseline_sd is not None
+            else None
+        )
+        thr_max = None
+        if threshold and baseline_mean is not None:
+            candidates = [v for v in [thr_alpha_mu, thr_mu_plus_beta_sigma] if v is not None]
+            if candidates:
+                thr_max = max(candidates)
 
         # Per-session violin plot
         fig_violin, ax_violin = plt.subplots(figsize=figsize)
@@ -1705,14 +1741,33 @@ def plot_epoch_speeds_by_condition(
                 stack = np.vstack(trials)
                 mean_speeds = np.nanmean(stack, axis=0)
                 ax_t.plot(mids, mean_speeds, color="blue", linewidth=2, label="session mean")
-                ax_t.legend()
+
+            if threshold and baseline_mean is not None:
+                ax_t.axhline(baseline_mean, color="red", linestyle="-", linewidth=1.5, label="baseline μ")
+                if thr_max is not None:
+                    ax_t.axhline(thr_max, color="#2F4F4F", linestyle="--", linewidth=1.4, label=f"max(αμ, μ+βσ), α={threshold_alpha:g}, β={threshold_beta:g}")
+
             ax_t.set_title(f"{cond} — sub {subjid}, {date_str} ({mode})")
             ax_t.set_xlabel("Time from last poke-out (s)")
             ax_t.set_ylabel("Speed (units/s)")
+            ax_t.legend()
             fig_t.tight_layout()
             fig_traces_by_cond[cond] = fig_t
 
-        per_session.append({"date": date_str, "fig_violin": fig_violin, "fig_traces": fig_traces_by_cond})
+        per_session.append({
+            "date": date_str,
+            "fig_violin": fig_violin,
+            "fig_traces": fig_traces_by_cond,
+            "baseline": {
+                "mu": baseline_mean,
+                "sigma": baseline_sd,
+                "alpha": threshold_alpha,
+                "beta": threshold_beta,
+                "alpha_mu": thr_alpha_mu,
+                "mu_plus_beta_sigma": thr_mu_plus_beta_sigma,
+                "max_alpha_mu_mu_plus_beta_sigma": thr_max,
+            } if threshold else None,
+        })
 
         for cond in conds_with_data:
             stack = np.vstack(epoch_series[cond])
