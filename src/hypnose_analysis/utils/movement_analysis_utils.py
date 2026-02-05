@@ -886,6 +886,7 @@ def plot_trial_traces_by_mode(
     show_average=False,
     highlight_hr=False,
     color_by_index=False,
+    color_by_speed=False,
     figsize=(18, 6),
     smooth_window=5,
     linewidth=1.4,
@@ -913,6 +914,9 @@ def plot_trial_traces_by_mode(
         Applies to rewarded/all_trials: recolor HR trials with HR palette; ignored elsewhere unless specified.
     color_by_index : bool
         Debug: ignore A/B colors and instead color each trace by normalized sample index (start→end) using a gradient.
+    color_by_speed : bool
+        If True, color each line segment by speed bins from speed_analysis.parquet (per-trial, per-bin). Segments
+        with no speed data are grey. Overrides color_by_index when enabled.
     figsize : tuple
         Figure size.
     smooth_window : int
@@ -968,6 +972,8 @@ def plot_trial_traces_by_mode(
     unrewarded_color = "#000000"
     index_cmap = cm.get_cmap("plasma")
     index_norm = Normalize(vmin=0.0, vmax=1.0)
+    speed_cmap = cm.get_cmap("viridis")
+    speed_vals_global = []
 
     subj_str = f"sub-{str(subjid).zfill(3)}"
     derivatives_dir = get_derivatives_root()
@@ -1049,10 +1055,34 @@ def plot_trial_traces_by_mode(
         m = (tracking_df["time"] >= start) & (tracking_df["time"] <= end)
         if not m.any():
             return None
-        seg = tracking_df.loc[m, ["X", "Y"]]
+        seg = tracking_df.loc[m, ["time", "X", "Y"]]
         if seg.empty:
             return None
-        return seg["X"].to_numpy(), seg["Y"].to_numpy()
+        return seg["X"].to_numpy(), seg["Y"].to_numpy(), seg["time"].to_numpy()
+
+    def _last_poke_out(row):
+        pts = row.get("position_poke_times")
+        if isinstance(pts, str):
+            try:
+                pts = json.loads(pts)
+            except Exception:
+                pts = None
+        if isinstance(pts, dict) and pts:
+            vals = list(pts.values())
+            if all(isinstance(v, dict) and "position" in v for v in vals):
+                vals = sorted(vals, key=lambda v: v.get("position", 0))
+            last = vals[-1]
+            return pd.to_datetime(last.get("poke_odor_end"), errors="coerce")
+        if isinstance(pts, list) and pts:
+            last = pts[-1]
+            if isinstance(last, dict):
+                return pd.to_datetime(last.get("poke_odor_end"), errors="coerce")
+        for cand in ["poke_odor_end", "last_poke_out_time", "last_poke_time"]:
+            if cand in row:
+                return pd.to_datetime(row.get(cand), errors="coerce")
+        if "sequence_start" in row:
+            return pd.to_datetime(row.get("sequence_start"), errors="coerce")
+        return pd.NaT
 
     def _resample_trace(x, y, n_points=200):
         """Resample a trajectory onto a normalized arc-length grid [0,1]."""
@@ -1075,19 +1105,23 @@ def plot_trial_traces_by_mode(
         y_new = np.interp(s_new, s, y)
         return x_new, y_new
 
-    def _add_segment(store, axis_key, category, color, x, y):
+    def _add_segment(store, axis_key, category, color, x, y, *, label=None, time=None, t_zero=None, speed_bins=None):
         store[axis_key].append({
             "category": category,
             "color": color,
             "x": x,
             "y": y,
-            "label": category,
+            "time": time,
+            "t_zero": t_zero,
+            "speed_bins": speed_bins,
+            "label": label if label is not None else category,
         })
 
     # Containers
     segments = defaultdict(list)
     avg_pool = defaultdict(lambda: defaultdict(list))
     hr_odors_seen = set()
+    speed_analysis_cache = {}
 
     for ses in ses_dirs:
         date_str = ses.name.split("_date-")[-1]
@@ -1126,6 +1160,29 @@ def plot_trial_traces_by_mode(
         tracking = tracking.loc[:, ~tracking.columns.duplicated()]
         tracking = _smooth_tracking(tracking)
 
+        # Load speed analysis parquet if available (per-bin speeds + threshold times)
+        speed_df = _get_from_cache(subjid, date_str, kind="speed_analysis")
+        if speed_df is None:
+            path_speed = results_dir / "speed_analysis.parquet"
+            if path_speed.exists():
+                try:
+                    speed_df = pd.read_parquet(path_speed)
+                    _update_cache(subjid, [date_str], {date_str: speed_df.copy()}, kind="speed_analysis")
+                except Exception as e:
+                    print(f"Warning: could not read {path_speed.name}: {e}")
+        speed_bins_map = {}
+        if speed_df is not None and not speed_df.empty:
+            if "trial_index" in speed_df.columns:
+                speed_df = speed_df.copy()
+                for col in ["speed_threshold_time", "bin_mid_time", "bin_start_time", "bin_end_time"]:
+                    if col in speed_df.columns:
+                        speed_df[col] = pd.to_datetime(speed_df[col], errors="coerce")
+                for tidx, group in speed_df.groupby("trial_index"):
+                    speed_bins_map[tidx] = group.copy()
+                finite_speeds = speed_df["speed"].to_numpy()
+                speed_vals_global.extend([v for v in finite_speeds if np.isfinite(v)])
+        speed_analysis_cache[date_str] = speed_bins_map
+
         views = _load_trial_views(results_dir)
         td = views.get("trial_data", pd.DataFrame()).copy()
         if not td.empty:
@@ -1157,7 +1214,7 @@ def plot_trial_traces_by_mode(
 
         # Helper to iterate trials
         def iter_trials(df):
-            for _, row in df.iterrows():
+            for idx_row, row in df.iterrows():
                 start = row.get("sequence_start")
                 # For false alarms, use fa_time as end; for rewarded, prefer first_supply_time to cap at reward delivery
                 fa_label = str(row.get("fa_label", "")).lower()
@@ -1177,7 +1234,9 @@ def plot_trial_traces_by_mode(
                 seg = _extract_segment(tracking, start, end)
                 if seg is None:
                     continue
-                yield row, seg
+                t_zero = _last_poke_out(row)
+                speed_bins = speed_analysis_cache.get(date_str, {}).get(idx_row)
+                yield idx_row, row, seg, t_zero, speed_bins
 
         # Mode-specific selection
         if mode in {"rewarded", "rewarded_hr"}:
@@ -1185,7 +1244,7 @@ def plot_trial_traces_by_mode(
             include_hr = (mode == "rewarded_hr") or highlight_hr
             if hr_flag and not include_hr:
                 trials = trials[~hr_mask]
-            for row, seg in iter_trials(trials):
+            for idx_row, row, seg, t_zero, speed_bins in iter_trials(trials):
                 port = None
                 if hr_flag and bool(row.get(hr_flag, False)):
                     port = _port_from_first_supply(row) or _infer_port(row)
@@ -1194,8 +1253,8 @@ def plot_trial_traces_by_mode(
                     port = port_fallback
                 color_map = port_colors_hr if (highlight_hr and hr_flag and bool(row.get(hr_flag, False))) else port_colors
                 color = color_map.get(port, port_colors[1 if category == "A" else 2])
-                _add_segment(segments, "combined", category, color, seg[0], seg[1])
-                _add_segment(segments, category, category, color, seg[0], seg[1])
+                _add_segment(segments, "combined", category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
+                _add_segment(segments, category, category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                 resampled = _resample_trace(seg[0], seg[1])
                 if resampled is not None:
                     avg_pool["combined"][category].append(resampled)
@@ -1203,7 +1262,7 @@ def plot_trial_traces_by_mode(
 
         elif mode == "completed":
             trials = td[td.get("is_aborted") == False]
-            for row, seg in iter_trials(trials):
+            for idx_row, row, seg, t_zero, speed_bins in iter_trials(trials):
                 category, port = _category_from_row(row)
                 rtc = str(row.get("response_time_category", "")).lower()
                 if rtc == "rewarded":
@@ -1214,8 +1273,8 @@ def plot_trial_traces_by_mode(
                     color = unrewarded_color
                 else:
                     color = timeout_color
-                _add_segment(segments, "combined", category, color, seg[0], seg[1])
-                _add_segment(segments, category, category, color, seg[0], seg[1])
+                _add_segment(segments, "combined", category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
+                _add_segment(segments, category, category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                 resampled = _resample_trace(seg[0], seg[1])
                 if resampled is not None:
                     avg_pool["combined"][category].append(resampled)
@@ -1223,7 +1282,7 @@ def plot_trial_traces_by_mode(
 
         elif mode == "all_trials":
             trials = td.copy()
-            for row, seg in iter_trials(trials):
+            for idx_row, row, seg, t_zero, speed_bins in iter_trials(trials):
                 category, port = _category_from_row(row)
                 if row.get("is_aborted"):
                     color = aborted_color
@@ -1232,7 +1291,7 @@ def plot_trial_traces_by_mode(
                 else:
                     color_map = port_colors_hr if (highlight_hr and hr_flag and bool(row.get(hr_flag, False))) else port_colors
                     color = color_map.get(port, port_colors[1 if category == "A" else 2])
-                _add_segment(segments, "combined", category, color, seg[0], seg[1])
+                _add_segment(segments, "combined", category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                 # Only include completed trials in the averages for all_trials
                 if not row.get("is_aborted"):
                     resampled = _resample_trace(seg[0], seg[1])
@@ -1253,15 +1312,15 @@ def plot_trial_traces_by_mode(
                 print(f"[fa_by_response] session {date_str}: trials after filter={len(fa_df)}, fa_label counts={label_counts}")
             if fa_df.empty:
                 continue
-            for row, seg in iter_trials(fa_df):
+            for idx_row, row, seg, t_zero, speed_bins in iter_trials(fa_df):
                 # Use FA port first, then supply/response port
                 port = row.get("fa_port") if pd.notna(row.get("fa_port")) else _infer_port(row)
                 if port not in {1, 2}:
                     continue
                 category = "A" if port == 1 else "B"
                 color = port_colors_fa.get(port, port_colors_fa[1])
-                _add_segment(segments, "combined", category, color, seg[0], seg[1])
-                _add_segment(segments, category, category, color, seg[0], seg[1])
+                _add_segment(segments, "combined", category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
+                _add_segment(segments, category, category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                 resampled = _resample_trace(seg[0], seg[1])
                 if resampled is not None:
                     avg_pool["combined"][category].append(resampled)
@@ -1277,7 +1336,7 @@ def plot_trial_traces_by_mode(
                     fa_df = fa_df.dropna(subset=["fa_time"])
             if fa_df.empty:
                 continue
-            for row, seg in iter_trials(fa_df):
+            for idx_row, row, seg, t_zero, speed_bins in iter_trials(fa_df):
                 odor_name = row.get("last_odor_name") or row.get("last_odor")
                 odor = _odor_letter(odor_name)
                 if odor in {"A", "B", "OdorA", "OdorB"}:
@@ -1285,7 +1344,7 @@ def plot_trial_traces_by_mode(
                 port = row.get("fa_port") if pd.notna(row.get("fa_port")) else _infer_port(row)
                 color = port_colors_fa.get(port, port_colors_fa[1])
                 label = "FA to A" if port == 1 else ("FA to B" if port == 2 else "FA")
-                _add_segment(segments, odor, label, color, seg[0], seg[1])
+                _add_segment(segments, odor, label, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                 resampled = _resample_trace(seg[0], seg[1])
                 if resampled is not None:
                     avg_pool[odor][label].append(resampled)
@@ -1330,7 +1389,7 @@ def plot_trial_traces_by_mode(
             hr_trials = td[(hr_mask) & (td.get("is_aborted") == False)]
             if hr_trials.empty:
                 continue
-            for row, seg in iter_trials(hr_trials):
+            for idx_row, row, seg, t_zero, speed_bins in iter_trials(hr_trials):
                 odor_seq = _parse_odor_sequence(row.get("odor_sequence"))
                 odor_match = None
                 for o in odor_seq:
@@ -1352,24 +1411,24 @@ def plot_trial_traces_by_mode(
                 label_base = f"{odor_match}"
                 if rtc == "rewarded":
                     color = port_colors_hr.get(port, port_colors_hr[1])
-                    _add_segment(segments, axis_key, f"{label_base} rewarded", color, seg[0], seg[1])
-                    _add_segment(segments, "HR Summary", f"{label_base} rewarded", color, seg[0], seg[1])
+                    _add_segment(segments, axis_key, f"{label_base} rewarded", color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
+                    _add_segment(segments, "HR Summary", f"{label_base} rewarded", color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                     resampled = _resample_trace(seg[0], seg[1])
                     if resampled is not None:
                         avg_pool[axis_key][f"{label_base} rewarded"].append(resampled)
                         avg_pool["HR Summary"][f"{label_base} rewarded"].append(resampled)
                 elif rtc == "timeout_delayed":
                     color = timeout_color
-                    _add_segment(segments, axis_key, f"{label_base} timeout", color, seg[0], seg[1])
-                    _add_segment(segments, "HR Summary", f"{label_base} timeout", color, seg[0], seg[1])
+                    _add_segment(segments, axis_key, f"{label_base} timeout", color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
+                    _add_segment(segments, "HR Summary", f"{label_base} timeout", color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                     resampled = _resample_trace(seg[0], seg[1])
                     if resampled is not None:
                         avg_pool[axis_key][f"{label_base} timeout"].append(resampled)
                         avg_pool["HR Summary"][f"{label_base} timeout"].append(resampled)
                 else:  # unrewarded / other
                     color = unrewarded_color
-                    _add_segment(segments, axis_key, f"{label_base} unrewarded", color, seg[0], seg[1])
-                    _add_segment(segments, "HR Summary", f"{label_base} unrewarded", color, seg[0], seg[1])
+                    _add_segment(segments, axis_key, f"{label_base} unrewarded", color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
+                    _add_segment(segments, "HR Summary", f"{label_base} unrewarded", color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                     resampled = _resample_trace(seg[0], seg[1])
                     if resampled is not None:
                         avg_pool[axis_key][f"{label_base} unrewarded"].append(resampled)
@@ -1378,6 +1437,14 @@ def plot_trial_traces_by_mode(
         print("No matching trials found for the requested mode.")
         return None, None
 
+    speed_norm = None
+    if color_by_speed and speed_vals_global:
+        vmin = np.nanmin(speed_vals_global)
+        vmax = np.nanmax(speed_vals_global)
+        if np.isfinite(vmin) and np.isfinite(vmax) and vmax > vmin:
+            speed_norm = Normalize(vmin=vmin, vmax=vmax)
+    color_by_speed_active = color_by_speed and (speed_norm is not None)
+
     def _plot_axis(ax, axis_key):
         segs = segments.get(axis_key, [])
         used_labels = set()
@@ -1385,7 +1452,36 @@ def plot_trial_traces_by_mode(
         def _plot_segment(seg, label=None):
             x = np.asarray(seg["x"])
             y = np.asarray(seg["y"])
-            if color_by_index:
+            if color_by_speed_active:
+                t_arr = np.asarray(seg.get("time"))
+                bins_df = seg.get("speed_bins")
+                if t_arr is None or bins_df is None or len(x) < 2:
+                    ax.plot(x, y, color="#B0B0B0", alpha=alpha, linewidth=linewidth, label=label)
+                    return
+                try:
+                    seg_mid_times = t_arr[:-1] + (t_arr[1:] - t_arr[:-1]) / 2
+                except Exception:
+                    ax.plot(x, y, color="#B0B0B0", alpha=alpha, linewidth=linewidth, label=label)
+                    return
+                seg_arr = np.stack([np.column_stack([x[:-1], y[:-1]]), np.column_stack([x[1:], y[1:]])], axis=1)
+                colors = []
+                bins_df = bins_df.sort_values("bin_start_s") if not bins_df.empty else bins_df
+                for t_mid in seg_mid_times:
+                    if bins_df is None or bins_df.empty:
+                        colors.append("#B0B0B0")
+                        continue
+                    hit = bins_df[(bins_df["bin_start_time"] <= t_mid) & (t_mid < bins_df["bin_end_time"])]
+                    if hit.empty:
+                        colors.append("#B0B0B0")
+                        continue
+                    spd = float(hit.iloc[0]["speed"])
+                    if np.isfinite(spd):
+                        colors.append(speed_cmap(speed_norm(spd)))
+                    else:
+                        colors.append("#B0B0B0")
+                lc = LineCollection(seg_arr, colors=colors, linewidth=linewidth, alpha=alpha)
+                ax.add_collection(lc)
+            elif color_by_index:
                 if x.size < 2 or y.size < 2:
                     return
                 points = np.array([x, y]).T.reshape(-1, 1, 2)
@@ -1401,7 +1497,7 @@ def plot_trial_traces_by_mode(
 
         for seg in segs:
             label = None
-            if (not color_by_index) and (seg["label"] not in used_labels):
+            if (not color_by_index) and (not color_by_speed_active) and (seg["label"] not in used_labels):
                 label = seg["label"]
                 used_labels.add(seg["label"])
             _plot_segment(seg, label)
@@ -1434,7 +1530,12 @@ def plot_trial_traces_by_mode(
                 ax.fill(poly_x, poly_y, color="#DDDDDD", alpha=0.35, linewidth=0)
                 ax.plot(mean_x, mean_y, color="black", linewidth=2.0, label=f"{category} mean")
 
-        if color_by_index:
+        if color_by_speed_active:
+            sm = cm.ScalarMappable(norm=speed_norm, cmap=speed_cmap)
+            sm.set_array([])
+            cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+            cbar.set_label("Speed")
+        elif color_by_index:
             sm = cm.ScalarMappable(norm=index_norm, cmap=index_cmap)
             sm.set_array([])
             cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
@@ -1723,6 +1824,7 @@ def plot_epoch_speeds_by_condition(
 
         epoch_series = {"rewarded": [], "unrewarded": [], "fa": []}
         speeds_flat = {"rewarded": [], "unrewarded": [], "fa": []}
+        epoch_records = []  # flattened per-trial, per-bin speeds for downstream use
         baseline_vals = []
         # store per-trial threshold times
         trial_data["speed_threshold_time"] = pd.NaT
@@ -1749,6 +1851,24 @@ def plot_epoch_speeds_by_condition(
                 mids_common = mids_plot
             epoch_series[cond].append(arr_plot)
             speeds_flat[cond].extend([v for v in arr_plot if not np.isnan(v)])
+
+            for mid, val in zip(mids_plot, arr_plot):
+                mid_td = pd.Timedelta(seconds=float(mid))
+                half_bin = pd.Timedelta(seconds=float(bin_s / 2))
+                epoch_records.append({
+                    "trial_index": idx_row,
+                    "condition": cond,
+                    "bin_mid_s": float(mid),
+                    "bin_start_s": float(mid - bin_s / 2),
+                    "bin_end_s": float(mid + bin_s / 2),
+                    "bin_mid_time": t_zero + mid_td,
+                    "bin_start_time": t_zero + mid_td - half_bin,
+                    "bin_end_time": t_zero + mid_td + half_bin,
+                    "speed": float(val) if not np.isnan(val) else np.nan,
+                    "date": date_str,
+                    "subjid": subjid,
+                    "speed_threshold_time": pd.NaT,
+                })
 
             trial_bins[idx_row] = {
                 "mids": mids_trial,
@@ -1791,14 +1911,20 @@ def plot_epoch_speeds_by_condition(
                     crossing_time = t_zero + pd.Timedelta(seconds=float(mids_trial[k]))
                     trial_data.at[idx_row, "speed_threshold_time"] = crossing_time
 
-        parquet_path = results_dir / f"speed_threshold.parquet"
+        # Fill per-bin records with per-trial threshold (repeat per bin so one file carries both)
+        if "speed_threshold_time" in trial_data.columns:
+            thr_map = trial_data["speed_threshold_time"].to_dict()
+            for rec in epoch_records:
+                rec["speed_threshold_time"] = thr_map.get(rec["trial_index"], pd.NaT)
+
+        analysis_path = results_dir / "speed_analysis.parquet"
         try:
-            parquet_path.parent.mkdir(parents=True, exist_ok=True)
-            trial_data.to_parquet(parquet_path, index=False)
+            analysis_path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame(epoch_records).to_parquet(analysis_path, index=False)
         except Exception as e:
-            print(f"Warning: failed to write {parquet_path.name}: {e}")
+            print(f"Warning: failed to write {analysis_path.name}: {e}")
         else:
-            _update_cache(subjid, [date_str], {date_str: trial_data.copy()}, kind="speed_threshold")
+            _update_cache(subjid, [date_str], {date_str: pd.DataFrame(epoch_records)}, kind="speed_analysis")
 
         # Per-session violin plot
         fig_violin, ax_violin = plt.subplots(figsize=figsize)
@@ -2058,32 +2184,39 @@ def plot_traces_with_speed_threshold(
         results_dir = ses / "saved_analysis_results"
         if not results_dir.exists():
             continue
-        parquet_path = results_dir / f"speed_threshold.parquet"
+        analysis_path = results_dir / "speed_analysis.parquet"
 
         trial_data = None
         use_saved_thresholds = False
 
-        cached_td = _get_from_cache(subjid, date_str, kind="speed_threshold")
-        if cached_td is not None:
-            trial_data = cached_td.copy()
-            use_saved_thresholds = True
-        elif parquet_path.exists():
+        cached_df = _get_from_cache(subjid, date_str, kind="speed_analysis")
+        if cached_df is None and analysis_path.exists():
             try:
-                trial_data = pd.read_parquet(parquet_path)
-                use_saved_thresholds = True
-                _update_cache(subjid, [date_str], {date_str: trial_data.copy()}, kind="speed_threshold")
+                cached_df = pd.read_parquet(analysis_path)
+                _update_cache(subjid, [date_str], {date_str: cached_df.copy()}, kind="speed_analysis")
             except Exception as e:
-                print(f"Failed to read {parquet_path.name}: {e}")
+                print(f"Failed to read {analysis_path.name}: {e}")
 
-        if trial_data is None:
-            views = _load_trial_views(results_dir)
-            trial_data = views.get("trial_data", pd.DataFrame()).copy()
+        if cached_df is not None:
+            # Extract per-trial threshold times from per-bin records
+            thr_series = (cached_df.dropna(subset=["speed_threshold_time"])
+                                       .drop_duplicates(subset=["trial_index"])
+                                       .set_index("trial_index")["speed_threshold_time"])
+        else:
+            thr_series = None
+
+        views = _load_trial_views(results_dir)
+        trial_data = views.get("trial_data", pd.DataFrame()).copy()
         if trial_data.empty:
             print(f"No trial_data for {date_str}; skipping")
             continue
         for c in ["sequence_start", "sequence_end", "first_supply_time", "first_reward_poke_time", "fa_time", "speed_threshold_time"]:
             if c in trial_data.columns:
                 trial_data[c] = pd.to_datetime(trial_data[c], errors="coerce")
+
+        if thr_series is not None:
+            trial_data["speed_threshold_time"] = trial_data.index.map(thr_series)
+            use_saved_thresholds = True
 
         # Load tracking per session
         try:
