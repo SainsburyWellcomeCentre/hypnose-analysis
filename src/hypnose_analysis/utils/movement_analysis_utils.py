@@ -41,6 +41,45 @@ import json
 from collections import OrderedDict
 
 
+def _binned_speed(tracking_df, t_zero, t_end, pre_buffer_s, bin_s, mode):
+    """Compute binned speed (mean or max) between start and end relative to t_zero.
+
+    Returns mids (bin centers) and arr (speed per bin) or (None, None) on failure.
+    """
+    if pd.isna(t_zero) or pd.isna(t_end) or t_end <= t_zero:
+        return None, None
+    start_dt = t_zero - pd.Timedelta(seconds=pre_buffer_s)
+    seg = tracking_df[(tracking_df["time"] >= start_dt) & (tracking_df["time"] <= t_end)].copy()
+    if len(seg) < 2 or {"X", "Y", "time"} - set(seg.columns):
+        return None, None
+    t_rel = (seg["time"] - t_zero).dt.total_seconds().to_numpy()
+    if not np.isfinite(t_rel).all() or np.ptp(t_rel) == 0:
+        return None, None
+    x = seg["X"].to_numpy()
+    y = seg["Y"].to_numpy()
+    vx = np.gradient(x, t_rel)
+    vy = np.gradient(y, t_rel)
+    speed = np.hypot(vx, vy)
+
+    dur = t_rel.max() - t_rel.min()
+    edges = np.arange(-pre_buffer_s, dur + bin_s + bin_s * 0.5, bin_s)
+    if len(edges) < 2:
+        return None, None
+
+    seg_df = pd.DataFrame({"t_rel": t_rel, "speed": speed})
+    seg_df["bin"] = pd.cut(seg_df["t_rel"], bins=edges, right=False, include_lowest=True)
+    grouped = seg_df.groupby("bin", observed=False)["speed"]
+    agg_series = grouped.max() if mode == "max" else grouped.mean()
+    mids = edges[:-1] + (edges[1] - edges[0]) / 2
+    arr = np.full_like(mids, np.nan, dtype=float)
+    bin_to_idx = {b: i for i, b in enumerate(agg_series.index.categories)}
+    for b, v in agg_series.items():
+        idx = bin_to_idx.get(b)
+        if idx is not None:
+            arr[idx] = v
+    return mids, arr
+
+
 def _load_tracking_and_behavior(subjid, date, tracking_source='sleap'):
     """
     Load combined tracking CSV (SLEAP) and behavior results for a session.
@@ -1589,6 +1628,7 @@ def plot_epoch_speeds_by_condition(
         return None
 
     def _speed_by_bins(tracking_df, zero_dt, end_dt, edges):
+        # legacy helper for plotting on shared edges; threshold now uses per-trial binning
         if pd.isna(zero_dt) or pd.isna(end_dt) or end_dt <= zero_dt:
             return None
         start_dt = zero_dt - pd.Timedelta(seconds=pre_buffer_s)
@@ -1608,7 +1648,6 @@ def plot_epoch_speeds_by_condition(
         seg["speed"] = speed
         seg["t_rel"] = t_rel
         seg["bin"] = pd.cut(seg["t_rel"], bins=edges, right=False, include_lowest=True)
-        # Explicit observed=False retains current behavior across pandas versions
         grouped = seg.groupby("bin", observed=False)["speed"]
         agg_series = grouped.max() if mode == "max" else grouped.mean()
         mids = edges[:-1] + (edges[1] - edges[0]) / 2
@@ -1660,7 +1699,7 @@ def plot_epoch_speeds_by_condition(
                 trial_data[c] = pd.to_datetime(trial_data[c], errors="coerce")
 
         trials_info = []
-        for _, row in trial_data.iterrows():
+        for idx_row, row in trial_data.iterrows():
             cond = _condition_label(row)
             if cond is None:
                 continue
@@ -1671,13 +1710,13 @@ def plot_epoch_speeds_by_condition(
             dur_post = (t_end - t_zero).total_seconds()
             if dur_post <= 0:
                 continue
-            trials_info.append((cond, t_zero, t_end, dur_post))
+            trials_info.append((idx_row, cond, t_zero, t_end, dur_post))
 
         if not trials_info:
             print(f"No usable trials for {date_str}")
             continue
 
-        max_post = max(dur for _, _, _, dur in trials_info)
+        max_post = max(dur for _, _, _, _, dur in trials_info)
         edges = np.arange(-pre_buffer_s, max_post + bin_s, bin_s)
         if len(edges) < 2:
             continue
@@ -1685,19 +1724,37 @@ def plot_epoch_speeds_by_condition(
         epoch_series = {"rewarded": [], "unrewarded": [], "fa": []}
         speeds_flat = {"rewarded": [], "unrewarded": [], "fa": []}
         baseline_vals = []
-        baseline_mask = None
+        # store per-trial threshold times
+        trial_data["speed_threshold_time"] = pd.NaT
+        # cache per-trial bins for threshold computation without writing arrays into the DataFrame
+        trial_bins = {}
+        mids_common = None
 
-        for cond, t_zero, t_end, _ in trials_info:
-            res = _speed_by_bins(tracking, t_zero, t_end, edges)
-            if res is None:
+        for idx_row, cond, t_zero, t_end, _ in trials_info:
+            # per-trial binning for threshold/baseline
+            mids_trial, arr_trial = _binned_speed(tracking, t_zero, t_end, pre_buffer_s, bin_s, mode)
+            if mids_trial is None:
                 continue
-            mids, arr = res
-            if baseline_mask is None:
-                baseline_mask = (mids >= baseline_window[0]) & (mids <= baseline_window[1])
-            if threshold and baseline_mask is not None and baseline_mask.any():
-                baseline_vals.extend([v for v in arr[baseline_mask] if not np.isnan(v)])
-            epoch_series[cond].append(arr)
-            speeds_flat[cond].extend([v for v in arr if not np.isnan(v)])
+            if threshold:
+                mask_base = (mids_trial >= baseline_window[0]) & (mids_trial <= baseline_window[1])
+                if mask_base.any():
+                    baseline_vals.extend([v for v in arr_trial[mask_base] if not np.isnan(v)])
+
+            # legacy/global binning for plotting alignment
+            res_plot = _speed_by_bins(tracking, t_zero, t_end, edges)
+            if res_plot is None:
+                continue
+            mids_plot, arr_plot = res_plot
+            if mids_common is None:
+                mids_common = mids_plot
+            epoch_series[cond].append(arr_plot)
+            speeds_flat[cond].extend([v for v in arr_plot if not np.isnan(v)])
+
+            trial_bins[idx_row] = {
+                "mids": mids_trial,
+                "arr": arr_trial,
+                "t_zero": t_zero,
+            }
 
         conds_with_data = [c for c in ["rewarded", "unrewarded", "fa"] if epoch_series[c]]
         if not conds_with_data:
@@ -1718,6 +1775,22 @@ def plot_epoch_speeds_by_condition(
             if candidates:
                 thr_max = max(candidates)
 
+        # compute and store per-trial crossing times using per-trial bins
+        if threshold and thr_max is not None:
+            for idx_row, cond, t_zero, t_end, _ in trials_info:
+                bins = trial_bins.get(idx_row)
+                if not bins:
+                    continue
+                mids_trial = bins.get("mids")
+                arr_trial = bins.get("arr")
+                if mids_trial is None or arr_trial is None:
+                    continue
+                crossing = np.where((mids_trial >= 0) & (arr_trial > thr_max))[0]
+                if crossing.size > 0:
+                    k = crossing[0]
+                    crossing_time = t_zero + pd.Timedelta(seconds=float(mids_trial[k]))
+                    trial_data.at[idx_row, "speed_threshold_time"] = crossing_time
+
         # Per-session violin plot
         fig_violin, ax_violin = plt.subplots(figsize=figsize)
         data = [speeds_flat[c] for c in conds_with_data]
@@ -1736,11 +1809,14 @@ def plot_epoch_speeds_by_condition(
             if not trials:
                 ax_t.text(0.5, 0.5, "No trials", ha="center")
             else:
+                mids_use = mids_common
+                if mids_use is None:
+                    mids_use = edges[:-1] + (edges[1] - edges[0]) / 2
                 for arr in trials:
-                    ax_t.plot(mids, arr, color="gray", alpha=0.2)
+                    ax_t.plot(mids_use, arr, color="gray", alpha=0.2)
                 stack = np.vstack(trials)
                 mean_speeds = np.nanmean(stack, axis=0)
-                ax_t.plot(mids, mean_speeds, color="blue", linewidth=2, label="session mean")
+                ax_t.plot(mids_use, mean_speeds, color="blue", linewidth=2, label="session mean")
 
             if threshold and baseline_mean is not None:
                 ax_t.axhline(baseline_mean, color="red", linestyle="-", linewidth=1.5, label="baseline μ")
@@ -1767,12 +1843,14 @@ def plot_epoch_speeds_by_condition(
                 "mu_plus_beta_sigma": thr_mu_plus_beta_sigma,
                 "max_alpha_mu_mu_plus_beta_sigma": thr_max,
             } if threshold else None,
+            "trial_data_with_threshold": trial_data.copy(),
         })
 
         for cond in conds_with_data:
             stack = np.vstack(epoch_series[cond])
             session_mean = np.nanmean(stack, axis=0)
-            combined_data[cond].append((date_str, mids, session_mean))
+            mids_combined = mids_common if mids_common is not None else (edges[:-1] + (edges[1] - edges[0]) / 2)
+            combined_data[cond].append((date_str, mids_combined, session_mean))
 
     combined_figs = {}
     if len(per_session) > 1:
@@ -1791,3 +1869,400 @@ def plot_epoch_speeds_by_condition(
             combined_figs[cond] = fig
 
     return {"per_session": per_session, "combined": combined_figs}
+
+
+def plot_traces_with_speed_threshold(
+    subjid,
+    dates=None,
+    *,
+    fa_types="FA_time_in",
+    epoch_result=None,
+    bin_ms: int = 100,
+    pre_buffer_s: float = 0.2,
+    threshold_alpha: float = 6.0,
+    threshold_beta: float = 6.0,
+    mode: str = "mean",
+    smooth_window: int = 5,
+    figsize=(10, 8),
+    invert_y: bool = True,
+):
+    """Plot spatial traces for rewarded, unrewarded, and FA trials with a speed threshold marker.
+
+    For the selected sessions, builds three figures (rewarded, unrewarded, fa). Traces are overlaid
+    across sessions. Each trial trace gets a black dot at the first time after last poke-out when
+    speed exceeds vthresh = max(alpha*mu, mu+beta*sigma), where mu/sigma come from the pooled
+    baseline window [-0.15s, -0.05s] relative to last poke-out across all trials in the session.
+    If `speed_threshold_time` is already present in `trial_data` (e.g., from
+    plot_epoch_speeds_by_condition), that cached crossing time is preferred over recomputation.
+
+    Parameters
+    ----------
+    subjid : int
+        Subject ID.
+    dates : list | tuple | None
+        Dates list or inclusive range; None uses all available for the subject.
+    fa_types : str | Iterable
+        FA labels to include (default "FA_time_in"). Case-insensitive; accepts comma/semicolon list.
+    epoch_result : dict | None
+        Optional output from plot_epoch_speeds_by_condition. When provided, the function will use the
+        cached per-session trial_data_with_threshold to place markers strictly at the stored
+        speed_threshold_time values (no recomputation). Sessions are matched by date string in the
+        epoch_result["per_session"] entries.
+    bin_ms : int
+        Epoch/bin width in milliseconds for speed aggregation (default 100).
+    pre_buffer_s : float
+        Seconds to include before last poke-out when computing speed (default 0.2). Needs >=0.15s
+        to populate the baseline window.
+    threshold_alpha : float
+        Multiplier for mu in the threshold definition (default 6.0).
+    threshold_beta : float
+        Multiplier for sigma in the threshold definition (default 6.0).
+    mode : {"max", "mean"}
+        Aggregation per bin when computing speeds.
+    smooth_window : int
+        Rolling window (frames) for smoothing X/Y before speed computation and plotting.
+    figsize : tuple
+        Figure size for each condition plot.
+    invert_y : bool
+        If True, invert Y-axis to match video coordinates.
+
+    Returns
+    -------
+    dict with keys "rewarded", "unrewarded", "fa" mapping to matplotlib figures.
+    """
+
+    # Ensure helper is available even if an old module version was loaded
+    try:
+        binned_speed_fn = _binned_speed
+    except NameError:
+        import hypnose_analysis.utils.movement_analysis_utils as _mau
+        binned_speed_fn = getattr(_mau, "_binned_speed", None)
+    if binned_speed_fn is None:
+        raise RuntimeError("_binned_speed helper not available; reload hypnose_analysis.utils.movement_analysis_utils")
+
+    # Color palette consistent with plot_trial_traces_by_mode
+    port_colors = {1: "#FF6B6B", 2: "#4ECDC4"}
+    port_colors_fa = {1: "#FF8E8E", 2: "#7EE9DF"}
+    aborted_color = "#555555"
+
+    # Normalize FA labels
+    if isinstance(fa_types, str):
+        if fa_types.lower() == "all":
+            def fa_filter_fn(lbl):
+                return str(lbl).lower().startswith("fa_") if pd.notna(lbl) else False
+        else:
+            fa_set = {s.strip().lower() for s in re.split(r"[;,]", fa_types) if s.strip()}
+            def fa_filter_fn(lbl):
+                return str(lbl).lower() in fa_set if pd.notna(lbl) else False
+    else:
+        fa_set = {str(s).strip().lower() for s in fa_types}
+        def fa_filter_fn(lbl):
+            return str(lbl).lower() in fa_set if pd.notna(lbl) else False
+
+    if mode not in {"max", "mean"}:
+        raise ValueError("mode must be 'max' or 'mean'")
+    if pre_buffer_s < 0.15:
+        print("pre_buffer_s < 0.15s: baseline window [-0.15, -0.05] may be empty")
+
+    subj_str = f"sub-{str(subjid).zfill(3)}"
+    derivatives_dir = get_derivatives_root()
+    subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+    if not subj_dirs:
+        raise FileNotFoundError(f"No subject directory found for {subj_str}")
+    subj_dir = subj_dirs[0]
+
+    ses_dirs = _filter_session_dirs(subj_dir, dates)
+    if not ses_dirs:
+        raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
+
+    baseline_window = (-0.15, -0.05)
+    bin_s = bin_ms / 1000.0
+
+    def _safe_dt(val):
+        try:
+            return pd.to_datetime(val)
+        except Exception:
+            return pd.NaT
+
+    def _last_poke_out(row):
+        pts = row.get("position_poke_times")
+        if isinstance(pts, str):
+            try:
+                pts = json.loads(pts)
+            except Exception:
+                pts = None
+        if isinstance(pts, dict) and pts:
+            vals = list(pts.values())
+            if all(isinstance(v, dict) and "position" in v for v in vals):
+                vals = sorted(vals, key=lambda v: v.get("position", 0))
+            last = vals[-1]
+            return _safe_dt(last.get("poke_odor_end"))
+        if isinstance(pts, list) and pts:
+            last = pts[-1]
+            if isinstance(last, dict):
+                return _safe_dt(last.get("poke_odor_end"))
+        for cand in ["poke_odor_end", "last_poke_out_time", "last_poke_time"]:
+            if cand in row:
+                return _safe_dt(row.get(cand))
+        if "sequence_start" in row:
+            return _safe_dt(row.get("sequence_start"))
+        return pd.NaT
+
+    def _end_time(row, cond):
+        if cond == "rewarded":
+            return _safe_dt(row.get("first_supply_time")) or _safe_dt(row.get("sequence_end"))
+        if cond == "unrewarded":
+            return _safe_dt(row.get("first_reward_poke_time")) or _safe_dt(row.get("sequence_end"))
+        if cond == "fa":
+            return _safe_dt(row.get("fa_time")) or _safe_dt(row.get("sequence_end"))
+        return _safe_dt(row.get("sequence_end"))
+
+    def _infer_port(row):
+        for col in [
+            "response_port", "rewarded_port", "reward_port", "supply_port",
+            "choice_port", "port", "fa_port",
+        ]:
+            if col in row and pd.notna(row[col]):
+                try:
+                    return int(row[col])
+                except Exception:
+                    try:
+                        return int(float(row[col]))
+                    except Exception:
+                        continue
+        return None
+
+    def _category_from_row(row):
+        odor = str(row.get("last_odor_name") or row.get("last_odor") or "A")
+        if odor in {"A", "OdorA", "1"}:
+            return "A"
+        if odor in {"B", "OdorB", "2"}:
+            return "B"
+        return "A"
+
+    def _smooth_tracking(df):
+        if smooth_window > 1:
+            df = df.copy()
+            df["X"] = pd.Series(df["X"]).rolling(window=smooth_window, center=True, min_periods=1).mean()
+            df["Y"] = pd.Series(df["Y"]).rolling(window=smooth_window, center=True, min_periods=1).mean()
+        return df
+
+    traces = {"rewarded": [], "unrewarded": [], "fa": []}
+    markers = {"rewarded": [], "unrewarded": [], "fa": []}
+    epoch_td_by_date = {}
+    if epoch_result and isinstance(epoch_result, dict) and "per_session" in epoch_result:
+        for entry in epoch_result.get("per_session", []):
+            d = entry.get("date")
+            td = entry.get("trial_data_with_threshold")
+            if d is not None and td is not None:
+                epoch_td_by_date[str(d)] = td.copy()
+
+    for ses in ses_dirs:
+        date_str = ses.name.split("_date-")[-1]
+        results_dir = ses / "saved_analysis_results"
+        if not results_dir.exists():
+            continue
+
+        # If epoch_result provided and has this date, use its trial_data_with_threshold directly
+        use_epoch_td = date_str in epoch_td_by_date
+        if use_epoch_td:
+            trial_data = epoch_td_by_date[date_str].copy()
+        else:
+            views = _load_trial_views(results_dir)
+            trial_data = views.get("trial_data", pd.DataFrame()).copy()
+        if trial_data.empty:
+            print(f"No trial_data for {date_str}; skipping")
+            continue
+        for c in ["sequence_start", "sequence_end", "first_supply_time", "first_reward_poke_time", "fa_time", "speed_threshold_time"]:
+            if c in trial_data.columns:
+                trial_data[c] = pd.to_datetime(trial_data[c], errors="coerce")
+
+        # Load tracking per session
+        try:
+            tracking, _ = _load_tracking_and_behavior(subjid, date_str)
+        except Exception as e:
+            print(f"Skipping {date_str}: tracking load failed ({e})")
+            continue
+
+        tracking = tracking.copy()
+        tracking["time"] = pd.to_datetime(tracking["time"], errors="coerce")
+        tracking = tracking.dropna(subset=["time"]).reset_index(drop=True)
+        for cand in [("centroid_x", "centroid_y"), ("X", "Y")]:
+            if cand[0] in tracking.columns and cand[1] in tracking.columns:
+                tracking["X"] = tracking[cand[0]]
+                tracking["Y"] = tracking[cand[1]]
+                break
+        tracking = tracking.dropna(subset=["X", "Y"])
+        tracking = tracking.loc[:, ~tracking.columns.duplicated()]
+        if tracking.empty:
+            continue
+        tracking = _smooth_tracking(tracking)
+        
+        if use_epoch_td:
+            # Strictly use stored threshold times; no recomputation
+            for idx, row in trial_data.iterrows():
+                rtc = str(row.get("response_time_category", "")).lower()
+                is_aborted = bool(row.get("is_aborted", False))
+                fa_label = str(row.get("fa_label", "")).lower()
+
+                if rtc == "rewarded" and not is_aborted:
+                    cond = "rewarded"
+                elif rtc == "unrewarded" and not is_aborted:
+                    cond = "unrewarded"
+                elif fa_label.startswith("fa_") and fa_filter_fn(fa_label):
+                    cond = "fa"
+                else:
+                    continue
+
+                t_zero = _last_poke_out(row)
+                t_end = _end_time(row, cond)
+                if pd.isna(t_zero) or pd.isna(t_end) or t_end <= t_zero:
+                    continue
+
+                start_dt = t_zero - pd.Timedelta(seconds=pre_buffer_s)
+                seg = tracking[(tracking["time"] >= start_dt) & (tracking["time"] <= t_end)].copy()
+                if len(seg) < 2 or {"X", "Y", "time"} - set(seg.columns):
+                    continue
+                t_rel = (seg["time"] - t_zero).dt.total_seconds().to_numpy()
+                if not np.isfinite(t_rel).all() or np.ptp(t_rel) == 0:
+                    continue
+                x = seg["X"].to_numpy()
+                y = seg["Y"].to_numpy()
+
+                marker = None
+                thr_time = row.get("speed_threshold_time") if "speed_threshold_time" in trial_data.columns else pd.NaT
+                if pd.notna(thr_time):
+                    nearest_idx = int(np.argmin(np.abs((seg["time"] - thr_time).dt.total_seconds())))
+                    marker = (x[nearest_idx], y[nearest_idx])
+
+                port = _infer_port(row)
+                if cond == "fa":
+                    color = port_colors_fa.get(port, port_colors_fa[1])
+                else:
+                    color = port_colors.get(port, port_colors[1 if _category_from_row(row) == "A" else 2])
+
+                traces[cond].append({"x": x, "y": y, "color": color, "session": date_str})
+                if marker is not None:
+                    markers[cond].append({"xy": marker, "color": "black", "session": date_str})
+            # done with this session
+            continue
+
+        baseline_vals = []
+        baseline_mask = None
+        trial_cache = {}
+
+        # First pass: per-trial binned speeds to build baseline and cache for later reuse
+        for idx, row in trial_data.iterrows():
+            rtc = str(row.get("response_time_category", "")).lower()
+            is_aborted = bool(row.get("is_aborted", False))
+            fa_label = str(row.get("fa_label", "")).lower()
+
+            if rtc == "rewarded" and not is_aborted:
+                cond = "rewarded"
+            elif rtc == "unrewarded" and not is_aborted:
+                cond = "unrewarded"
+            elif fa_label.startswith("fa_") and fa_filter_fn(fa_label):
+                cond = "fa"
+            else:
+                continue
+
+            t_zero = _last_poke_out(row)
+            t_end = _end_time(row, cond)
+            if pd.isna(t_zero) or pd.isna(t_end) or t_end <= t_zero:
+                continue
+
+            mids_trial, arr_trial = binned_speed_fn(tracking, t_zero, t_end, pre_buffer_s, bin_s, mode)
+            if mids_trial is None or arr_trial is None:
+                continue
+
+            if baseline_mask is None:
+                baseline_mask = (mids_trial >= baseline_window[0]) & (mids_trial <= baseline_window[1])
+            if baseline_mask is not None and baseline_mask.any():
+                baseline_vals.extend([v for v in arr_trial[baseline_mask] if not np.isnan(v)])
+
+            trial_cache[idx] = {
+                "cond": cond,
+                "t_zero": t_zero,
+                "t_end": t_end,
+                "mids": mids_trial,
+                "arr": arr_trial,
+            }
+
+        if not baseline_vals:
+            print(f"No baseline window data for {date_str}; skipping session")
+            continue
+
+        baseline_vals_arr = np.asarray([v for v in baseline_vals if np.isfinite(v)])
+        if baseline_vals_arr.size == 0:
+            print(f"Baseline values not finite for {date_str}; skipping session")
+            continue
+        mu = float(np.nanmean(baseline_vals_arr))
+        sigma = float(np.nanstd(baseline_vals_arr))
+        thr_alpha_mu = mu * threshold_alpha
+        thr_mu_plus_beta_sigma = mu + threshold_beta * sigma
+        vthresh = max(thr_alpha_mu, thr_mu_plus_beta_sigma)
+
+        # Second pass: build traces and threshold markers using computed threshold
+        for idx, meta in trial_cache.items():
+            cond = meta["cond"]
+            t_zero = meta["t_zero"]
+            t_end = meta["t_end"]
+            row = trial_data.loc[idx]
+
+            thr_time = pd.NaT
+            saved_thr = trial_data.at[idx, "speed_threshold_time"] if "speed_threshold_time" in trial_data.columns else pd.NaT
+            if pd.notna(saved_thr):
+                thr_time = saved_thr
+            else:
+                mids_trial = meta.get("mids")
+                arr_trial = meta.get("arr")
+                if mids_trial is not None and arr_trial is not None:
+                    crossing_idx = np.where((mids_trial >= 0) & (arr_trial > vthresh))[0]
+                    if crossing_idx.size > 0:
+                        k = crossing_idx[0]
+                        thr_time = t_zero + pd.Timedelta(seconds=float(mids_trial[k]))
+
+            start_dt = t_zero - pd.Timedelta(seconds=pre_buffer_s)
+            seg = tracking[(tracking["time"] >= start_dt) & (tracking["time"] <= t_end)].copy()
+            if len(seg) < 2 or {"X", "Y", "time"} - set(seg.columns):
+                continue
+            t_rel = (seg["time"] - t_zero).dt.total_seconds().to_numpy()
+            if not np.isfinite(t_rel).all() or np.ptp(t_rel) == 0:
+                continue
+            x = seg["X"].to_numpy()
+            y = seg["Y"].to_numpy()
+
+            marker = None
+            if pd.notna(thr_time):
+                nearest_idx = int(np.argmin(np.abs((seg["time"] - thr_time).dt.total_seconds())))
+                marker = (x[nearest_idx], y[nearest_idx])
+
+            port = _infer_port(row)
+            if cond == "fa":
+                color = port_colors_fa.get(port, port_colors_fa[1])
+            else:
+                color = port_colors.get(port, port_colors[1 if _category_from_row(row) == "A" else 2])
+
+            traces[cond].append({"x": x, "y": y, "color": color, "session": date_str})
+            if marker is not None:
+                markers[cond].append({"xy": marker, "color": "black", "session": date_str})
+
+    figs = {}
+    for cond, label in [("rewarded", "Rewarded"), ("unrewarded", "Unrewarded"), ("fa", "False Alarms")]:
+        if not traces[cond]:
+            continue
+        fig, ax = plt.subplots(figsize=figsize)
+        for tr in traces[cond]:
+            ax.plot(tr["x"], tr["y"], color=tr["color"], alpha=0.35, linewidth=1.2)
+        for mk in markers[cond]:
+            ax.scatter(mk["xy"][0], mk["xy"][1], color="black", s=18, zorder=5)
+        ax.set_title(f"{label} traces with speed-threshold crossing")
+        ax.set_xlabel("X Position (px)")
+        ax.set_ylabel("Y Position (px)")
+        if invert_y:
+            ax.invert_yaxis()
+        ax.set_aspect('equal', adjustable='box')
+        ax.grid(True, alpha=0.3)
+        figs[cond] = fig
+
+    return figs
