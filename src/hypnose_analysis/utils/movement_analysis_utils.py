@@ -1712,7 +1712,7 @@ def plot_epoch_speeds_by_condition(
         if cond == "rewarded":
             return _safe_dt(row.get("first_supply_time")) or _safe_dt(row.get("sequence_end"))
         if cond == "unrewarded":
-            return _safe_dt(row.get("first_reward_poke_time")) or _safe_dt(row.get("sequence_end"))
+            return _safe_dt(row.get("first_reward_poke_time"))
         if cond == "fa":
             return _safe_dt(row.get("fa_time")) or _safe_dt(row.get("sequence_end"))
         return _safe_dt(row.get("sequence_end"))
@@ -1852,23 +1852,31 @@ def plot_epoch_speeds_by_condition(
             epoch_series[cond].append(arr_plot)
             speeds_flat[cond].extend([v for v in arr_plot if not np.isnan(v)])
 
-            for mid, val in zip(mids_plot, arr_plot):
-                mid_td = pd.Timedelta(seconds=float(mid))
-                half_bin = pd.Timedelta(seconds=float(bin_s / 2))
-                epoch_records.append({
-                    "trial_index": idx_row,
-                    "condition": cond,
-                    "bin_mid_s": float(mid),
-                    "bin_start_s": float(mid - bin_s / 2),
-                    "bin_end_s": float(mid + bin_s / 2),
-                    "bin_mid_time": t_zero + mid_td,
-                    "bin_start_time": t_zero + mid_td - half_bin,
-                    "bin_end_time": t_zero + mid_td + half_bin,
-                    "speed": float(val) if not np.isnan(val) else np.nan,
-                    "date": date_str,
-                    "subjid": subjid,
-                    "speed_threshold_time": pd.NaT,
-                })
+            # Write per-trial per-bin records using the per-trial bins (mids_trial/arr_trial) to avoid extending past t_end.
+            if mids_trial is not None and arr_trial is not None:
+                for mid, val in zip(mids_trial, arr_trial):
+                    mid_td = pd.Timedelta(seconds=float(mid))
+                    half_bin = pd.Timedelta(seconds=float(bin_s / 2))
+                    bin_mid_time = t_zero + mid_td
+                    bin_start_time = bin_mid_time - half_bin
+                    bin_end_time = bin_mid_time + half_bin
+                    # Clamp end to t_end to avoid overshooting when global edges are longer than this trial
+                    if bin_end_time > t_end:
+                        bin_end_time = t_end
+                    epoch_records.append({
+                        "trial_index": idx_row,
+                        "condition": cond,
+                        "bin_mid_s": float(mid),
+                        "bin_start_s": float(mid - bin_s / 2),
+                        "bin_end_s": float(mid + bin_s / 2),
+                        "bin_mid_time": bin_mid_time,
+                        "bin_start_time": bin_start_time,
+                        "bin_end_time": bin_end_time,
+                        "speed": float(val) if not np.isnan(val) else np.nan,
+                        "date": date_str,
+                        "subjid": subjid,
+                        "speed_threshold_time": pd.NaT,
+                    })
 
             trial_bins[idx_row] = {
                 "mids": mids_trial,
@@ -2142,15 +2150,16 @@ def plot_traces_with_speed_threshold(
         if cond == "rewarded":
             return _safe_dt(row.get("first_supply_time")) or _safe_dt(row.get("sequence_end"))
         if cond == "unrewarded":
-            return _safe_dt(row.get("first_reward_poke_time")) or _safe_dt(row.get("sequence_end"))
+            return _safe_dt(row.get("first_reward_poke_time"))
         if cond == "fa":
             return _safe_dt(row.get("fa_time")) or _safe_dt(row.get("sequence_end"))
         return _safe_dt(row.get("sequence_end"))
 
     def _infer_port(row):
+        # Try explicit port fields first
         for col in [
             "response_port", "rewarded_port", "reward_port", "supply_port",
-            "choice_port", "port", "fa_port",
+            "choice_port", "port", "fa_port", "last_reward_port", "odor_port",
         ]:
             if col in row and pd.notna(row[col]):
                 try:
@@ -2160,6 +2169,23 @@ def plot_traces_with_speed_threshold(
                         return int(float(row[col]))
                     except Exception:
                         continue
+        # Try odor-number style fields
+        for col in ["last_odor_num", "odor_num", "odor_index", "odor_position"]:
+            if col in row and pd.notna(row[col]):
+                try:
+                    val = int(row[col])
+                    if val == 2:
+                        return 2
+                    if val == 1:
+                        return 1
+                except Exception:
+                    continue
+        # Try odor labels
+        odor = str(row.get("last_odor_name") or row.get("last_odor") or row.get("odor_name") or row.get("odor") or "").strip().lower()
+        if odor in {"b", "odorb", "odor_b", "2", "portb", "port_b"}:
+            return 2
+        if odor in {"a", "odora", "odor_a", "1", "porta", "port_a"}:
+            return 1
         return None
 
     def _category_from_row(row):
@@ -2392,14 +2418,6 @@ def plot_traces_with_speed_threshold(
             if marker is not None:
                 markers[cond].append({"xy": marker, "color": "black", "session": date_str})
 
-        try:
-            parquet_path.parent.mkdir(parents=True, exist_ok=True)
-            trial_data.to_parquet(parquet_path, index=False)
-        except Exception as e:
-            print(f"Warning: failed to write {parquet_path.name}: {e}")
-        else:
-            _update_cache(subjid, [date_str], {date_str: trial_data.copy()}, kind="speed_threshold")
-
     figs = {}
     for cond, label in [("rewarded", "Rewarded"), ("unrewarded", "Unrewarded"), ("fa", "False Alarms")]:
         if not traces[cond]:
@@ -2417,5 +2435,441 @@ def plot_traces_with_speed_threshold(
         ax.set_aspect('equal', adjustable='box')
         ax.grid(True, alpha=0.3)
         figs[cond] = fig
+
+    return figs
+
+
+def plot_tortuosity_by_condition(
+    subjid,
+    dates=None,
+    *,
+    fa_types="FA_time_in",
+    bin_ms: int = 100,
+    use_fixed_coords: bool = False,
+    fixed_start_xy=(575, 90),
+    fixed_goal_a_xy=(208, 930),
+    fixed_goal_b_xy=(973, 930),
+    figsize=(10, 6),
+):
+    """Compute and plot tortuosity per trial (path length / straight line) for rewarded, unrewarded, and FA.
+
+    Requires speed_analysis.parquet (generated by plot_epoch_speeds_by_condition) to align bin times.
+    Adds a 'tortuosity' column to trial_data and writes updated parquet/CSV if present in the session.
+    
+    Returns a dict with per-session figures and an optional combined figure when multiple dates are provided.
+    """
+
+    if isinstance(fa_types, str):
+        if fa_types.lower() == "all":
+            def fa_filter_fn(lbl):
+                return str(lbl).lower().startswith("fa_") if pd.notna(lbl) else False
+        else:
+            fa_set = {s.strip().lower() for s in re.split(r"[;,]", fa_types) if s.strip()}
+            def fa_filter_fn(lbl):
+                return str(lbl).lower() in fa_set if pd.notna(lbl) else False
+    else:
+        fa_set = {str(s).strip().lower() for s in fa_types}
+        def fa_filter_fn(lbl):
+            return str(lbl).lower() in fa_set if pd.notna(lbl) else False
+
+    subj_str = f"sub-{str(subjid).zfill(3)}"
+    derivatives_dir = get_derivatives_root()
+    subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+    if not subj_dirs:
+        raise FileNotFoundError(f"No subject directory found for {subj_str}")
+    subj_dir = subj_dirs[0]
+
+    ses_dirs = _filter_session_dirs(subj_dir, dates)
+    if not ses_dirs:
+        raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
+
+    def _condition_label(row):
+        rtc = str(row.get("response_time_category", "")).lower()
+        is_aborted = bool(row.get("is_aborted", False))
+        fa_label = str(row.get("fa_label", "")).lower()
+        if rtc == "rewarded" and not is_aborted:
+            return "rewarded"
+        if rtc == "unrewarded" and not is_aborted:
+            return "unrewarded"
+        if fa_label.startswith("fa_") and fa_filter_fn(fa_label):
+            return "fa"
+        return None
+
+    per_session = []
+    combined_rows = []
+    start_target_s = -bin_ms / 2000.0  # target mid-bin time (e.g., -0.05s for 100 ms bins)
+
+    def _infer_port(row):
+        for col in [
+            "response_port", "rewarded_port", "reward_port", "supply_port",
+            "choice_port", "port", "fa_port",
+        ]:
+            if col in row and pd.notna(row[col]):
+                try:
+                    return int(row[col])
+                except Exception:
+                    try:
+                        return int(float(row[col]))
+                    except Exception:
+                        continue
+        return None
+
+    for ses in ses_dirs:
+        date_str = ses.name.split("_date-")[-1]
+        results_dir = ses / "saved_analysis_results"
+        if not results_dir.exists():
+            continue
+
+        # Load tracking
+        try:
+            tracking, _ = _load_tracking_and_behavior(subjid, date_str)
+        except Exception as e:
+            print(f"Skipping {date_str}: tracking load failed ({e})")
+            continue
+        tracking = tracking.copy()
+        tracking["time"] = pd.to_datetime(tracking["time"], errors="coerce")
+        tracking = tracking.dropna(subset=["time"]).reset_index(drop=True)
+        for cand in [("centroid_x", "centroid_y"), ("X", "Y")]:
+            if cand[0] in tracking.columns and cand[1] in tracking.columns:
+                tracking["X"] = tracking[cand[0]]
+                tracking["Y"] = tracking[cand[1]]
+                break
+        tracking = tracking.dropna(subset=["X", "Y"])
+        tracking = tracking.loc[:, ~tracking.columns.duplicated()]
+        if tracking.empty:
+            continue
+
+        # Load trial_data
+        views = _load_trial_views(results_dir)
+        trial_data = views.get("trial_data", pd.DataFrame()).copy()
+        if trial_data.empty:
+            print(f"No trial_data for {date_str}; skipping")
+            continue
+        for c in ["sequence_start", "sequence_end", "fa_time", "first_supply_time", "first_reward_poke_time"]:
+            if c in trial_data.columns:
+                trial_data[c] = pd.to_datetime(trial_data[c], errors="coerce")
+
+        # Load speed_analysis
+        speed_df = _get_from_cache(subjid, date_str, kind="speed_analysis")
+        if speed_df is None:
+            path_speed = results_dir / "speed_analysis.parquet"
+            if not path_speed.exists():
+                print(f"No speed_analysis.parquet for {date_str}; run plot_epoch_speeds_by_condition first")
+                continue
+            try:
+                speed_df = pd.read_parquet(path_speed)
+                _update_cache(subjid, [date_str], {date_str: speed_df.copy()}, kind="speed_analysis")
+            except Exception as e:
+                print(f"Failed to read speed_analysis for {date_str}: {e}")
+                continue
+        speed_df = speed_df.copy()
+        for col in ["bin_mid_time", "bin_start_time", "bin_end_time"]:
+            if col in speed_df.columns:
+                speed_df[col] = pd.to_datetime(speed_df[col], errors="coerce")
+
+        tortuosity_list = []
+
+        for idx_row, row in trial_data.iterrows():
+            cond = _condition_label(row)
+            if cond is None:
+                continue
+            bins_df = speed_df[speed_df["trial_index"] == idx_row]
+            if bins_df.empty:
+                continue
+
+            # start: bin with mid at -0.05s
+            bins_df = bins_df.sort_values("bin_mid_s").reset_index(drop=True)
+            start_bin = bins_df.loc[(bins_df["bin_mid_s"].sub(start_target_s).abs() <= (bin_ms / 1000.0) * 0.01)]
+            if start_bin.empty:
+                start_bin = bins_df.head(1)
+            if start_bin.empty or "bin_end_time" not in start_bin.columns:
+                continue
+            start_time = pd.to_datetime(start_bin.iloc[0]["bin_end_time"], errors="coerce")
+            end_time = pd.to_datetime(bins_df.sort_values("bin_end_time").iloc[-1]["bin_end_time"], errors="coerce") if "bin_end_time" in bins_df.columns else pd.NaT
+            if pd.isna(start_time) or pd.isna(end_time) or end_time <= start_time:
+                continue
+
+            seg_mask = (tracking["time"] >= start_time) & (tracking["time"] <= end_time)
+            seg = tracking.loc[seg_mask, ["X", "Y", "time"]].copy()
+            if len(seg) < 2:
+                continue
+            seg = seg.sort_values("time")
+
+            # Coordinates for start/goal as nearest frames to those times
+            if use_fixed_coords:
+                port = _infer_port(row)
+                start_xy = np.asarray(fixed_start_xy, dtype=float)
+                end_xy = np.asarray(fixed_goal_b_xy if port == 2 else fixed_goal_a_xy, dtype=float)
+            else:
+                start_idx = int(np.argmin(np.abs((seg["time"] - start_time).dt.total_seconds())))
+                end_idx = int(np.argmin(np.abs((seg["time"] - end_time).dt.total_seconds())))
+                start_xy = seg.iloc[start_idx][["X", "Y"]].to_numpy(dtype=float)
+                end_xy = seg.iloc[end_idx][["X", "Y"]].to_numpy(dtype=float)
+
+            x_arr = seg["X"].to_numpy(dtype=float)
+            y_arr = seg["Y"].to_numpy(dtype=float)
+            path_len = float(np.sum(np.hypot(np.diff(x_arr), np.diff(y_arr))))
+            straight_len = float(np.hypot(end_xy[0] - start_xy[0], end_xy[1] - start_xy[1]))
+            tortuosity = path_len / straight_len if straight_len > 0 else np.nan
+
+            trial_data.at[idx_row, "tortuosity"] = tortuosity
+            tortuosity_list.append({"date": date_str, "condition": cond, "tortuosity": tortuosity})
+
+        if "tortuosity" in trial_data.columns:
+            # Persist updated trial_data
+            parquet_path = results_dir / "trial_data.parquet"
+            csv_path = results_dir / "trial_data.csv"
+            try:
+                trial_data.to_parquet(parquet_path, index=False)
+            except Exception:
+                pass
+            try:
+                trial_data.to_csv(csv_path, index=False)
+            except Exception:
+                pass
+
+        if not tortuosity_list:
+            print(f"No tortuosity computed for {date_str}")
+            continue
+
+        df_ses = pd.DataFrame(tortuosity_list)
+        per_session.append({"date": date_str, "data": df_ses})
+        combined_rows.append(df_ses)
+
+        # Plot per-session scatter with mean±SEM
+        fig, ax = plt.subplots(figsize=figsize)
+        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+            sub = df_ses[df_ses["condition"] == cond]
+            if sub.empty:
+                continue
+            y = sub["tortuosity"].astype(float)
+            x_jitter = np.full_like(y, {"rewarded": 0, "unrewarded": 1, "fa": 2}[cond], dtype=float)
+            x_jitter = x_jitter + (np.random.rand(len(y)) - 0.5) * 0.1
+            ax.scatter(x_jitter, y, color=color, alpha=0.6, label=f"{cond} trials")
+            mean = y.mean()
+            sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+            ax.errorbar({"rewarded": 0, "unrewarded": 1, "fa": 2}[cond], mean, yerr=sem, fmt="o", color="black", capsize=4)
+        ax.set_xticks([0, 1, 2])
+        ax.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+        ax.set_ylabel("Tortuosity")
+        ax.set_title(f"Tortuosity by condition — {date_str}")
+        fig.tight_layout()
+        per_session[-1]["fig"] = fig
+
+    combined_fig = None
+    if len(per_session) > 1 and combined_rows:
+        all_df = pd.concat(combined_rows, ignore_index=True)
+        fig, ax = plt.subplots(figsize=figsize)
+        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+            sub = all_df[all_df["condition"] == cond]
+            if sub.empty:
+                continue
+            # mean per session
+            per_ses = sub.groupby("date")
+            means = per_ses["tortuosity"].mean()
+            sems = per_ses["tortuosity"].sem()
+            x_vals = np.arange(len(means))
+            ax.errorbar(x_vals, means.values, yerr=sems.values, fmt="o", color=color, label=f"{cond} session means")
+        ax.set_xticks(np.arange(len(all_df["date"].unique())))
+        ax.set_xticklabels(sorted(all_df["date"].unique()), rotation=45, ha="right")
+        ax.set_ylabel("Tortuosity")
+        ax.set_title("Tortuosity by condition across sessions")
+        ax.legend()
+        fig.tight_layout()
+        combined_fig = fig
+
+    return {"per_session": per_session, "combined": combined_fig}
+
+
+def plot_tortuosity_lines_overlay(
+    subjid,
+    dates=None,
+    *,
+    fa_types="FA_time_in",
+    bin_ms: int = 100,
+    fixed_start_xy=(575, 90),
+    fixed_goal_a_xy=(208, 930),
+    fixed_goal_b_xy=(973, 930),
+    figsize=(8, 8),
+):
+    """Plot traces by condition with both data-derived tortuosity lines and fixed lines overlaid.
+
+    Uses speed_analysis.parquet to align start/end times per trial. For each trial, draws the trajectory,
+    a line from start→goal derived from tracking, and a fixed start→goal line (A/B) using provided coordinates.
+    Returns a dict of figures keyed by (date, condition).
+    """
+
+    # FA filter
+    if isinstance(fa_types, str):
+        if fa_types.lower() == "all":
+            def fa_filter_fn(lbl):
+                return str(lbl).lower().startswith("fa_") if pd.notna(lbl) else False
+        else:
+            fa_set = {s.strip().lower() for s in re.split(r"[;,]", fa_types) if s.strip()}
+            def fa_filter_fn(lbl):
+                return str(lbl).lower() in fa_set if pd.notna(lbl) else False
+    else:
+        fa_set = {str(s).strip().lower() for s in fa_types}
+        def fa_filter_fn(lbl):
+            return str(lbl).lower() in fa_set if pd.notna(lbl) else False
+
+    subj_str = f"sub-{str(subjid).zfill(3)}"
+    subj_dirs = list(get_derivatives_root().glob(f"{subj_str}_id-*"))
+    if not subj_dirs:
+        raise FileNotFoundError(f"No subject directory found for {subj_str}")
+    subj_dir = subj_dirs[0]
+
+    ses_dirs = _filter_session_dirs(subj_dir, dates)
+    if not ses_dirs:
+        raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
+
+    start_target_s = -bin_ms / 2000.0
+    cond_colors = {"rewarded": "#4CAF50", "unrewarded": "#F44336", "fa": "#2196F3"}
+    data_line_color = "#424242"
+    fixed_line_color = "#9C27B0"
+
+    def _infer_port(row):
+        for col in [
+            "response_port", "rewarded_port", "reward_port", "supply_port",
+            "choice_port", "port", "fa_port",
+        ]:
+            if col in row and pd.notna(row[col]):
+                try:
+                    return int(row[col])
+                except Exception:
+                    try:
+                        return int(float(row[col]))
+                    except Exception:
+                        continue
+        return None
+
+    def _condition_label(row):
+        rtc = str(row.get("response_time_category", "")).lower()
+        is_aborted = bool(row.get("is_aborted", False))
+        fa_label = str(row.get("fa_label", "")).lower()
+        if rtc == "rewarded" and not is_aborted:
+            return "rewarded"
+        if rtc == "unrewarded" and not is_aborted:
+            return "unrewarded"
+        if fa_label.startswith("fa_") and fa_filter_fn(fa_label):
+            return "fa"
+        return None
+
+    figs = {}
+
+    for ses in ses_dirs:
+        date_str = ses.name.split("_date-")[-1]
+        results_dir = ses / "saved_analysis_results"
+        if not results_dir.exists():
+            continue
+
+        views = _load_trial_views(results_dir)
+        trial_data = views.get("trial_data", pd.DataFrame()).copy()
+        if trial_data.empty:
+            continue
+        for c in ["sequence_start", "sequence_end", "fa_time", "first_supply_time", "first_reward_poke_time"]:
+            if c in trial_data.columns:
+                trial_data[c] = pd.to_datetime(trial_data[c], errors="coerce")
+
+        try:
+            tracking, _ = _load_tracking_and_behavior(subjid, date_str)
+        except Exception as e:
+            print(f"Skipping {date_str}: tracking load failed ({e})")
+            continue
+        tracking = tracking.copy()
+        tracking["time"] = pd.to_datetime(tracking["time"], errors="coerce")
+        tracking = tracking.dropna(subset=["time"]).reset_index(drop=True)
+        for cand in [("centroid_x", "centroid_y"), ("X", "Y")]:
+            if cand[0] in tracking.columns and cand[1] in tracking.columns:
+                tracking["X"] = tracking[cand[0]]
+                tracking["Y"] = tracking[cand[1]]
+                break
+        tracking = tracking.dropna(subset=["X", "Y"])
+        tracking = tracking.loc[:, ~tracking.columns.duplicated()]
+        if tracking.empty:
+            continue
+
+        speed_df = _get_from_cache(subjid, date_str, kind="speed_analysis")
+        if speed_df is None:
+            path_speed = results_dir / "speed_analysis.parquet"
+            if not path_speed.exists():
+                print(f"No speed_analysis.parquet for {date_str}; run plot_epoch_speeds_by_condition first")
+                continue
+            try:
+                speed_df = pd.read_parquet(path_speed)
+                _update_cache(subjid, [date_str], {date_str: speed_df.copy()}, kind="speed_analysis")
+            except Exception as e:
+                print(f"Failed to read speed_analysis for {date_str}: {e}")
+                continue
+        speed_df = speed_df.copy()
+        for col in ["bin_mid_time", "bin_start_time", "bin_end_time"]:
+            if col in speed_df.columns:
+                speed_df[col] = pd.to_datetime(speed_df[col], errors="coerce")
+
+        traces = {"rewarded": [], "unrewarded": [], "fa": []}
+        data_lines = {"rewarded": [], "unrewarded": [], "fa": []}
+        fixed_lines = {"rewarded": [], "unrewarded": [], "fa": []}
+
+        for idx_row, row in trial_data.iterrows():
+            cond = _condition_label(row)
+            if cond is None:
+                continue
+            bins_df = speed_df[speed_df["trial_index"] == idx_row].sort_values("bin_mid_s")
+            if bins_df.empty:
+                continue
+            start_bin = bins_df.loc[(bins_df["bin_mid_s"].sub(start_target_s).abs() <= (bin_ms / 1000.0) * 0.01)]
+            if start_bin.empty:
+                start_bin = bins_df.head(1)
+            if start_bin.empty or "bin_end_time" not in start_bin.columns:
+                continue
+            start_time = pd.to_datetime(start_bin.iloc[0]["bin_end_time"], errors="coerce")
+            end_time = pd.to_datetime(bins_df.sort_values("bin_end_time").iloc[-1]["bin_end_time"], errors="coerce") if "bin_end_time" in bins_df.columns else pd.NaT
+            if pd.isna(start_time) or pd.isna(end_time) or end_time <= start_time:
+                continue
+
+            seg = tracking[(tracking["time"] >= start_time) & (tracking["time"] <= end_time)][["X", "Y", "time"]].copy()
+            if len(seg) < 2:
+                continue
+            seg = seg.sort_values("time")
+            x_arr = seg["X"].to_numpy(dtype=float)
+            y_arr = seg["Y"].to_numpy(dtype=float)
+
+            start_idx = int(np.argmin(np.abs((seg["time"] - start_time).dt.total_seconds())))
+            end_idx = int(np.argmin(np.abs((seg["time"] - end_time).dt.total_seconds())))
+            start_xy = seg.iloc[start_idx][["X", "Y"]].to_numpy(dtype=float)
+            end_xy = seg.iloc[end_idx][["X", "Y"]].to_numpy(dtype=float)
+
+            port = _infer_port(row)
+            fixed_start = np.asarray(fixed_start_xy, dtype=float)
+            fixed_goal = np.asarray(fixed_goal_b_xy if port == 2 else fixed_goal_a_xy, dtype=float)
+
+            traces[cond].append((x_arr, y_arr))
+            data_lines[cond].append((start_xy, end_xy))
+            fixed_lines[cond].append((fixed_start, fixed_goal))
+
+        for cond in ["rewarded", "unrewarded", "fa"]:
+            if not traces[cond]:
+                continue
+            fig, ax = plt.subplots(figsize=figsize)
+            for (x_arr, y_arr), (sxy, gxy), (fsxy, fgxy) in zip(traces[cond], data_lines[cond], fixed_lines[cond]):
+                ax.plot(x_arr, y_arr, color=cond_colors[cond], alpha=0.35, linewidth=1.2)
+                ax.plot([sxy[0], gxy[0]], [sxy[1], gxy[1]], color=data_line_color, linestyle="--", linewidth=1.4, alpha=0.9)
+                ax.plot([fsxy[0], fgxy[0]], [fsxy[1], fgxy[1]], color=fixed_line_color, linestyle="-", linewidth=1.4, alpha=0.9)
+            # Always show a reference fixed B line for visual comparison
+            ax.plot(
+                [fixed_start_xy[0], fixed_goal_b_xy[0]],
+                [fixed_start_xy[1], fixed_goal_b_xy[1]],
+                color=fixed_line_color,
+                linestyle="-",
+                linewidth=1.6,
+                alpha=0.6,
+            )
+            ax.set_title(f"{cond.capitalize()} traces with data vs fixed lines — {date_str}")
+            ax.set_xlabel("X (px)")
+            ax.set_ylabel("Y (px)")
+            ax.set_aspect("equal", adjustable="box")
+            ax.invert_yaxis()
+            ax.grid(True, alpha=0.3)
+            figs[(date_str, cond)] = fig
 
     return figs
