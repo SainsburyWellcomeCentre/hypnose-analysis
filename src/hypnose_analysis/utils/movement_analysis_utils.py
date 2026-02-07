@@ -1691,21 +1691,21 @@ def plot_epoch_speeds_by_condition(
                 pts = json.loads(pts)
             except Exception:
                 pts = None
+
+        entries = []
         if isinstance(pts, dict) and pts:
             vals = list(pts.values())
             if all(isinstance(v, dict) and "position" in v for v in vals):
                 vals = sorted(vals, key=lambda v: v.get("position", 0))
-            last = vals[-1]
-            return _safe_dt(last.get("poke_odor_end"))
-        if isinstance(pts, list) and pts:
-            last = pts[-1]
-            if isinstance(last, dict):
-                return _safe_dt(last.get("poke_odor_end"))
-        for cand in ["poke_odor_end", "last_poke_out_time", "last_poke_time"]:
-            if cand in row:
-                return _safe_dt(row.get(cand))
-        if "sequence_start" in row:
-            return _safe_dt(row.get("sequence_start"))
+            entries = vals
+        elif isinstance(pts, list) and pts:
+            entries = [p for p in pts if isinstance(p, dict)]
+
+        for poke in reversed(entries):
+            dt_val = _safe_dt(poke.get("poke_odor_end"))
+            if pd.notna(dt_val):
+                return dt_val
+
         return pd.NaT
 
     def _end_time(row, cond):
@@ -1760,6 +1760,24 @@ def plot_epoch_speeds_by_condition(
                 arr[idx] = v
         return mids, arr
 
+    def _speed_series(tracking_df, zero_dt, end_dt, pre_buffer_s_local):
+        """Return per-sample relative time (s) and speed for a trial segment."""
+        if pd.isna(zero_dt) or pd.isna(end_dt) or end_dt <= zero_dt:
+            return None, None
+        start_dt = zero_dt - pd.Timedelta(seconds=pre_buffer_s_local)
+        seg = tracking_df[(tracking_df["time"] >= start_dt) & (tracking_df["time"] <= end_dt)].copy()
+        if len(seg) < 2 or {"X", "Y", "time"} - set(seg.columns):
+            return None, None
+        t_rel = (seg["time"] - zero_dt).dt.total_seconds().to_numpy()
+        if not np.isfinite(t_rel).all() or np.ptp(t_rel) == 0:
+            return None, None
+        x = seg["X"].to_numpy()
+        y = seg["Y"].to_numpy()
+        vx = np.gradient(x, t_rel)
+        vy = np.gradient(y, t_rel)
+        speed = np.hypot(vx, vy)
+        return t_rel, speed
+
     per_session = []
     combined_data = {"rewarded": [], "unrewarded": [], "fa": []}
 
@@ -1800,18 +1818,26 @@ def plot_epoch_speeds_by_condition(
                 trial_data[c] = pd.to_datetime(trial_data[c], errors="coerce")
 
         trials_info = []
+        skipped_no_poke_end = []
         for idx_row, row in trial_data.iterrows():
             cond = _condition_label(row)
             if cond is None:
                 continue
             t_zero = _last_poke_out(row)
+            if pd.isna(t_zero):
+                trial_id = row.get("trial_id", idx_row) if hasattr(row, "get") else idx_row
+                skipped_no_poke_end.append(trial_id)
+                continue
             t_end = _end_time(row, cond)
-            if pd.isna(t_zero) or pd.isna(t_end) or t_end <= t_zero:
+            if pd.isna(t_end) or t_end <= t_zero:
                 continue
             dur_post = (t_end - t_zero).total_seconds()
             if dur_post <= 0:
                 continue
             trials_info.append((idx_row, cond, t_zero, t_end, dur_post))
+
+        if skipped_no_poke_end:
+            print(f"Warning [{date_str}]: skipped trials with no poke_odor_end in position_poke_times: {skipped_no_poke_end}")
 
         if not trials_info:
             print(f"No usable trials for {date_str}")
@@ -1876,6 +1902,7 @@ def plot_epoch_speeds_by_condition(
                         "date": date_str,
                         "subjid": subjid,
                         "speed_threshold_time": pd.NaT,
+                        "latency_s": np.nan,
                     })
 
             trial_bins[idx_row] = {
@@ -1904,26 +1931,62 @@ def plot_epoch_speeds_by_condition(
                 thr_max = max(candidates)
 
         # compute and store per-trial crossing times using per-trial bins
+        if "latency_s" not in trial_data.columns:
+            trial_data["latency_s"] = np.nan
+
         if threshold and thr_max is not None:
             for idx_row, cond, t_zero, t_end, _ in trials_info:
-                bins = trial_bins.get(idx_row)
-                if not bins:
-                    continue
-                mids_trial = bins.get("mids")
-                arr_trial = bins.get("arr")
-                if mids_trial is None or arr_trial is None:
-                    continue
-                crossing = np.where((mids_trial >= 0) & (arr_trial > thr_max))[0]
-                if crossing.size > 0:
-                    k = crossing[0]
-                    crossing_time = t_zero + pd.Timedelta(seconds=float(mids_trial[k]))
+                # precise crossing using per-sample speed
+                t_rel_series, speed_series = _speed_series(tracking, t_zero, t_end, pre_buffer_s)
+                crossing_time = pd.NaT
+                latency_val = np.nan
+                if t_rel_series is not None and speed_series is not None:
+                    mask = (t_rel_series >= 0) & np.isfinite(speed_series)
+                    if mask.any():
+                        idx_cross = np.where(speed_series[mask] > thr_max)[0]
+                        if idx_cross.size > 0:
+                            k = idx_cross[0]
+                            # optional linear interpolation with previous sample for finer timing
+                            if k > 0:
+                                idx_global = np.where(mask)[0]
+                                i1 = idx_global[idx_cross[0]-1]
+                                i2 = idx_global[idx_cross[0]]
+                                t1, t2 = t_rel_series[i1], t_rel_series[i2]
+                                s1, s2 = speed_series[i1], speed_series[i2]
+                                if s2 != s1 and np.isfinite([t1, t2, s1, s2]).all():
+                                    frac = (thr_max - s1) / (s2 - s1)
+                                    frac = np.clip(frac, 0.0, 1.0)
+                                    t_cross = t1 + frac * (t2 - t1)
+                                else:
+                                    t_cross = t_rel_series[i2]
+                            else:
+                                idx_global0 = np.where(mask)[0][idx_cross[0]]
+                                t_cross = t_rel_series[idx_global0]
+                            crossing_time = t_zero + pd.Timedelta(seconds=float(t_cross))
+                            latency_val = float(t_cross)
+                if pd.isna(latency_val) and crossing_time is pd.NaT:
+                    # fallback to binned midpoint if no per-sample crossing found
+                    bins = trial_bins.get(idx_row)
+                    if bins:
+                        mids_trial = bins.get("mids")
+                        arr_trial = bins.get("arr")
+                        if mids_trial is not None and arr_trial is not None:
+                            crossing = np.where((mids_trial >= 0) & (arr_trial > thr_max))[0]
+                            if crossing.size > 0:
+                                k = crossing[0]
+                                crossing_time = t_zero + pd.Timedelta(seconds=float(mids_trial[k]))
+                                latency_val = float(mids_trial[k])
+                if pd.notna(crossing_time):
                     trial_data.at[idx_row, "speed_threshold_time"] = crossing_time
+                trial_data.at[idx_row, "latency_s"] = latency_val
 
         # Fill per-bin records with per-trial threshold (repeat per bin so one file carries both)
         if "speed_threshold_time" in trial_data.columns:
             thr_map = trial_data["speed_threshold_time"].to_dict()
+            lat_map = trial_data["latency_s"].to_dict() if "latency_s" in trial_data.columns else {}
             for rec in epoch_records:
                 rec["speed_threshold_time"] = thr_map.get(rec["trial_index"], pd.NaT)
+                rec["latency_s"] = lat_map.get(rec["trial_index"], np.nan)
 
         analysis_path = results_dir / "speed_analysis.parquet"
         try:
@@ -2129,21 +2192,21 @@ def plot_traces_with_speed_threshold(
                 pts = json.loads(pts)
             except Exception:
                 pts = None
+
+        entries = []
         if isinstance(pts, dict) and pts:
             vals = list(pts.values())
             if all(isinstance(v, dict) and "position" in v for v in vals):
                 vals = sorted(vals, key=lambda v: v.get("position", 0))
-            last = vals[-1]
-            return _safe_dt(last.get("poke_odor_end"))
-        if isinstance(pts, list) and pts:
-            last = pts[-1]
-            if isinstance(last, dict):
-                return _safe_dt(last.get("poke_odor_end"))
-        for cand in ["poke_odor_end", "last_poke_out_time", "last_poke_time"]:
-            if cand in row:
-                return _safe_dt(row.get(cand))
-        if "sequence_start" in row:
-            return _safe_dt(row.get("sequence_start"))
+            entries = vals
+        elif isinstance(pts, list) and pts:
+            entries = [p for p in pts if isinstance(p, dict)]
+
+        for poke in reversed(entries):
+            dt_val = _safe_dt(poke.get("poke_odor_end"))
+            if pd.notna(dt_val):
+                return dt_val
+
         return pd.NaT
 
     def _end_time(row, cond):
@@ -2210,6 +2273,7 @@ def plot_traces_with_speed_threshold(
         results_dir = ses / "saved_analysis_results"
         if not results_dir.exists():
             continue
+        skipped_no_poke_end = []
         analysis_path = results_dir / "speed_analysis.parquet"
 
         trial_data = None
@@ -2282,8 +2346,12 @@ def plot_traces_with_speed_threshold(
                     continue
 
                 t_zero = _last_poke_out(row)
+                if pd.isna(t_zero):
+                    trial_id = row.get("trial_id", idx) if hasattr(row, "get") else idx
+                    skipped_no_poke_end.append(trial_id)
+                    continue
                 t_end = _end_time(row, cond)
-                if pd.isna(t_zero) or pd.isna(t_end) or t_end <= t_zero:
+                if pd.isna(t_end) or t_end <= t_zero:
                     continue
 
                 start_dt = t_zero - pd.Timedelta(seconds=pre_buffer_s)
@@ -2311,6 +2379,8 @@ def plot_traces_with_speed_threshold(
                 traces[cond].append({"x": x, "y": y, "color": color, "session": date_str})
                 if marker is not None:
                     markers[cond].append({"xy": marker, "color": "black", "session": date_str})
+            if skipped_no_poke_end:
+                print(f"Warning [{date_str}]: skipped trials with no poke_odor_end in position_poke_times: {skipped_no_poke_end}")
             # done with this session
             continue
 
@@ -2334,8 +2404,12 @@ def plot_traces_with_speed_threshold(
                 continue
 
             t_zero = _last_poke_out(row)
+            if pd.isna(t_zero):
+                trial_id = row.get("trial_id", idx) if hasattr(row, "get") else idx
+                skipped_no_poke_end.append(trial_id)
+                continue
             t_end = _end_time(row, cond)
-            if pd.isna(t_zero) or pd.isna(t_end) or t_end <= t_zero:
+            if pd.isna(t_end) or t_end <= t_zero:
                 continue
 
             mids_trial, arr_trial = binned_speed_fn(tracking, t_zero, t_end, pre_buffer_s, bin_s, mode)
@@ -2357,11 +2431,15 @@ def plot_traces_with_speed_threshold(
 
         if not baseline_vals:
             print(f"No baseline window data for {date_str}; skipping session")
+            if skipped_no_poke_end:
+                print(f"Warning [{date_str}]: skipped trials with no poke_odor_end in position_poke_times: {skipped_no_poke_end}")
             continue
 
         baseline_vals_arr = np.asarray([v for v in baseline_vals if np.isfinite(v)])
         if baseline_vals_arr.size == 0:
             print(f"Baseline values not finite for {date_str}; skipping session")
+            if skipped_no_poke_end:
+                print(f"Warning [{date_str}]: skipped trials with no poke_odor_end in position_poke_times: {skipped_no_poke_end}")
             continue
         mu = float(np.nanmean(baseline_vals_arr))
         sigma = float(np.nanstd(baseline_vals_arr))
@@ -2417,6 +2495,9 @@ def plot_traces_with_speed_threshold(
             traces[cond].append({"x": x, "y": y, "color": color, "session": date_str})
             if marker is not None:
                 markers[cond].append({"xy": marker, "color": "black", "session": date_str})
+
+        if skipped_no_poke_end:
+            print(f"Warning [{date_str}]: skipped trials with no poke_odor_end in position_poke_times: {skipped_no_poke_end}")
 
     figs = {}
     for cond, label in [("rewarded", "Rewarded"), ("unrewarded", "Unrewarded"), ("fa", "False Alarms")]:
@@ -2873,3 +2954,145 @@ def plot_tortuosity_lines_overlay(
             figs[(date_str, cond)] = fig
 
     return figs
+
+
+def plot_movement_onset_latency(
+    subjid,
+    dates=None,
+    *,
+    fa_types="FA_time_in",
+    figsize=(10, 6),
+):
+    """Scatter latency to movement onset (speed threshold crossing) per condition with mean±SEM.
+
+    Uses latency_s stored in speed_analysis.parquet. If missing, trials are skipped.
+    Returns dict with per-session figs and optional combined fig when multiple dates are provided.
+    """
+
+    # FA filter
+    if isinstance(fa_types, str):
+        if fa_types.lower() == "all":
+            def fa_filter_fn(lbl):
+                return str(lbl).lower().startswith("fa_") if pd.notna(lbl) else False
+        else:
+            fa_set = {s.strip().lower() for s in re.split(r"[;,]", fa_types) if s.strip()}
+            def fa_filter_fn(lbl):
+                return str(lbl).lower() in fa_set if pd.notna(lbl) else False
+    else:
+        fa_set = {str(s).strip().lower() for s in fa_types}
+        def fa_filter_fn(lbl):
+            return str(lbl).lower() in fa_set if pd.notna(lbl) else False
+
+    subj_str = f"sub-{str(subjid).zfill(3)}"
+    subj_dirs = list(get_derivatives_root().glob(f"{subj_str}_id-*"))
+    if not subj_dirs:
+        raise FileNotFoundError(f"No subject directory found for {subj_str}")
+    subj_dir = subj_dirs[0]
+
+    ses_dirs = _filter_session_dirs(subj_dir, dates)
+    if not ses_dirs:
+        raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
+
+    def _condition_label(row):
+        rtc = str(row.get("response_time_category", "")).lower()
+        is_aborted = bool(row.get("is_aborted", False))
+        fa_label = str(row.get("fa_label", "")).lower()
+        if rtc == "rewarded" and not is_aborted:
+            return "rewarded"
+        if rtc == "unrewarded" and not is_aborted:
+            return "unrewarded"
+        if fa_label.startswith("fa_") and fa_filter_fn(fa_label):
+            return "fa"
+        return None
+
+    per_session = []
+    combined_rows = []
+
+    for ses in ses_dirs:
+        date_str = ses.name.split("_date-")[-1]
+        results_dir = ses / "saved_analysis_results"
+        if not results_dir.exists():
+            continue
+
+        # load trial_data
+        views = _load_trial_views(results_dir)
+        trial_data = views.get("trial_data", pd.DataFrame()).copy()
+        if trial_data.empty:
+            continue
+        for c in ["response_time_category", "fa_label", "is_aborted"]:
+            if c in trial_data.columns:
+                continue
+
+        # load speed_analysis
+        speed_df = _get_from_cache(subjid, date_str, kind="speed_analysis")
+        if speed_df is None:
+            path_speed = results_dir / "speed_analysis.parquet"
+            if not path_speed.exists():
+                print(f"No speed_analysis.parquet for {date_str}")
+                continue
+            speed_df = pd.read_parquet(path_speed)
+            _update_cache(subjid, [date_str], {date_str: speed_df.copy()}, kind="speed_analysis")
+        speed_df = speed_df.copy()
+
+        latencies = []
+        for idx_row, row in trial_data.iterrows():
+            cond = _condition_label(row)
+            if cond is None:
+                continue
+            bins = speed_df[speed_df["trial_index"] == idx_row]
+            if bins.empty:
+                continue
+            lat = bins["latency_s"].dropna()
+            if lat.empty:
+                continue
+            lat_val = float(lat.iloc[0])
+            latencies.append({"date": date_str, "condition": cond, "latency_s": lat_val})
+
+        if not latencies:
+            continue
+
+        df_ses = pd.DataFrame(latencies)
+        per_session.append({"date": date_str, "data": df_ses})
+        combined_rows.append(df_ses)
+
+        fig, ax = plt.subplots(figsize=figsize)
+        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+            sub = df_ses[df_ses["condition"] == cond]
+            if sub.empty:
+                continue
+            y = sub["latency_s"].astype(float)
+            x0 = {"rewarded": 0, "unrewarded": 1, "fa": 2}[cond]
+            x_jit = x0 + (np.random.rand(len(y)) - 0.5) * 0.1
+            ax.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
+            mean = y.mean()
+            sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+            ax.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
+        ax.set_xticks([0, 1, 2])
+        ax.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+        ax.set_ylabel("Latency to movement onset (s)")
+        ax.set_title(f"Movement onset latency — {date_str}")
+        fig.tight_layout()
+        per_session[-1]["fig"] = fig
+
+    combined_fig = None
+    if len(per_session) > 1 and combined_rows:
+        all_df = pd.concat(combined_rows, ignore_index=True)
+        fig, ax = plt.subplots(figsize=figsize)
+        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+            sub = all_df[all_df["condition"] == cond]
+            if sub.empty:
+                continue
+            per_ses = sub.groupby("date")["latency_s"]
+            means = per_ses.mean()
+            sems = per_ses.sem()
+            x_vals = np.arange(len(means))
+            ax.errorbar(x_vals, means.values, yerr=sems.values, fmt="o", color=color, label=f"{cond} session means")
+        ax.set_xticks(np.arange(len(all_df["date"].unique())))
+        ax.set_xticklabels(sorted(all_df["date"].unique()), rotation=45, ha="right")
+        ax.set_ylabel("Latency to movement onset (s)")
+        ax.set_title("Movement onset latency across sessions")
+        ax.legend()
+        fig.tight_layout()
+        combined_fig = fig
+
+    return {"per_session": per_session, "combined": combined_fig}
