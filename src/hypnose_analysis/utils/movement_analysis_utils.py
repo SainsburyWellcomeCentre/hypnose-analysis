@@ -1828,6 +1828,15 @@ def plot_epoch_speeds_by_condition(
         speed = np.hypot(vx, vy)
         return t_rel, speed
 
+    def _path_length(x_arr, y_arr):
+        x = np.asarray(x_arr, float)
+        y = np.asarray(y_arr, float)
+        if x.size < 2 or y.size < 2:
+            return np.nan
+        dx = np.diff(x)
+        dy = np.diff(y)
+        return float(np.sum(np.hypot(dx, dy)))
+
     per_session = []
     combined_data = {"rewarded": [], "unrewarded": [], "fa": []}
 
@@ -1857,6 +1866,18 @@ def plot_epoch_speeds_by_condition(
         tracking = tracking.loc[:, ~tracking.columns.duplicated()]
         if tracking.empty:
             continue
+
+        # Smoothed copy for path-length computation (centered rolling, ~5-frame default)
+        smooth_window_frames = 5
+        tracking_smooth = tracking.copy()
+        if smooth_window_frames > 1:
+            tracking_smooth["X"] = (
+                pd.Series(tracking_smooth["X"]).rolling(window=smooth_window_frames, center=True, min_periods=1).mean()
+            )
+            tracking_smooth["Y"] = (
+                pd.Series(tracking_smooth["Y"]).rolling(window=smooth_window_frames, center=True, min_periods=1).mean()
+            )
+        tracking_smooth = tracking_smooth.dropna(subset=["X", "Y"])
 
         views = _load_trial_views(results_dir)
         trial_data = views.get("trial_data", pd.DataFrame()).copy()
@@ -1908,6 +1929,7 @@ def plot_epoch_speeds_by_condition(
         # cache per-trial bins for threshold computation without writing arrays into the DataFrame
         trial_bins = {}
         mids_common = None
+        movement_records = []
 
         for idx_row, cond, t_zero, t_end, _ in trials_info:
             # per-trial binning for threshold/baseline
@@ -1961,6 +1983,21 @@ def plot_epoch_speeds_by_condition(
                 "arr": arr_trial,
                 "t_zero": t_zero,
             }
+
+            # Path length (smoothed) and travel time between t_zero and t_end
+            seg_path = tracking_smooth[(tracking_smooth["time"] >= t_zero) & (tracking_smooth["time"] <= t_end)]
+            path_len = _path_length(seg_path["X"], seg_path["Y"]) if len(seg_path) >= 2 else np.nan
+            travel_time_s = (t_end - t_zero).total_seconds() if pd.notna(t_end) and pd.notna(t_zero) else np.nan
+            movement_records.append({
+                "trial_index": idx_row,
+                "condition": cond,
+                "path_length_px": path_len,
+                "travel_time_s": travel_time_s,
+                "start_time": t_zero,
+                "end_time": t_end,
+                "date": date_str,
+                "subjid": subjid,
+            })
 
         conds_with_data = [c for c in ["rewarded", "unrewarded", "fa"] if epoch_series[c]]
         if not conds_with_data:
@@ -2069,6 +2106,18 @@ def plot_epoch_speeds_by_condition(
             print(f"Warning: failed to write {analysis_path.name}: {e}")
         else:
             _update_cache(subjid, [date_str], {date_str: pd.DataFrame(epoch_records)}, kind="speed_analysis")
+
+        # Persist per-trial path length and travel time
+        if movement_records:
+            movement_df = pd.DataFrame(movement_records)
+            movement_path = results_dir / "movement_analysis.parquet"
+            try:
+                movement_path.parent.mkdir(parents=True, exist_ok=True)
+                movement_df.to_parquet(movement_path, index=False)
+            except Exception as e:
+                print(f"Warning: failed to write {movement_path.name}: {e}")
+            else:
+                _update_cache(subjid, [date_str], {date_str: movement_df.copy()}, kind="movement_analysis")
 
         # Per-session violin plot
         fig_violin, ax_violin = plt.subplots(figsize=figsize)
@@ -3029,18 +3078,20 @@ def plot_tortuosity_lines_overlay(
     return figs
 
 
-def plot_movement_onset_latency(
+def plot_movement_analysis_statistics(
     subjid,
     dates=None,
     *,
     fa_types="FA_time_in",
     figsize=(10, 6),
 ):
-    """Scatter latency to movement onset (speed threshold crossing) per condition with mean±SEM.
+    """Scatter movement-related metrics per condition with mean±SEM.
 
-    Produces two figures per session when data are present:
-    - Movement onset latency relative to poke_out (uses latency_s)
-    - Animal's Consideration Time (Valve Onset - Movement Onset) (uses movement_onset_from_valve_s)
+    Produces four figures per session when data are present:
+    - Movement onset latency relative to poke_out (latency_s from speed_analysis.parquet)
+    - Animal's Consideration Time (Valve Onset - Movement Onset) (movement_onset_from_valve_s from speed_analysis.parquet)
+    - Path length traveled per trial (path_length_px from movement_analysis.parquet)
+    - Movement duration per trial (travel_time_s from movement_analysis.parquet)
 
     Returns dict with per-session figs and combined figs when multiple dates are provided.
     """
@@ -3084,6 +3135,8 @@ def plot_movement_onset_latency(
     per_session = []
     combined_rows = []
     combined_valve_rows = []
+    combined_path_rows = []
+    combined_travel_rows = []
 
     for ses in ses_dirs:
         date_str = ses.name.split("_date-")[-1]
@@ -3111,8 +3164,22 @@ def plot_movement_onset_latency(
             _update_cache(subjid, [date_str], {date_str: speed_df.copy()}, kind="speed_analysis")
         speed_df = speed_df.copy()
 
+        # load movement_analysis (path length + travel time)
+        movement_df = _get_from_cache(subjid, date_str, kind="movement_analysis")
+        if movement_df is None:
+            path_move = results_dir / "movement_analysis.parquet"
+            if path_move.exists():
+                try:
+                    movement_df = pd.read_parquet(path_move)
+                    _update_cache(subjid, [date_str], {date_str: movement_df.copy()}, kind="movement_analysis")
+                except Exception as e:
+                    print(f"Warning: failed to read movement_analysis.parquet for {date_str}: {e}")
+        movement_df = movement_df.copy() if movement_df is not None else None
+
         latencies = []
         valve_latencies = []
+        path_lengths = []
+        travel_times = []
         for idx_row, row in trial_data.iterrows():
             cond = _condition_label(row)
             if cond is None:
@@ -3130,7 +3197,23 @@ def plot_movement_onset_latency(
                 if not mov.empty:
                     valve_latencies.append({"date": date_str, "condition": cond, "movement_from_valve_s": float(mov.iloc[0])})
 
-        if not latencies and not valve_latencies:
+            if movement_df is not None:
+                mov_row = movement_df[movement_df["trial_index"] == idx_row]
+                if not mov_row.empty:
+                    if "path_length_px" in mov_row.columns and pd.notna(mov_row.iloc[0]["path_length_px"]):
+                        path_lengths.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "path_length_px": float(mov_row.iloc[0]["path_length_px"]),
+                        })
+                    if "travel_time_s" in mov_row.columns and pd.notna(mov_row.iloc[0]["travel_time_s"]):
+                        travel_times.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "travel_time_s": float(mov_row.iloc[0]["travel_time_s"]),
+                        })
+
+        if not any([latencies, valve_latencies, path_lengths, travel_times]):
             continue
 
         entry = {"date": date_str}
@@ -3183,10 +3266,60 @@ def plot_movement_onset_latency(
             fig_v.tight_layout()
             entry["fig_valve"] = fig_v
 
+        if path_lengths:
+            df_path = pd.DataFrame(path_lengths)
+            entry["path_data"] = df_path
+            combined_path_rows.append(df_path)
+
+            fig_p, ax_p = plt.subplots(figsize=figsize)
+            for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                sub = df_path[df_path["condition"] == cond]
+                if sub.empty:
+                    continue
+                y = sub["path_length_px"].astype(float)
+                x0 = {"rewarded": 0, "unrewarded": 1, "fa": 2}[cond]
+                x_jit = x0 + (np.random.rand(len(y)) - 0.5) * 0.1
+                ax_p.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
+                mean = y.mean()
+                sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+                ax_p.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
+            ax_p.set_xticks([0, 1, 2])
+            ax_p.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+            ax_p.set_ylabel("Path length (px)")
+            ax_p.set_title(f"Path length — {date_str}")
+            fig_p.tight_layout()
+            entry["fig_path"] = fig_p
+
+        if travel_times:
+            df_travel = pd.DataFrame(travel_times)
+            entry["travel_data"] = df_travel
+            combined_travel_rows.append(df_travel)
+
+            fig_t, ax_t = plt.subplots(figsize=figsize)
+            for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                sub = df_travel[df_travel["condition"] == cond]
+                if sub.empty:
+                    continue
+                y = sub["travel_time_s"].astype(float)
+                x0 = {"rewarded": 0, "unrewarded": 1, "fa": 2}[cond]
+                x_jit = x0 + (np.random.rand(len(y)) - 0.5) * 0.1
+                ax_t.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
+                mean = y.mean()
+                sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+                ax_t.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
+            ax_t.set_xticks([0, 1, 2])
+            ax_t.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+            ax_t.set_ylabel("Movement duration (s)")
+            ax_t.set_title(f"Movement duration — {date_str}")
+            fig_t.tight_layout()
+            entry["fig_travel"] = fig_t
+
         per_session.append(entry)
 
     combined_fig = None
     combined_valve_fig = None
+    combined_path_fig = None
+    combined_travel_fig = None
     if len(per_session) > 1 and combined_rows:
         all_df = pd.concat(combined_rows, ignore_index=True)
         fig, ax = plt.subplots(figsize=figsize)
@@ -3227,4 +3360,51 @@ def plot_movement_onset_latency(
         fig_v.tight_layout()
         combined_valve_fig = fig_v
 
-    return {"per_session": per_session, "combined": combined_fig, "combined_valve": combined_valve_fig}
+    if len(per_session) > 1 and combined_path_rows:
+        all_path = pd.concat(combined_path_rows, ignore_index=True)
+        fig_p, ax_p = plt.subplots(figsize=figsize)
+        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+            sub = all_path[all_path["condition"] == cond]
+            if sub.empty:
+                continue
+            per_ses = sub.groupby("date")["path_length_px"]
+            means = per_ses.mean()
+            sems = per_ses.sem()
+            x_vals = np.arange(len(means))
+            ax_p.errorbar(x_vals, means.values, yerr=sems.values, fmt="o", color=color, label=f"{cond} session means")
+        ax_p.set_xticks(np.arange(len(all_path["date"].unique())))
+        ax_p.set_xticklabels(sorted(all_path["date"].unique()), rotation=45, ha="right")
+        ax_p.set_ylabel("Path length (px)")
+        ax_p.set_title("Path length across sessions")
+        ax_p.legend()
+        fig_p.tight_layout()
+        combined_path_fig = fig_p
+
+    if len(per_session) > 1 and combined_travel_rows:
+        all_travel = pd.concat(combined_travel_rows, ignore_index=True)
+        fig_t, ax_t = plt.subplots(figsize=figsize)
+        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+            sub = all_travel[all_travel["condition"] == cond]
+            if sub.empty:
+                continue
+            per_ses = sub.groupby("date")["travel_time_s"]
+            means = per_ses.mean()
+            sems = per_ses.sem()
+            x_vals = np.arange(len(means))
+            ax_t.errorbar(x_vals, means.values, yerr=sems.values, fmt="o", color=color, label=f"{cond} session means")
+        ax_t.set_xticks(np.arange(len(all_travel["date"].unique())))
+        ax_t.set_xticklabels(sorted(all_travel["date"].unique()), rotation=45, ha="right")
+        ax_t.set_ylabel("Movement duration (s)")
+        ax_t.set_title("Movement duration across sessions")
+        ax_t.legend()
+        fig_t.tight_layout()
+        combined_travel_fig = fig_t
+
+    return {
+        "per_session": per_session,
+        "combined": combined_fig,
+        "combined_valve": combined_valve_fig,
+        "combined_path": combined_path_fig,
+        "combined_travel": combined_travel_fig,
+    }
+
