@@ -1717,6 +1717,56 @@ def plot_epoch_speeds_by_condition(
             return _safe_dt(row.get("fa_time")) or _safe_dt(row.get("sequence_end"))
         return _safe_dt(row.get("sequence_end"))
 
+    def _parse_position_entries(val):
+        """Normalize position_* collections to a list of dicts sorted by position when present."""
+        if isinstance(val, str):
+            try:
+                val = json.loads(val)
+            except Exception:
+                val = None
+
+        entries = []
+        if isinstance(val, dict) and val:
+            vals = list(val.values())
+            if all(isinstance(v, dict) and "position" in v for v in vals):
+                vals = sorted(vals, key=lambda v: v.get("position", 0))
+            entries = vals
+        elif isinstance(val, list) and val:
+            entries = [v for v in val if isinstance(v, dict)]
+        return entries
+
+    def _last_valve_start(row):
+        """Return the last valve_start that has a matching poke_odor_start for the same position.
+
+        Iterates positions from highest to lowest; requires both valve_start and poke_odor_start
+        for that position. If none meet both criteria, returns NaT.
+        """
+        pvt_entries = _parse_position_entries(row.get("position_valve_times"))
+        ppt_entries = _parse_position_entries(row.get("position_poke_times"))
+
+        poke_by_pos = {}
+        for entry in ppt_entries:
+            try:
+                pos_key = int(entry.get("position"))
+            except Exception:
+                continue
+            poke_start = _safe_dt(entry.get("poke_odor_start"))
+            if pd.notna(poke_start):
+                poke_by_pos[pos_key] = poke_start
+
+        for entry in reversed(pvt_entries):
+            try:
+                pos = int(entry.get("position"))
+            except Exception:
+                pos = None
+            valve_ts = _safe_dt(entry.get("valve_start"))
+            if pd.isna(valve_ts):
+                continue
+            if pos is not None and pos in poke_by_pos:
+                return valve_ts
+
+        return pd.NaT
+
     def _condition_label(row):
         rtc = str(row.get("response_time_category", "")).lower()
         if rtc == "rewarded" and not row.get("is_aborted", False):
@@ -1854,6 +1904,7 @@ def plot_epoch_speeds_by_condition(
         baseline_vals = []
         # store per-trial threshold times
         trial_data["speed_threshold_time"] = pd.NaT
+        trial_data["movement_onset_from_valve_s"] = np.nan
         # cache per-trial bins for threshold computation without writing arrays into the DataFrame
         trial_bins = {}
         mids_common = None
@@ -1936,57 +1987,79 @@ def plot_epoch_speeds_by_condition(
 
         if threshold and thr_max is not None:
             for idx_row, cond, t_zero, t_end, _ in trials_info:
-                # precise crossing using per-sample speed
-                t_rel_series, speed_series = _speed_series(tracking, t_zero, t_end, pre_buffer_s)
+                # Bin-gated crossing: find first bin (mean) above threshold, then refine within that bin using per-sample speed
                 crossing_time = pd.NaT
                 latency_val = np.nan
-                if t_rel_series is not None and speed_series is not None:
-                    mask = (t_rel_series >= 0) & np.isfinite(speed_series)
-                    if mask.any():
-                        idx_cross = np.where(speed_series[mask] > thr_max)[0]
-                        if idx_cross.size > 0:
-                            k = idx_cross[0]
-                            # optional linear interpolation with previous sample for finer timing
-                            if k > 0:
-                                idx_global = np.where(mask)[0]
-                                i1 = idx_global[idx_cross[0]-1]
-                                i2 = idx_global[idx_cross[0]]
-                                t1, t2 = t_rel_series[i1], t_rel_series[i2]
-                                s1, s2 = speed_series[i1], speed_series[i2]
-                                if s2 != s1 and np.isfinite([t1, t2, s1, s2]).all():
-                                    frac = (thr_max - s1) / (s2 - s1)
-                                    frac = np.clip(frac, 0.0, 1.0)
-                                    t_cross = t1 + frac * (t2 - t1)
+                movement_from_valve = np.nan
+                valve_start = _last_valve_start(trial_data.loc[idx_row]) if "position_valve_times" in trial_data.columns else pd.NaT
+
+                bins = trial_bins.get(idx_row, {})
+                mids_trial = bins.get("mids")
+                arr_trial = bins.get("arr")
+
+                # Identify first bin whose mean/max (per mode) exceeds threshold, after t=0
+                bin_idx = None
+                if mids_trial is not None and arr_trial is not None:
+                    crossing_bins = np.where((mids_trial >= 0) & (arr_trial > thr_max))[0]
+                    if crossing_bins.size > 0:
+                        bin_idx = crossing_bins[0]
+
+                if bin_idx is not None:
+                    bin_mid = float(mids_trial[bin_idx])
+                    half = bin_s / 2.0
+                    win_start = bin_mid - half
+                    win_end = bin_mid + half
+
+                    # Per-sample refinement within the bin window
+                    t_rel_series, speed_series = _speed_series(tracking, t_zero, t_end, pre_buffer_s)
+                    if t_rel_series is not None and speed_series is not None:
+                        mask = (t_rel_series >= win_start) & (t_rel_series <= win_end) & np.isfinite(speed_series)
+                        if mask.any():
+                            idx_cross = np.where(speed_series[mask] > thr_max)[0]
+                            if idx_cross.size > 0:
+                                idx_masked = idx_cross[0]
+                                idx_global = np.where(mask)[0][idx_masked]
+
+                                if idx_masked > 0:
+                                    i1 = np.where(mask)[0][idx_masked - 1]
+                                    i2 = idx_global
+                                    t1, t2 = t_rel_series[i1], t_rel_series[i2]
+                                    s1, s2 = speed_series[i1], speed_series[i2]
+                                    if s2 != s1 and np.isfinite([t1, t2, s1, s2]).all():
+                                        frac = (thr_max - s1) / (s2 - s1)
+                                        frac = np.clip(frac, 0.0, 1.0)
+                                        t_cross = t1 + frac * (t2 - t1)
+                                    else:
+                                        t_cross = t_rel_series[i2]
                                 else:
-                                    t_cross = t_rel_series[i2]
-                            else:
-                                idx_global0 = np.where(mask)[0][idx_cross[0]]
-                                t_cross = t_rel_series[idx_global0]
-                            crossing_time = t_zero + pd.Timedelta(seconds=float(t_cross))
-                            latency_val = float(t_cross)
-                if pd.isna(latency_val) and crossing_time is pd.NaT:
-                    # fallback to binned midpoint if no per-sample crossing found
-                    bins = trial_bins.get(idx_row)
-                    if bins:
-                        mids_trial = bins.get("mids")
-                        arr_trial = bins.get("arr")
-                        if mids_trial is not None and arr_trial is not None:
-                            crossing = np.where((mids_trial >= 0) & (arr_trial > thr_max))[0]
-                            if crossing.size > 0:
-                                k = crossing[0]
-                                crossing_time = t_zero + pd.Timedelta(seconds=float(mids_trial[k]))
-                                latency_val = float(mids_trial[k])
+                                    t_cross = t_rel_series[idx_global]
+
+                                crossing_time = t_zero + pd.Timedelta(seconds=float(t_cross))
+                                latency_val = float(t_cross)
+                                if pd.notna(valve_start):
+                                    movement_from_valve = (crossing_time - valve_start).total_seconds()
+
+                    # If bin mean crossed but no per-sample crossing found within window, fallback to bin midpoint
+                    if pd.isna(latency_val):
+                        crossing_time = t_zero + pd.Timedelta(seconds=float(bin_mid))
+                        latency_val = float(bin_mid)
+                        if pd.notna(valve_start):
+                            movement_from_valve = (crossing_time - valve_start).total_seconds()
+
                 if pd.notna(crossing_time):
                     trial_data.at[idx_row, "speed_threshold_time"] = crossing_time
                 trial_data.at[idx_row, "latency_s"] = latency_val
+                trial_data.at[idx_row, "movement_onset_from_valve_s"] = movement_from_valve
 
         # Fill per-bin records with per-trial threshold (repeat per bin so one file carries both)
         if "speed_threshold_time" in trial_data.columns:
             thr_map = trial_data["speed_threshold_time"].to_dict()
             lat_map = trial_data["latency_s"].to_dict() if "latency_s" in trial_data.columns else {}
+            mov_map = trial_data["movement_onset_from_valve_s"].to_dict() if "movement_onset_from_valve_s" in trial_data.columns else {}
             for rec in epoch_records:
                 rec["speed_threshold_time"] = thr_map.get(rec["trial_index"], pd.NaT)
                 rec["latency_s"] = lat_map.get(rec["trial_index"], np.nan)
+                rec["movement_onset_from_valve_s"] = mov_map.get(rec["trial_index"], np.nan)
 
         analysis_path = results_dir / "speed_analysis.parquet"
         try:
@@ -2965,8 +3038,11 @@ def plot_movement_onset_latency(
 ):
     """Scatter latency to movement onset (speed threshold crossing) per condition with mean±SEM.
 
-    Uses latency_s stored in speed_analysis.parquet. If missing, trials are skipped.
-    Returns dict with per-session figs and optional combined fig when multiple dates are provided.
+    Produces two figures per session when data are present:
+    - Movement onset latency relative to poke_out (uses latency_s)
+    - Animal's Consideration Time (Valve Onset - Movement Onset) (uses movement_onset_from_valve_s)
+
+    Returns dict with per-session figs and combined figs when multiple dates are provided.
     """
 
     # FA filter
@@ -3007,6 +3083,7 @@ def plot_movement_onset_latency(
 
     per_session = []
     combined_rows = []
+    combined_valve_rows = []
 
     for ses in ses_dirs:
         date_str = ses.name.split("_date-")[-1]
@@ -3035,6 +3112,7 @@ def plot_movement_onset_latency(
         speed_df = speed_df.copy()
 
         latencies = []
+        valve_latencies = []
         for idx_row, row in trial_data.iterrows():
             cond = _condition_label(row)
             if cond is None:
@@ -3043,38 +3121,72 @@ def plot_movement_onset_latency(
             if bins.empty:
                 continue
             lat = bins["latency_s"].dropna()
-            if lat.empty:
-                continue
-            lat_val = float(lat.iloc[0])
-            latencies.append({"date": date_str, "condition": cond, "latency_s": lat_val})
+            if not lat.empty:
+                lat_val = float(lat.iloc[0])
+                latencies.append({"date": date_str, "condition": cond, "latency_s": lat_val})
 
-        if not latencies:
+            if "movement_onset_from_valve_s" in bins.columns:
+                mov = bins["movement_onset_from_valve_s"].dropna()
+                if not mov.empty:
+                    valve_latencies.append({"date": date_str, "condition": cond, "movement_from_valve_s": float(mov.iloc[0])})
+
+        if not latencies and not valve_latencies:
             continue
 
-        df_ses = pd.DataFrame(latencies)
-        per_session.append({"date": date_str, "data": df_ses})
-        combined_rows.append(df_ses)
+        entry = {"date": date_str}
 
-        fig, ax = plt.subplots(figsize=figsize)
-        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-            sub = df_ses[df_ses["condition"] == cond]
-            if sub.empty:
-                continue
-            y = sub["latency_s"].astype(float)
-            x0 = {"rewarded": 0, "unrewarded": 1, "fa": 2}[cond]
-            x_jit = x0 + (np.random.rand(len(y)) - 0.5) * 0.1
-            ax.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
-            mean = y.mean()
-            sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
-            ax.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-        ax.set_xticks([0, 1, 2])
-        ax.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-        ax.set_ylabel("Latency to movement onset (s)")
-        ax.set_title(f"Movement onset latency — {date_str}")
-        fig.tight_layout()
-        per_session[-1]["fig"] = fig
+        if latencies:
+            df_ses = pd.DataFrame(latencies)
+            entry["data"] = df_ses
+            combined_rows.append(df_ses)
+
+            fig, ax = plt.subplots(figsize=figsize)
+            for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                sub = df_ses[df_ses["condition"] == cond]
+                if sub.empty:
+                    continue
+                y = sub["latency_s"].astype(float)
+                x0 = {"rewarded": 0, "unrewarded": 1, "fa": 2}[cond]
+                x_jit = x0 + (np.random.rand(len(y)) - 0.5) * 0.1
+                ax.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
+                mean = y.mean()
+                sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+                ax.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
+            ax.set_xticks([0, 1, 2])
+            ax.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+            ax.set_ylabel("Latency to movement onset (s)")
+            ax.set_title(f"Movement onset latency — {date_str}")
+            fig.tight_layout()
+            entry["fig"] = fig
+
+        if valve_latencies:
+            df_valve = pd.DataFrame(valve_latencies)
+            entry["valve_data"] = df_valve
+            combined_valve_rows.append(df_valve)
+
+            fig_v, ax_v = plt.subplots(figsize=figsize)
+            for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                sub = df_valve[df_valve["condition"] == cond]
+                if sub.empty:
+                    continue
+                y = sub["movement_from_valve_s"].astype(float)
+                x0 = {"rewarded": 0, "unrewarded": 1, "fa": 2}[cond]
+                x_jit = x0 + (np.random.rand(len(y)) - 0.5) * 0.1
+                ax_v.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
+                mean = y.mean()
+                sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+                ax_v.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
+            ax_v.set_xticks([0, 1, 2])
+            ax_v.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+            ax_v.set_ylabel("Animal's Consideration Time (s)")
+            ax_v.set_title(f"Animal's Consideration Time (Valve Onset - Movement Onset) — {date_str}")
+            fig_v.tight_layout()
+            entry["fig_valve"] = fig_v
+
+        per_session.append(entry)
 
     combined_fig = None
+    combined_valve_fig = None
     if len(per_session) > 1 and combined_rows:
         all_df = pd.concat(combined_rows, ignore_index=True)
         fig, ax = plt.subplots(figsize=figsize)
@@ -3095,4 +3207,24 @@ def plot_movement_onset_latency(
         fig.tight_layout()
         combined_fig = fig
 
-    return {"per_session": per_session, "combined": combined_fig}
+    if len(per_session) > 1 and combined_valve_rows:
+        all_valve = pd.concat(combined_valve_rows, ignore_index=True)
+        fig_v, ax_v = plt.subplots(figsize=figsize)
+        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+            sub = all_valve[all_valve["condition"] == cond]
+            if sub.empty:
+                continue
+            per_ses = sub.groupby("date")["movement_from_valve_s"]
+            means = per_ses.mean()
+            sems = per_ses.sem()
+            x_vals = np.arange(len(means))
+            ax_v.errorbar(x_vals, means.values, yerr=sems.values, fmt="o", color=color, label=f"{cond} session means")
+        ax_v.set_xticks(np.arange(len(all_valve["date"].unique())))
+        ax_v.set_xticklabels(sorted(all_valve["date"].unique()), rotation=45, ha="right")
+        ax_v.set_ylabel("Animal's Consideration Time (s)")
+        ax_v.set_title("Animal's Consideration Time (Valve Onset - Movement Onset) across sessions")
+        ax_v.legend()
+        fig_v.tight_layout()
+        combined_valve_fig = fig_v
+
+    return {"per_session": per_session, "combined": combined_fig, "combined_valve": combined_valve_fig}
