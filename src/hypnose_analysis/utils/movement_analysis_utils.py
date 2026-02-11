@@ -39,6 +39,7 @@ import re
 import numpy as np
 import json
 from collections import OrderedDict
+from scipy.stats import kruskal, mannwhitneyu
 
 
 def _binned_speed(tracking_df, t_zero, t_end, pre_buffer_s, bin_s, mode):
@@ -1593,26 +1594,106 @@ def plot_trial_traces_by_mode(
     return figs if len(figs) > 1 else (figs[0], axes_out[0])
 
 
-def plot_epoch_speeds_by_condition(
+def run_speed_analysis_batch(
+    subjids=None,
+    dates=None,
+    *,
+    bin_ms: int = 100,
+    pre_buffer_s: float = 1.0,
+    fa_label_filter=None,
+    mode: str = "mean",
+    threshold: bool = True,
+    threshold_alpha: float = 10.0,
+    threshold_beta: float = 10.0,
+    verbose: bool = True,
+):
+    """Run compute_speed_analysis over all available subject/date combinations.
+
+    Supports single or multiple subject IDs and date specs (list of dates or
+    inclusive (start, end) tuple). Only sessions with existing data are passed
+    to compute_speed_analysis. Returns a list of (subjid, date) processed and
+    prints a summary when verbose=True.
+    """
+
+    derivatives_dir = get_derivatives_root()
+    processed: list[tuple[int, Union[int, str]]] = []
+
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, subjids):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        if not ses_dirs:
+            if verbose:
+                print(f"[run_speed_analysis_batch] No sessions found for sub-{sid:03d} with given dates.")
+            continue
+
+        # Extract ordered unique dates from session directories
+        date_list = []
+        seen_dates = set()
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            try:
+                date_val = int(date_str) if str(date_str).isdigit() else date_str
+            except Exception:
+                date_val = date_str
+            if date_val in seen_dates:
+                continue
+            seen_dates.add(date_val)
+            date_list.append(date_val)
+
+        if not date_list:
+            if verbose:
+                print(f"[run_speed_analysis_batch] No matching dates after filtering for sub-{sid:03d}.")
+            continue
+
+        try:
+            compute_speed_analysis(
+                sid,
+                dates=date_list,
+                bin_ms=bin_ms,
+                pre_buffer_s=pre_buffer_s,
+                fa_label_filter=fa_label_filter,
+                mode=mode,
+                threshold=threshold,
+                threshold_alpha=threshold_alpha,
+                threshold_beta=threshold_beta,
+            )
+            processed.extend([(sid, d) for d in date_list])
+        except Exception as e:
+            if verbose:
+                print(f"[run_speed_analysis_batch] Failed for sub-{sid:03d}: {e}")
+
+    if verbose:
+        if processed:
+            print("[run_speed_analysis_batch] Completed speed analysis for:")
+            by_subj: dict[int, list[Union[int, str]]] = defaultdict(list)
+            for sid, d in processed:
+                by_subj[sid].append(d)
+            for sid in sorted(by_subj.keys()):
+                dates_sorted = sorted(by_subj[sid], key=lambda x: str(x))
+                dates_str = ", ".join(str(d) for d in dates_sorted)
+                print(f"  sub-{sid:03d}: {dates_str}")
+        else:
+            print("[run_speed_analysis_batch] No sessions processed.")
+
+    return processed
+
+
+def compute_speed_analysis(
     subjid,
     dates=None,
     *,
     bin_ms: int = 100,
-    pre_buffer_s: float = 0.0,
+    pre_buffer_s: float = 1.0,
     fa_label_filter=None,
-    mode: str = "max",
-    threshold: bool = False,
-    threshold_alpha: float = 6.0,
-    threshold_beta: float = 6.0,
-    figsize=(8, 5),
+    mode: str = "mean",
+    threshold: bool = True,
+    threshold_alpha: float = 10.0,
+    threshold_beta: float = 10.0,
 ):
-    """Plot cue-port speed epochs aligned to last poke-out for rewarded, unrewarded, and FA trials.
+    """Compute cue-port speed epochs aligned to last poke-out for rewarded, unrewarded, and FA trials.
 
-    For each session, builds two figures:
-      1) Violin of epoch speeds pooled by condition.
-      2) Per-trial epoch traces per condition with a session mean overlay.
-    If multiple dates are provided, also builds combined figures (one per condition)
-    showing the session-level mean trace for each session with data.
+        Handles loading data, computing speeds, binning, thresholding, and movement metrics. Writes a single
+        speed_analysis.parquet per session containing per-bin records with per-trial metrics repeated.
+        Returns the same plotting artifacts as before for backward compatibility.
 
     Parameters
     ----------
@@ -2134,15 +2215,29 @@ def plot_epoch_speeds_by_condition(
                 trial_data.at[idx_row, "latency_s"] = latency_val
                 trial_data.at[idx_row, "movement_onset_from_valve_s"] = movement_from_valve
 
-        # Fill per-bin records with per-trial threshold (repeat per bin so one file carries both)
+        # Fill per-bin records with per-trial metrics (repeat per bin so one file carries both)
         if "speed_threshold_time" in trial_data.columns:
             thr_map = trial_data["speed_threshold_time"].to_dict()
             lat_map = trial_data["latency_s"].to_dict() if "latency_s" in trial_data.columns else {}
             mov_map = trial_data["movement_onset_from_valve_s"].to_dict() if "movement_onset_from_valve_s" in trial_data.columns else {}
+            # Movement metrics per trial
+            path_map = {}
+            travel_map = {}
+            tort_map = {}
+            for rec_mov in movement_records:
+                tid = rec_mov.get("trial_index")
+                path_map[tid] = rec_mov.get("path_length_px")
+                travel_map[tid] = rec_mov.get("travel_time_s")
+                tort_map[tid] = rec_mov.get("tortuosity")
+
             for rec in epoch_records:
-                rec["speed_threshold_time"] = thr_map.get(rec["trial_index"], pd.NaT)
-                rec["latency_s"] = lat_map.get(rec["trial_index"], np.nan)
-                rec["movement_onset_from_valve_s"] = mov_map.get(rec["trial_index"], np.nan)
+                tid = rec["trial_index"]
+                rec["speed_threshold_time"] = thr_map.get(tid, pd.NaT)
+                rec["latency_s"] = lat_map.get(tid, np.nan)
+                rec["movement_onset_from_valve_s"] = mov_map.get(tid, np.nan)
+                rec["path_length_px"] = path_map.get(tid, np.nan)
+                rec["travel_time_s"] = travel_map.get(tid, np.nan)
+                rec["tortuosity"] = tort_map.get(tid, np.nan)
 
         analysis_path = results_dir / "speed_analysis.parquet"
         try:
@@ -2153,61 +2248,9 @@ def plot_epoch_speeds_by_condition(
         else:
             _update_cache(subjid, [date_str], {date_str: pd.DataFrame(epoch_records)}, kind="speed_analysis")
 
-        # Persist per-trial path length and travel time
-        if movement_records:
-            movement_df = pd.DataFrame(movement_records)
-            movement_path = results_dir / "movement_analysis.parquet"
-            try:
-                movement_path.parent.mkdir(parents=True, exist_ok=True)
-                movement_df.to_parquet(movement_path, index=False)
-            except Exception as e:
-                print(f"Warning: failed to write {movement_path.name}: {e}")
-            else:
-                _update_cache(subjid, [date_str], {date_str: movement_df.copy()}, kind="movement_analysis")
-
-        # Per-session violin plot
-        fig_violin, ax_violin = plt.subplots(figsize=figsize)
-        data = [speeds_flat[c] for c in conds_with_data]
-        ax_violin.violinplot(data, showmeans=True, showextrema=True, widths=0.8)
-        ax_violin.set_xticks(range(1, len(conds_with_data) + 1))
-        ax_violin.set_xticklabels(conds_with_data)
-        ax_violin.set_ylabel("Speed (units/s)")
-        ax_violin.set_title(f"Epoch speeds — sub {subjid}, {date_str} ({mode})")
-        fig_violin.tight_layout()
-
-        # Per-session per-trial traces with mean (one figure per condition for readability)
-        fig_traces_by_cond = {}
-        for cond in conds_with_data:
-            trials = epoch_series[cond]
-            fig_t, ax_t = plt.subplots(figsize=figsize)
-            if not trials:
-                ax_t.text(0.5, 0.5, "No trials", ha="center")
-            else:
-                mids_use = mids_common
-                if mids_use is None:
-                    mids_use = edges[:-1] + (edges[1] - edges[0]) / 2
-                for arr in trials:
-                    ax_t.plot(mids_use, arr, color="gray", alpha=0.2)
-                stack = np.vstack(trials)
-                mean_speeds = np.nanmean(stack, axis=0)
-                ax_t.plot(mids_use, mean_speeds, color="blue", linewidth=2, label="session mean")
-
-            if threshold and baseline_mean is not None:
-                ax_t.axhline(baseline_mean, color="red", linestyle="-", linewidth=1.5, label="baseline μ")
-                if thr_max is not None:
-                    ax_t.axhline(thr_max, color="#2F4F4F", linestyle="--", linewidth=1.4, label=f"max(αμ, μ+βσ), α={threshold_alpha:g}, β={threshold_beta:g}")
-
-            ax_t.set_title(f"{cond} — sub {subjid}, {date_str} ({mode})")
-            ax_t.set_xlabel("Time from last poke-out (s)")
-            ax_t.set_ylabel("Speed (units/s)")
-            ax_t.legend()
-            fig_t.tight_layout()
-            fig_traces_by_cond[cond] = fig_t
 
         per_session.append({
             "date": date_str,
-            "fig_violin": fig_violin,
-            "fig_traces": fig_traces_by_cond,
             "baseline": {
                 "mu": baseline_mean,
                 "sigma": baseline_sd,
@@ -2225,6 +2268,157 @@ def plot_epoch_speeds_by_condition(
             session_mean = np.nanmean(stack, axis=0)
             mids_combined = mids_common if mids_common is not None else (edges[:-1] + (edges[1] - edges[0]) / 2)
             combined_data[cond].append((date_str, mids_combined, session_mean))
+
+
+    return {"per_session": per_session}
+
+
+def plot_epoch_speeds_by_condition(
+    subjid,
+    dates=None,
+    *,
+    bin_ms: int = 100,
+    fa_label_filter=None,
+    mode: str = "mean",
+    threshold: bool = True,
+    threshold_alpha: float = 10.0,
+    threshold_beta: float = 10.0,
+    figsize=(8, 5),
+):
+    """Plot cue-port speed epochs from precomputed speed_analysis.parquet.
+
+    Uses outputs from compute_speed_analysis (same parameters) to build per-session, per-condition
+    per-trial traces with session mean overlay and optional threshold lines. Violin plots are omitted.
+    """
+
+    if mode not in {"max", "mean"}:
+        raise ValueError("mode must be 'max' or 'mean'")
+
+    # Normalize FA labels: accept comma-separated string or any iterable of labels (used at compute time)
+    if fa_label_filter is None:
+        fa_labels = {"fa_time_in"}
+    elif isinstance(fa_label_filter, str):
+        parts = re.split(r"[;,]", fa_label_filter)
+        fa_labels = {p.strip().lower() for p in parts if p.strip()}
+    else:
+        try:
+            fa_labels = {str(s).strip().lower() for s in fa_label_filter if str(s).strip()}
+        except TypeError:
+            fa_labels = {str(fa_label_filter).strip().lower()}
+
+    subj_str = f"sub-{str(subjid).zfill(3)}"
+    derivatives_dir = get_derivatives_root()
+    subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*") )
+    if not subj_dirs:
+        raise FileNotFoundError(f"No subject directory found for {subj_str}")
+    subj_dir = subj_dirs[0]
+
+    ses_dirs = _filter_session_dirs(subj_dir, dates)
+    if not ses_dirs:
+        raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
+
+    bin_s = bin_ms / 1000.0
+    baseline_window = (-0.15, -0.05)
+
+    per_session = []
+    combined_data = {"rewarded": [], "unrewarded": [], "fa": []}
+
+    for ses in ses_dirs:
+        date_str = ses.name.split("_date-")[-1]
+        results_dir = ses / "saved_analysis_results"
+        if not results_dir.exists():
+            continue
+
+        df_speed = _get_from_cache(subjid, date_str, kind="speed_analysis")
+        if df_speed is None:
+            path_speed = results_dir / "speed_analysis.parquet"
+            if not path_speed.exists():
+                raise FileNotFoundError(f"Missing speed_analysis.parquet for {date_str}; run compute_speed_analysis first")
+            df_speed = pd.read_parquet(path_speed)
+            _update_cache(subjid, [date_str], {date_str: df_speed.copy()}, kind="speed_analysis")
+
+        df_speed = df_speed.copy()
+        conds_with_data = [c for c in ["rewarded", "unrewarded", "fa"] if not df_speed[df_speed["condition"] == c].empty]
+        if not conds_with_data:
+            continue
+
+        # Baseline stats from stored speeds
+        baseline_mask = (df_speed["bin_mid_s"] >= baseline_window[0]) & (df_speed["bin_mid_s"] <= baseline_window[1])
+        baseline_vals = df_speed.loc[baseline_mask, "speed"].dropna().to_numpy()
+        baseline_mean = np.nanmean(baseline_vals) if baseline_vals.size else None
+        baseline_sd = np.nanstd(baseline_vals) if baseline_vals.size else None
+        thr_alpha_mu = baseline_mean * threshold_alpha if baseline_mean is not None else None
+        thr_mu_plus_beta_sigma = (
+            baseline_mean + threshold_beta * baseline_sd
+            if baseline_mean is not None and baseline_sd is not None
+            else None
+        )
+        thr_max = None
+        if threshold and baseline_mean is not None:
+            candidates = [v for v in [thr_alpha_mu, thr_mu_plus_beta_sigma] if v is not None]
+            if candidates:
+                thr_max = max(candidates)
+
+        figs_by_cond = {}
+        for cond in conds_with_data:
+            sub = df_speed[df_speed["condition"] == cond].copy()
+            if sub.empty:
+                continue
+            # Trial-wise traces
+            trials = []
+            trial_arrays = []
+            mids_all = np.sort(sub["bin_mid_s"].unique())
+            fig_t, ax_t = plt.subplots(figsize=figsize)
+
+            for tid, g in sub.groupby("trial_index"):
+                g = g.sort_values("bin_mid_s")
+                mids = g["bin_mid_s"].to_numpy(float)
+                speeds = g["speed"].to_numpy(float)
+                if mids.size and speeds.size:
+                    ax_t.plot(mids, speeds, color="gray", alpha=0.2)
+                trials.append((tid, mids, speeds))
+
+                arr_full = np.full_like(mids_all, np.nan, dtype=float)
+                mid_to_idx = {m: i for i, m in enumerate(mids_all)}
+                for m, s in zip(mids, speeds):
+                    idx = mid_to_idx.get(m)
+                    if idx is not None:
+                        arr_full[idx] = s
+                trial_arrays.append(arr_full)
+
+            if trial_arrays:
+                stack = np.vstack(trial_arrays)
+                mean_speeds = np.nanmean(stack, axis=0)
+                ax_t.plot(mids_all, mean_speeds, color="blue", linewidth=2, label="session mean")
+
+            if threshold and baseline_mean is not None:
+                ax_t.axhline(baseline_mean, color="red", linestyle="-", linewidth=1.5, label="baseline μ")
+                if thr_max is not None:
+                    ax_t.axhline(thr_max, color="#2F4F4F", linestyle="--", linewidth=1.4, label=f"max(αμ, μ+βσ), α={threshold_alpha:g}, β={threshold_beta:g}")
+
+            ax_t.set_title(f"{cond} — sub {subjid}, {date_str} ({mode})")
+            ax_t.set_xlabel("Time from last poke-out (s)")
+            ax_t.set_ylabel("Speed (units/s)")
+            ax_t.legend()
+            fig_t.tight_layout()
+            figs_by_cond[cond] = fig_t
+
+            if trial_arrays:
+                combined_data[cond].append((date_str, mids_all, np.nanmean(np.vstack(trial_arrays), axis=0)))
+
+        per_session.append({
+            "date": date_str,
+            "fig_traces": figs_by_cond,
+            "baseline": {
+                "mu": baseline_mean,
+                "sigma": baseline_sd,
+                "alpha": threshold_alpha,
+                "beta": threshold_beta,
+                "alpha_mu": thr_alpha_mu,
+                "mu_plus_beta_sigma": thr_mu_plus_beta_sigma,
+                "max_alpha_mu_mu_plus_beta_sigma": thr_max,
+            } if threshold else None,
+        })
 
     combined_figs = {}
     if len(per_session) > 1:
@@ -2266,7 +2460,7 @@ def plot_traces_with_speed_threshold(
     speed exceeds vthresh = max(alpha*mu, mu+beta*sigma), where mu/sigma come from the pooled
     baseline window [-0.15s, -0.05s] relative to last poke-out across all trials in the session.
     If a parquet with `speed_threshold_time` exists for the session (written by
-    plot_epoch_speeds_by_condition), it is loaded (and cached) and used directly; otherwise the
+    compute_speed_analysis), it is loaded (and cached) and used directly; otherwise the
     threshold is recomputed and the result is saved + cached.
 
     Parameters
@@ -2895,9 +3089,9 @@ def plot_movement_analysis_statistics(
     Produces five figures per session when data are present:
     - Movement onset latency relative to poke_out (latency_s from speed_analysis.parquet)
     - Animal's Consideration Time (Valve Onset - Movement Onset) (movement_onset_from_valve_s from speed_analysis.parquet)
-    - Path length traveled per trial (path_length_px from movement_analysis.parquet)
-    - Movement duration per trial (travel_time_s from movement_analysis.parquet)
-    - Tortuosity per trial (tortuosity from movement_analysis.parquet)
+    - Path length traveled per trial (path_length_px from speed_analysis.parquet)
+    - Movement duration per trial (travel_time_s from speed_analysis.parquet)
+    - Tortuosity per trial (tortuosity from speed_analysis.parquet)
 
     Returns dict with per-session figs and combined figs when multiple dates are provided.
     """
@@ -2937,6 +3131,81 @@ def plot_movement_analysis_statistics(
         if fa_label.startswith("fa_") and fa_filter_fn(fa_label):
             return "fa"
         return None
+
+    def _kw_mwu_by_group(df, value_col, group_col="condition", min_pair_n=5):
+        """Run Kruskal-Wallis across groups, then pairwise Mann-Whitney U with Holm correction if KW is significant.
+
+        Returns dict with keys:
+          - kruskal: {"stat": H, "p": p, "n_per_group": {...}, "groups": [...]} or None
+          - pairwise: list of {g1, g2, n1, n2, u_stat, p_raw, p_corr} (only if KW significant and n>=min_pair_n in both).
+        """
+        if df is None or df.empty or value_col not in df.columns or group_col not in df.columns:
+            return {"kruskal": None, "pairwise": []}
+
+        clean_df = df[[group_col, value_col]].dropna()
+        clean_df = clean_df[np.isfinite(clean_df[value_col].astype(float))]
+        if clean_df.empty:
+            return {"kruskal": None, "pairwise": []}
+
+        groups = {}
+        for g, sub in clean_df.groupby(group_col):
+            vals = sub[value_col].astype(float).to_numpy()
+            if vals.size > 0:
+                groups[g] = vals
+
+        if len(groups) < 2:
+            return {"kruskal": None, "pairwise": []}
+
+        # Kruskal-Wallis
+        try:
+            kw_stat, kw_p = kruskal(*groups.values())
+        except Exception:
+            return {"kruskal": None, "pairwise": []}
+
+        kruskal_res = {
+            "stat": float(kw_stat),
+            "p": float(kw_p),
+            "n_per_group": {k: int(len(v)) for k, v in groups.items()},
+            "groups": list(groups.keys()),
+        }
+
+        # Pairwise only if significant
+        pairwise = []
+        if kw_p < 0.05:
+            pairs = [("rewarded", "unrewarded"), ("rewarded", "fa"), ("unrewarded", "fa")]
+            raw_ps = []
+            stats_tmp = []
+            for g1, g2 in pairs:
+                v1 = groups.get(g1)
+                v2 = groups.get(g2)
+                n1 = len(v1) if v1 is not None else 0
+                n2 = len(v2) if v2 is not None else 0
+                if v1 is None or v2 is None or n1 < min_pair_n or n2 < min_pair_n:
+                    continue
+                try:
+                    u_stat, p_raw = mannwhitneyu(v1, v2, alternative="two-sided")
+                except Exception:
+                    continue
+                raw_ps.append(p_raw)
+                stats_tmp.append({"g1": g1, "g2": g2, "n1": n1, "n2": n2, "u_stat": float(u_stat), "p_raw": float(p_raw)})
+
+            # Holm-Bonferroni on the collected raw p-values
+            m = len(raw_ps)
+            if m > 0:
+                order = np.argsort(raw_ps)
+                adjusted = np.empty(m)
+                max_adj = 0.0
+                for rank, idx in enumerate(order):
+                    adj = raw_ps[idx] * (m - rank)
+                    adj = min(adj, 1.0)
+                    max_adj = max(max_adj, adj) # this should enfore monotonicity, as each p_corr should be >= the previous one
+                    adjusted[idx] = max_adj
+                # map back
+                for i, entry in enumerate(stats_tmp):
+                    entry["p_corr"] = float(adjusted[i])
+                    pairwise.append(entry)
+
+        return {"kruskal": kruskal_res, "pairwise": pairwise}
 
     per_session = []
     combined_rows = []
@@ -2987,18 +3256,6 @@ def plot_movement_analysis_statistics(
             _update_cache(subjid, [date_str], {date_str: speed_df.copy()}, kind="speed_analysis")
         speed_df = speed_df.copy()
 
-        # load movement_analysis (path length + travel time)
-        movement_df = _get_from_cache(subjid, date_str, kind="movement_analysis")
-        if movement_df is None:
-            path_move = results_dir / "movement_analysis.parquet"
-            if path_move.exists():
-                try:
-                    movement_df = pd.read_parquet(path_move)
-                    _update_cache(subjid, [date_str], {date_str: movement_df.copy()}, kind="movement_analysis")
-                except Exception as e:
-                    print(f"Warning: failed to read movement_analysis.parquet for {date_str}: {e}")
-        movement_df = movement_df.copy() if movement_df is not None else None
-
         latencies = []
         valve_latencies = []
         path_lengths = []
@@ -3021,27 +3278,30 @@ def plot_movement_analysis_statistics(
                 if not mov.empty:
                     valve_latencies.append({"date": date_str, "condition": cond, "movement_from_valve_s": float(mov.iloc[0])})
 
-            if movement_df is not None:
-                mov_row = movement_df[movement_df["trial_index"] == idx_row]
-                if not mov_row.empty:
-                    if "path_length_px" in mov_row.columns and pd.notna(mov_row.iloc[0]["path_length_px"]):
-                        path_lengths.append({
-                            "date": date_str,
-                            "condition": cond,
-                            "path_length_px": float(mov_row.iloc[0]["path_length_px"]),
-                        })
-                    if "travel_time_s" in mov_row.columns and pd.notna(mov_row.iloc[0]["travel_time_s"]):
-                        travel_times.append({
-                            "date": date_str,
-                            "condition": cond,
-                            "travel_time_s": float(mov_row.iloc[0]["travel_time_s"]),
-                        })
-                    if "tortuosity" in mov_row.columns and pd.notna(mov_row.iloc[0]["tortuosity"]):
-                        tortuosities.append({
-                            "date": date_str,
-                            "condition": cond,
-                            "tortuosity": float(mov_row.iloc[0]["tortuosity"]),
-                        })
+            if "path_length_px" in bins.columns:
+                pl = bins["path_length_px"].dropna()
+                if not pl.empty:
+                    path_lengths.append({
+                        "date": date_str,
+                        "condition": cond,
+                        "path_length_px": float(pl.iloc[0]),
+                    })
+            if "travel_time_s" in bins.columns:
+                tt = bins["travel_time_s"].dropna()
+                if not tt.empty:
+                    travel_times.append({
+                        "date": date_str,
+                        "condition": cond,
+                        "travel_time_s": float(tt.iloc[0]),
+                    })
+            if "tortuosity" in bins.columns:
+                tor = bins["tortuosity"].dropna()
+                if not tor.empty:
+                    tortuosities.append({
+                        "date": date_str,
+                        "condition": cond,
+                        "tortuosity": float(tor.iloc[0]),
+                    })
 
         if not any([latencies, valve_latencies, path_lengths, travel_times, tortuosities]):
             continue
@@ -3270,6 +3530,39 @@ def plot_movement_analysis_statistics(
         fig_to.tight_layout()
         combined_tortuosity_fig = fig_to
 
+    # Statistical summaries across all pooled sessions/trials (by condition)
+    stats_summary = {}
+    stats_summary["latency_s"] = _kw_mwu_by_group(pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame(), "latency_s")
+    stats_summary["movement_from_valve_s"] = _kw_mwu_by_group(pd.concat(combined_valve_rows, ignore_index=True) if combined_valve_rows else pd.DataFrame(), "movement_from_valve_s")
+    stats_summary["path_length_px"] = _kw_mwu_by_group(pd.concat(combined_path_rows, ignore_index=True) if combined_path_rows else pd.DataFrame(), "path_length_px")
+    stats_summary["travel_time_s"] = _kw_mwu_by_group(pd.concat(combined_travel_rows, ignore_index=True) if combined_travel_rows else pd.DataFrame(), "travel_time_s")
+    stats_summary["tortuosity"] = _kw_mwu_by_group(pd.concat(combined_tortuosity_rows, ignore_index=True) if combined_tortuosity_rows else pd.DataFrame(), "tortuosity")
+
+    # Print statistical summary
+    print("\n" + "="*60)
+    print("STATISTICAL SUMMARY (Kruskal-Wallis + Pairwise Mann-Whitney U with Holm-Bonferroni correction)")
+    print("="*60)
+
+    for variable, results in stats_summary.items():
+        if results["kruskal"] is None:
+            print(f"{variable}: No data")
+            continue
+        
+        kw_p = results["kruskal"]["p"]
+        print(f"\n{variable}: Kruskal-Wallis: p = {kw_p:.4f}")
+        
+        # Only print pairwise comparisons if KW is significant
+        if kw_p < 0.05 and results["pairwise"]:
+            for comparison in results["pairwise"]:
+                g1 = comparison["g1"]
+                g2 = comparison["g2"]
+                p_corr = comparison["p_corr"]
+                print(f"      {g1.capitalize()} vs {g2.capitalize()}: p = {p_corr:.4f} (corrected)")
+        elif kw_p >= 0.05:
+            print("      (not significant)")
+
+    print("\n" + "="*60 + "\n")
+
     return {
         "per_session": per_session,
         "combined": combined_fig,
@@ -3277,5 +3570,6 @@ def plot_movement_analysis_statistics(
         "combined_path": combined_path_fig,
         "combined_travel": combined_travel_fig,
         "combined_tortuosity": combined_tortuosity_fig,
+        "stats": stats_summary,
     }
 
