@@ -1747,6 +1747,15 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         position_poke_times = {}
         prior_presentations = []
 
+        # Collapse consecutive repeats of the same odor but keep non-consecutive re-entries
+        dedup_events: list[dict] = []
+        for ev in trial_valve_events:
+            if dedup_events and dedup_events[-1]['odor_name'] == ev['odor_name']:
+                # Keep only the latest activation in a consecutive block
+                dedup_events[-1] = ev
+            else:
+                dedup_events.append(ev)
+
         # Position 1: last individual activation of first odor
         if trial_valve_events:
             first_odor_valve = trial_valve_events[0]['valve_key']
@@ -1771,22 +1780,14 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                     for e in first_odor_activations[:-1]
                 ]
 
-        # Positions 2- max index: Keep ONLY the LAST occurrence of each new odor
-        # (Don't merge consecutive events with same valve_key, just track the last one)
-        odor_to_pos = {}
+        # Positions 2..: assign sequentially from the deduplicated (consecutive-collapsed) events
         next_pos = 2
-        
-        for event in trial_valve_events[len(first_odor_activations if trial_valve_events else []):]:
-            odor = event['odor_name']
-            
-            # If we haven't seen this odor yet, assign it a position
-            if odor not in odor_to_pos and next_pos <= max_positions:
-                odor_to_pos[odor] = next_pos
-                next_pos += 1
-            
-            # If this odor has a position, track it (will be overwritten by later occurrences)
-            if odor in odor_to_pos:
-                position_locations[odor_to_pos[odor]] = event
+
+        for event in dedup_events[1:]:
+            if next_pos > max_positions:
+                break
+            position_locations[next_pos] = event
+            next_pos += 1
 
         # Valve timing per position
         for position in range(1, max_positions + 1):
@@ -1884,25 +1885,18 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_end = trial['sequence_end']
         odor_sequence, valve_activations = get_trial_valve_sequence(trial_start, trial_end)
 
-        odor_to_pos = {}
-        next_pos = 1
-        positions = []
-        for ev in valve_activations:
-            od = ev['odor_name']
-            if od not in odor_to_pos and next_pos <= max_positions:
-                odor_to_pos[od] = next_pos
-                next_pos += 1
-            positions.append(odor_to_pos.get(od))
-
         position_valve_times, position_poke_times = analyze_trial_valve_and_poke_times(valve_activations)
 
-        ordered_positions = sorted(position_valve_times.keys())
+        valid_positions = [
+            pos for pos in sorted(position_valve_times.keys())
+            if position_poke_times.get(pos) and position_poke_times[pos].get('poke_time_ms', 0.0) > 0.0
+        ]
 
-        num_positions = len(ordered_positions)
+        num_positions = len(valid_positions)
         last_event_index = num_positions - 1 if num_positions else None
 
         presentations = []
-        for idx_in_trial, pos in enumerate(ordered_positions):
+        for idx_in_trial, pos in enumerate(valid_positions):
             valve_info = position_valve_times.get(pos) or {}
             poke_info = position_poke_times.get(pos) or {}
             presentations.append({
@@ -1949,7 +1943,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
         final_odor_sequence = [
             (position_valve_times[pos] or {}).get('odor_name')
-            for pos in ordered_positions
+            for pos in valid_positions
             if position_valve_times.get(pos) is not None
         ]
 
@@ -3303,39 +3297,40 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
         if pd.isna(t_start) or pd.isna(t_end) or t_start is None or t_end is None:
             continue
 
-        # Extract valve events and odor sequence
-        evs = trial_valve_events(t_start, t_end)
-        odor_sequence = [e['odor_name'] for e in evs]
+        # Extract valve events (collapse consecutive repeats) and odor sequence
+        evs_raw = trial_valve_events(t_start, t_end)
+        evs: list[dict] = []
+        for ev in evs_raw:
+            if evs and evs[-1]['odor_name'] == ev['odor_name']:
+                evs[-1] = ev  # keep only the latest activation in a consecutive block
+            else:
+                evs.append(ev)
 
-        # Map first-seen odor to position 1.. max index
-        odor_to_pos = {}
-        next_pos = 1
-        positions = []
-        for e in evs:
-            od = e['odor_name']
-            if od not in odor_to_pos and next_pos <= max_positions:
-                odor_to_pos[od] = next_pos
-                next_pos += 1
-            positions.append(odor_to_pos.get(od))
+        # Assign sequential positions up to max_positions
+        capped_evs: list[dict] = []
+        positions: list[int] = []
+        for ev in evs:
+            if len(capped_evs) >= max_positions:
+                break
+            capped_evs.append(ev)
+            positions.append(len(positions) + 1)
+        evs = capped_evs
 
-        # Collect ALL presentations with poke/valve timings
-        presentations_all = []
-        position_valve_times = {}
-        position_poke_times = {}
+        # Collect presentations (only those with pokes are considered valid)
+        presentations_all: list[dict] = []
+        position_valve_times: dict[int, dict] = {}
+        position_poke_times: dict[int, dict] = {}
 
         for idx_in_trial, (e, pos) in enumerate(zip(evs, positions)):
-            if not isinstance(pos, (int, np.integer)):
-                continue
             valve_start = e['start_time']
             valve_end = e['end_time']
             valve_dur_ms = (valve_end - valve_start).total_seconds() * 1000.0
             required_min_ms = float(resolve_min_sampling_time_ms(e['odor_name']))
 
-            # Poke summary within valve window (merge gaps ≤ sample_offset_time_ms)
             psum = window_poke_summary(valve_start, valve_end)
+            has_poke = float(psum.get('poke_time_ms', 0.0)) > 0.0
 
-            # Save full presentation record
-            presentations_all.append({
+            pres_entry = {
                 'index_in_trial': idx_in_trial,
                 'position': int(pos),
                 'odor_name': e['odor_name'],
@@ -3345,74 +3340,36 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
                 'poke_time_ms': float(psum.get('poke_time_ms', 0.0)),
                 'poke_first_in': psum.get('poke_first_in'),
                 'required_min_sampling_time_ms': required_min_ms,
-            })
-
-            # Keep last presentation per position for backward-compatibility
-            position_valve_times[int(pos)] = {
-                'position': int(pos),
-                'odor_name': e['odor_name'],
-                'valve_start': valve_start,
-                'valve_end': valve_end,
-                'valve_duration_ms': float(valve_dur_ms),
-                'required_min_sampling_time_ms': required_min_ms,
+                'has_poke': has_poke,
             }
-            psum_pos = dict(psum)
-            psum_pos['odor_name'] = e['odor_name']
-            psum_pos['required_min_sampling_time_ms'] = required_min_ms
-            position_poke_times[int(pos)] = psum_pos
+            presentations_all.append(pres_entry)
 
-        # Last relevant odor (ignore < sample_offset_time_ms)
+            if has_poke:
+                position_valve_times[int(pos)] = {
+                    'position': int(pos),
+                    'odor_name': e['odor_name'],
+                    'valve_start': valve_start,
+                    'valve_end': valve_end,
+                    'valve_duration_ms': float(valve_dur_ms),
+                    'required_min_sampling_time_ms': required_min_ms,
+                }
+                psum_pos = dict(psum)
+                psum_pos['odor_name'] = e['odor_name']
+                psum_pos['required_min_sampling_time_ms'] = required_min_ms
+                position_poke_times[int(pos)] = psum_pos
+
+        presentations_valid = [p for p in presentations_all if p.get('has_poke')]
+        odor_sequence = [p['odor_name'] for p in presentations_valid]
+
+        # Last relevant odor: must have a poke and meet duration threshold
         last_idx = None
-        for i in range(len(evs) - 1, -1, -1):
-            dur_ms = (evs[i]['end_time'] - evs[i]['start_time']).total_seconds() * 1000.0
-            if dur_ms >= sample_offset_time_ms:
+        for i in range(len(presentations_valid) - 1, -1, -1):
+            if presentations_valid[i].get('valve_duration_ms', 0.0) >= sample_offset_time_ms:
                 last_idx = i
                 break
 
-        for pres_entry in presentations_all:
-            pres_entry['is_last_event'] = last_idx is not None and pres_entry.get('index_in_trial') == last_idx
-
-        # Map first-seen odor to position 1.. max index
-        odor_to_pos = {}
-        next_pos = 1
-        positions = []
-        for e in evs:
-            od = e['odor_name']
-            if od not in odor_to_pos and next_pos <= max_positions:
-                odor_to_pos[od] = next_pos
-                next_pos += 1
-            positions.append(odor_to_pos.get(od))
-
-        # position_valve_times and position_poke_times (last presentation per position within trial)
-        position_valve_times = {}
-        position_poke_times = {}
-        for e, pos in zip(evs, positions):
-            if not isinstance(pos, (int, np.integer)):
-                continue
-            valve_start = e['start_time']; valve_end = e['end_time']
-            valve_dur_ms = (valve_end - valve_start).total_seconds() * 1000.0
-            required_min_ms = float(resolve_min_sampling_time_ms(e['odor_name']))
-            # keep the last presentation per position
-            position_valve_times[pos] = {
-                'position': pos,
-                'odor_name': e['odor_name'],
-                'valve_start': valve_start,
-                'valve_end': valve_end,
-                'valve_duration_ms': valve_dur_ms,
-                'required_min_sampling_time_ms': required_min_ms
-            }
-            psum = window_poke_summary(valve_start, valve_end)
-            psum['odor_name'] = e['odor_name']
-            psum['required_min_sampling_time_ms'] = required_min_ms
-            position_poke_times[pos] = psum
-
-        # Last relevant odor (ignore < sample_offset_time_ms)
-        last_idx = None
-        for i in range(len(evs) - 1, -1, -1):
-            dur_ms = (evs[i]['end_time'] - evs[i]['start_time']).total_seconds() * 1000.0
-            if dur_ms >= sample_offset_time_ms:
-                last_idx = i
-                break
+        for idx, pres_entry in enumerate(presentations_valid):
+            pres_entry['is_last_event'] = last_idx is not None and idx == last_idx
 
         last_odor_name = None
         last_odor_pos = None
@@ -3420,16 +3377,13 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
         last_odor_poke_ms = 0.0
         last_required_min_ms = float('nan')
 
-        if last_idx is not None:
-            last_ev = evs[last_idx]
-            last_odor_name = last_ev['odor_name']
-            last_odor_pos = positions[last_idx]
-            last_valve_dur_ms = (last_ev['end_time'] - last_ev['start_time']).total_seconds() * 1000.0
+        if last_idx is not None and presentations_valid:
+            last_pres = presentations_valid[last_idx]
+            last_odor_name = last_pres.get('odor_name')
+            last_odor_pos = last_pres.get('position')
+            last_valve_dur_ms = float(last_pres.get('valve_duration_ms', 0.0) or 0.0)
+            last_odor_poke_ms = float(last_pres.get('poke_time_ms', 0.0) or 0.0)
             last_required_min_ms = float(resolve_min_sampling_time_ms(last_odor_name))
-
-            # Authoritative: poke time strictly within [valve_start, valve_end]
-            psum_last = window_poke_summary(last_ev['start_time'], last_ev['end_time'])
-            last_odor_poke_ms = float(psum_last.get('poke_time_ms', 0.0))
 
         # Abortion type
         abortion_type = (
@@ -3500,7 +3454,7 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
             'sequence_start': t_start,
             'sequence_end': t_end,
             'odor_sequence': odor_sequence,
-            'presentations': presentations_all,     
+            'presentations': presentations_valid,
             'last_event_index': last_idx,            
             'position_valve_times': position_valve_times,
             'position_poke_times': position_poke_times,
@@ -5914,250 +5868,6 @@ def batch_analyze_sessions(
     return results
 
 # ========================= Further functions / miscillaneous =========================
-
-
-def cut_video(subjid, date, start_time, end_time, index=None, fps=30, show_odor_overlay=True):
-    """
-    Cut a video snippet for a subject and date, given start and end time (HH:MM:SS.s).
-    """
-    base_path = get_rawdata_root()
-    subjid_str = f"sub-{str(subjid).zfill(3)}"
-    date_str = str(date)
-    subject_dirs = list(base_path.glob(f"{subjid_str}_id-*"))
-    if not subject_dirs:
-        raise FileNotFoundError(f"No subject directory found for {subjid_str}")
-    subject_dir = subject_dirs[0]
-    session_dirs = list(subject_dir.glob(f"ses-*_date-{date_str}"))
-    if not session_dirs:
-        raise FileNotFoundError(f"No session found for date {date_str}")
-    session_dir = session_dirs[0]
-    behav_dir = session_dir / "behav"
-    experiment_dirs = sorted([d for d in behav_dir.iterdir() if d.is_dir() and re.match(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', d.name)])
-
-    start_dt = pd.to_datetime(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]} {start_time}")
-    end_dt = pd.to_datetime(f"{date_str[:4]}-{date_str[4:6]}-{date_str[6:]} {end_time}")
-    uk_tz = zoneinfo.ZoneInfo("Europe/London")
-    
-    # Localize start and end times to UK timezone
-    if start_dt.tz is None:
-        start_dt = start_dt.tz_localize(uk_tz)
-    if end_dt.tz is None:
-        end_dt = end_dt.tz_localize(uk_tz)
-
-    # Find experiment folder
-    if index is not None:
-        if index >= len(experiment_dirs) or index < 0:
-            raise IndexError(f"Index {index} out of range")
-        root = experiment_dirs[index]
-    else:
-        root = None
-        for exp_dir in experiment_dirs:
-            streams = load_all_streams(exp_dir, verbose=False)
-            vm = streams['video_data']
-            # Ensure video_meta is tz-aware for comparison
-            if vm.index.tz is None:
-                vm.index = vm.index.tz_localize(uk_tz)
-            fiw = vm[(vm.index >= start_dt) & (vm.index <= end_dt)]
-            if not fiw.empty:
-                root = exp_dir
-                break
-        if root is None:
-            print("No frames found in the requested time window")
-            return None
-
-    video_dir = root / "VideoData"
-    streams = load_all_streams(root, verbose=False)
-    video_meta = streams['video_data']
-    
-    # Ensure video_meta index is tz-aware
-    if video_meta.index.tz is None:
-        video_meta.index = video_meta.index.tz_localize(uk_tz)
-    
-    frames_in_window = video_meta[(video_meta.index >= start_dt) & (video_meta.index <= end_dt)]
-    
-    frame_col = [c for c in frames_in_window.columns if 'frame' in c.lower()][0]
-    frame_indices = frames_in_window[frame_col].tolist()
-    
-    avi_files = sorted([f for f in video_dir.glob("*.avi") if not f.name.startswith("._")])
-    if not avi_files:
-        print("No valid AVI files found")
-        return None
-    
-    # ============ Load and offset odor valve data ============
-    odor_valve_times = {}
-    
-    if show_odor_overlay:
-        try:
-            behavior_reader = harp.create_reader(str(BEHAVIOR_SCHEMA_PATH), epoch=harp.REFERENCE_EPOCH)
-            olf_reader = harp.create_reader(str(OLFACTOMETER_SCHEMA_PATH), epoch=harp.REFERENCE_EPOCH)
-            
-            # Compute the real-time offset
-            offset = pd.Timedelta(0)
-            try:
-                heartbeat_df = load(behavior_reader.TimestampSeconds, root / "Behavior")
-                if not heartbeat_df.empty:
-                    heartbeat_df = heartbeat_df.reset_index()
-                
-                m = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', root.name)
-                if m:
-                    real_time_str = m.group(0)
-                    real_time_ref_utc = datetime.strptime(real_time_str, '%Y-%m-%dT%H-%M-%S')
-                    real_time_ref_utc = real_time_ref_utc.replace(tzinfo=timezone.utc)
-                    real_time_ref = real_time_ref_utc.astimezone(uk_tz)
-                    
-                    if 'Time' in heartbeat_df.columns and len(heartbeat_df) > 0:
-                        heartbeat_df['Time'] = pd.to_datetime(heartbeat_df['Time'], errors='coerce')
-                        start_time_dt = heartbeat_df['Time'].iloc[0]
-                        if isinstance(start_time_dt, pd.Timestamp):
-                            start_time_dt = start_time_dt.to_pydatetime()
-                        if start_time_dt.tzinfo is None:
-                            start_time_dt = start_time_dt.replace(tzinfo=uk_tz)
-                        offset = real_time_ref - start_time_dt
-                        print(f"[Odor Overlay] Computed offset: {offset}")
-            except Exception as e:
-                print(f"[Odor Overlay] Warning: Could not compute offset: {e}")
-            
-            # Load valves with offset
-            def _load_and_offset(reader, subfolder):
-                try:
-                    df = load(reader, root / subfolder)
-                    if df is None or df.empty:
-                        return None
-                    if 'Time' in df.columns:
-                        df = df.set_index('Time')
-                    # Apply offset
-                    df.index = df.index + offset
-                    # Localize to UK timezone
-                    if df.index.tz is None:
-                        df.index = df.index.tz_localize(uk_tz)
-                    else:
-                        df.index = df.index.tz_convert(uk_tz)
-                    return df
-                except Exception as e:
-                    print(f"[Odor Overlay] Error loading {subfolder}: {e}")
-                    return None
-            
-            valves_0 = _load_and_offset(olf_reader.OdorValveState, "Olfactometer0")
-            valves_1 = _load_and_offset(olf_reader.OdorValveState, "Olfactometer1")
-            
-            odor_map = load_odor_mapping(root, verbose=False)
-            valve_to_odor = odor_map.get('valve_to_odor', {})
-            
-            # Build active_odors_by_time
-            active_odors_by_time = {}
-            
-            for olf_id, valve_df in [(0, valves_0), (1, valves_1)]:
-                if valve_df is None or valve_df.empty:
-                    continue
-                
-                for i, valve_col in enumerate(valve_df.columns):
-                    valve_key = f"{olf_id}{i}"
-                    odor_name = valve_to_odor.get(valve_key)
-                    
-                    if not odor_name or odor_name.lower() == 'purge':
-                        continue
-                    
-                    valve_series = valve_df[valve_col].astype(bool)
-                    rises = valve_series & ~valve_series.shift(1, fill_value=False)
-                    falls = ~valve_series & valve_series.shift(1, fill_value=False)
-                    
-                    rise_times = valve_series.index[rises].tolist()
-                    fall_times = valve_series.index[falls].tolist()
-                    
-                    j = 0
-                    for rise_t in rise_times:
-                        while j < len(fall_times) and fall_times[j] <= rise_t:
-                            j += 1
-                        fall_t = fall_times[j] if j < len(fall_times) else video_meta.index[-1]
-                        
-                        interval_times = video_meta.index[(video_meta.index >= rise_t) & (video_meta.index <= fall_t)]
-                        for t in interval_times:
-                            if t not in active_odors_by_time:
-                                active_odors_by_time[t] = []
-                            if odor_name not in active_odors_by_time[t]:
-                                active_odors_by_time[t].append(odor_name)
-            
-            print(f"[Odor Overlay] Built map with {len(active_odors_by_time)} odor time points")
-            
-            # Map frames to odors
-            for frame_idx, frame_time in zip(frames_in_window[frame_col].tolist(), frames_in_window.index):
-                if active_odors_by_time:
-                    closest_time = min(active_odors_by_time.keys(), 
-                                     key=lambda t: abs((t - frame_time).total_seconds()),
-                                     default=None)
-                    
-                    if closest_time and abs((closest_time - frame_time).total_seconds()) < 1.0:
-                        odor_valve_times[frame_idx] = active_odors_by_time[closest_time]
-            
-            print(f"[Odor Overlay] Mapped {len(odor_valve_times)} frames to odor data")
-        
-        except Exception as e:
-            print(f"[Odor Overlay] ERROR: {e}")
-            traceback.print_exc()
-            show_odor_overlay = False
-    
-    # ============ Load video frames ============
-    images = []
-    frame_numbers = []
-    
-    for video_file in avi_files:
-        print(f"Reading from: {video_file}")
-        cap = cv2.VideoCapture(str(video_file))
-        if not cap.isOpened():
-            continue
-        
-        images = []
-        frame_numbers = []
-        for idx in frame_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
-            ret, frame = cap.read()
-            if ret:
-                images.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-                frame_numbers.append(idx)
-        
-        cap.release()
-        
-        if images:
-            print(f"Successfully read {len(images)} frames")
-            break
-    
-    if not images:
-        print("No frames extracted")
-        return None
-    
-    # ============ Add odor overlay ============
-    if show_odor_overlay and odor_valve_times:
-        print(f"Adding odor overlay to {len(images)} frames")
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        
-        for i, (frame, frame_num) in enumerate(zip(images, frame_numbers)):
-            active_odors = odor_valve_times.get(frame_num, [])
-            
-            if active_odors:
-                odor_text = " | ".join(sorted(set(active_odors)))
-                height, width = frame.shape[:2]
-                text_size = cv2.getTextSize(odor_text, font, 1.2, 2)[0]
-                
-                x = width // 2 + 50
-                y = 50 + text_size[1]
-                
-                overlay = frame.copy()
-                cv2.rectangle(overlay, (x - 5, y - text_size[1] - 5),
-                             (x + text_size[0] + 5, y + 5), (0, 0, 0), -1)
-                cv2.addWeighted(overlay, 0.4, frame, 0.6, 0, frame)
-                cv2.putText(frame, odor_text, (x, y), font, 1.2, (0, 255, 0), 2)
-            
-            images[i] = frame
-    
-    # ============ Save video ============
-    server_root = get_server_root()
-    derivatives_dir = get_derivatives_root() / subject_dir.name / session_dir.name / "video_analysis"
-    derivatives_dir.mkdir(parents=True, exist_ok=True)
-    out_mp4 = derivatives_dir / f"video_cut_{start_dt.strftime('%H-%M-%S-%f')}_{end_dt.strftime('%H-%M-%S-%f')}.mp4"
-    clip = ImageSequenceClip(images, fps=fps)
-    clip.write_videofile(str(out_mp4), codec="libx264", audio=False)
-    print(f"Saved to: {out_mp4}")
-    return out_mp4
 
 
 def plot_valve_and_poke_events(
