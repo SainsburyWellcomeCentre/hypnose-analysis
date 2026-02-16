@@ -1978,13 +1978,16 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         hr_success_position = None
         if hr_hit_positions:
             first_hr_pos = min(hr_hit_positions)
-            # New rule: once the HR odor is hit, leaving before the final position (and reaching AwaitReward)
-            # still counts as a Hidden Rule success. Only completing all positions without leaving
-            # on/after the HR odor is treated as HR missed (except when HR itself is at the final position).
-            if last_position < max_positions:
-                hr_success = True
-                hr_success_position = first_hr_pos
+            left_before_full_sequence = last_position < max_positions
+            has_await_reward = bool(trial_await_rewards)
+
+            # Only count early-leave HR success if AwaitReward actually occurred in the trial.
+            if left_before_full_sequence:
+                if has_await_reward:
+                    hr_success = True
+                    hr_success_position = first_hr_pos
             else:
+                # Final-position HR odor still counts as success regardless of AwaitReward presence.
                 hr_success = last_position in hr_hit_positions
                 hr_success_position = first_hr_pos if hr_success else None
         trial_dict['hidden_rule_success'] = hr_success

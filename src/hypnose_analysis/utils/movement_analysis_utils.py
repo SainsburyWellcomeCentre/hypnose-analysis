@@ -888,6 +888,7 @@ def plot_trial_traces_by_mode(
     highlight_hr=False,
     color_by_index=False,
     color_by_speed=False,
+    color_by_trial_id=False,
     figsize=(18, 6),
     smooth_window=5,
     linewidth=1.4,
@@ -918,6 +919,9 @@ def plot_trial_traces_by_mode(
     color_by_speed : bool
         If True, color each line segment by speed bins from speed_analysis.parquet (per-trial, per-bin). Segments
         with no speed data are grey. Overrides color_by_index when enabled.
+    color_by_trial_id : bool
+        If True (modes: rewarded, rewarded_hr, fa_by_response, fa_by_odor, hr_only), color by normalized
+        trial order per reward port (A/B) using a dark→light blue gradient. Overrides color_by_index/speed.
     figsize : tuple
         Figure size.
     smooth_window : int
@@ -973,6 +977,7 @@ def plot_trial_traces_by_mode(
     unrewarded_color = "#000000"
     index_cmap = cm.get_cmap("plasma")
     index_norm = Normalize(vmin=0.0, vmax=1.0)
+    trial_cmap = cm.get_cmap("Blues")
     speed_cmap = cm.get_cmap("viridis")
     speed_vals_global = []
 
@@ -1124,6 +1129,28 @@ def plot_trial_traces_by_mode(
     hr_odors_seen = set()
     speed_analysis_cache = {}
 
+    def _compute_trial_color_map(df, port_fn):
+        """Map (port, global_trial_id) -> RGBA using a dark→light blue gradient per port."""
+        per_port_ids = defaultdict(list)
+        for _, r in df.iterrows():
+            tid = r.get("global_trial_id")
+            try:
+                tid = int(tid)
+            except Exception:
+                tid = None
+            p = port_fn(r)
+            if p in {1, 2} and tid is not None:
+                per_port_ids[p].append(tid)
+
+        color_map: dict[tuple[int, int], tuple] = {}
+        for p, ids in per_port_ids.items():
+            ids_sorted = sorted(ids)
+            n = len(ids_sorted)
+            for i, tid in enumerate(ids_sorted):
+                frac = i / (n - 1) if n > 1 else 0.5
+                color_map[(p, tid)] = trial_cmap(frac)
+        return color_map
+
     for ses in ses_dirs:
         date_str = ses.name.split("_date-")[-1]
         results_dir = ses / "saved_analysis_results"
@@ -1245,6 +1272,16 @@ def plot_trial_traces_by_mode(
             include_hr = (mode == "rewarded_hr") or highlight_hr
             if hr_flag and not include_hr:
                 trials = trials[~hr_mask]
+
+            trial_color_map = {}
+            if color_by_trial_id:
+                def _port_trial(row):
+                    p = _port_from_first_supply(row)
+                    if p is None:
+                        p = _infer_port(row)
+                    return p
+                trial_color_map = _compute_trial_color_map(trials, _port_trial)
+
             for idx_row, row, seg, t_zero, speed_bins in iter_trials(trials):
                 port = None
                 if hr_flag and bool(row.get(hr_flag, False)):
@@ -1254,6 +1291,14 @@ def plot_trial_traces_by_mode(
                     port = port_fallback
                 color_map = port_colors_hr if (highlight_hr and hr_flag and bool(row.get(hr_flag, False))) else port_colors
                 color = color_map.get(port, port_colors[1 if category == "A" else 2])
+                if color_by_trial_id:
+                    tid = row.get("global_trial_id")
+                    try:
+                        tid = int(tid)
+                    except Exception:
+                        tid = None
+                    if port in {1, 2} and tid is not None:
+                        color = trial_color_map.get((port, tid), color)
                 _add_segment(segments, "combined", category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                 _add_segment(segments, category, category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                 resampled = _resample_trace(seg[0], seg[1])
@@ -1313,6 +1358,14 @@ def plot_trial_traces_by_mode(
                 print(f"[fa_by_response] session {date_str}: trials after filter={len(fa_df)}, fa_label counts={label_counts}")
             if fa_df.empty:
                 continue
+
+            trial_color_map = {}
+            if color_by_trial_id:
+                def _port_trial(row):
+                    p = row.get("fa_port") if pd.notna(row.get("fa_port")) else _infer_port(row)
+                    return p
+                trial_color_map = _compute_trial_color_map(fa_df, _port_trial)
+
             for idx_row, row, seg, t_zero, speed_bins in iter_trials(fa_df):
                 # Use FA port first, then supply/response port
                 port = row.get("fa_port") if pd.notna(row.get("fa_port")) else _infer_port(row)
@@ -1320,6 +1373,14 @@ def plot_trial_traces_by_mode(
                     continue
                 category = "A" if port == 1 else "B"
                 color = port_colors_fa.get(port, port_colors_fa[1])
+                if color_by_trial_id:
+                    tid = row.get("global_trial_id")
+                    try:
+                        tid = int(tid)
+                    except Exception:
+                        tid = None
+                    if tid is not None:
+                        color = trial_color_map.get((port, tid), color)
                 _add_segment(segments, "combined", category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                 _add_segment(segments, category, category, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                 resampled = _resample_trace(seg[0], seg[1])
@@ -1337,6 +1398,14 @@ def plot_trial_traces_by_mode(
                     fa_df = fa_df.dropna(subset=["fa_time"])
             if fa_df.empty:
                 continue
+
+            trial_color_map = {}
+            if color_by_trial_id:
+                def _port_trial(row):
+                    p = row.get("fa_port") if pd.notna(row.get("fa_port")) else _infer_port(row)
+                    return p
+                trial_color_map = _compute_trial_color_map(fa_df, _port_trial)
+
             for idx_row, row, seg, t_zero, speed_bins in iter_trials(fa_df):
                 odor_name = row.get("last_odor_name") or row.get("last_odor")
                 odor = _odor_letter(odor_name)
@@ -1344,6 +1413,14 @@ def plot_trial_traces_by_mode(
                     continue
                 port = row.get("fa_port") if pd.notna(row.get("fa_port")) else _infer_port(row)
                 color = port_colors_fa.get(port, port_colors_fa[1])
+                if color_by_trial_id:
+                    tid = row.get("global_trial_id")
+                    try:
+                        tid = int(tid)
+                    except Exception:
+                        tid = None
+                    if port in {1, 2} and tid is not None:
+                        color = trial_color_map.get((port, tid), color)
                 label = "FA to A" if port == 1 else ("FA to B" if port == 2 else "FA")
                 _add_segment(segments, odor, label, color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                 resampled = _resample_trace(seg[0], seg[1])
@@ -1390,6 +1467,15 @@ def plot_trial_traces_by_mode(
             hr_trials = td[(hr_mask) & (td.get("is_aborted") == False)]
             if hr_trials.empty:
                 continue
+
+            trial_color_map = {}
+            if color_by_trial_id:
+                def _port_trial(row):
+                    p = _hr_port_from_identity(row.get("first_supply_odor_identity"))
+                    if p is None:
+                        p = _infer_port(row)
+                    return p
+                trial_color_map = _compute_trial_color_map(hr_trials, _port_trial)
             for idx_row, row, seg, t_zero, speed_bins in iter_trials(hr_trials):
                 odor_seq = _parse_odor_sequence(row.get("odor_sequence"))
                 odor_match = None
@@ -1412,6 +1498,14 @@ def plot_trial_traces_by_mode(
                 label_base = f"{odor_match}"
                 if rtc == "rewarded":
                     color = port_colors_hr.get(port, port_colors_hr[1])
+                    if color_by_trial_id:
+                        tid = row.get("global_trial_id")
+                        try:
+                            tid = int(tid)
+                        except Exception:
+                            tid = None
+                        if port in {1, 2} and tid is not None:
+                            color = trial_color_map.get((port, tid), color)
                     _add_segment(segments, axis_key, f"{label_base} rewarded", color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                     _add_segment(segments, "HR Summary", f"{label_base} rewarded", color, seg[0], seg[1], time=seg[2], t_zero=t_zero, speed_bins=speed_bins)
                     resampled = _resample_trace(seg[0], seg[1])
@@ -1439,12 +1533,14 @@ def plot_trial_traces_by_mode(
         return None, None
 
     speed_norm = None
-    if color_by_speed and speed_vals_global:
+    if color_by_speed and speed_vals_global and not color_by_trial_id:
         vmin = np.nanmin(speed_vals_global)
         vmax = np.nanmax(speed_vals_global)
         if np.isfinite(vmin) and np.isfinite(vmax) and vmax > vmin:
             speed_norm = Normalize(vmin=vmin, vmax=vmax)
-    color_by_speed_active = color_by_speed and (speed_norm is not None)
+    color_by_speed_active = color_by_speed and (speed_norm is not None) and (not color_by_trial_id)
+    if color_by_trial_id:
+        color_by_index = False
 
     def _plot_axis(ax, axis_key):
         segs = segments.get(axis_key, [])
