@@ -3311,6 +3311,7 @@ def plot_movement_analysis_statistics(
     combined_tortuosity_rows = []
 
     cond_positions = {"rewarded": 0.0, "unrewarded": 0.4, "fa": 0.8}
+    cond_colors = {"rewarded": "#4CAF50", "unrewarded": "#F44336", "fa": "#2196F3"}
     jitter_span = 0.06  # tighter jitter to match closer grouping
 
     def _style_axis(ax, *, ylabel: str, xticklabels=None):
@@ -3325,6 +3326,33 @@ def plot_movement_analysis_statistics(
         ax.set_ylabel(ylabel, fontsize=16)
         if clean_graph:
             _clean_graph(ax, ylabel=ylabel)
+
+    def _plot_by_trial_sequence(df, value_col, ylabel):
+        df_seq = df.copy()
+        df_seq["seq_in_condition"] = df_seq.groupby("condition").cumcount() + 1
+
+        fig_seq, ax_seq = plt.subplots(figsize=figsize)
+        for cond, color in cond_colors.items():
+            sub = df_seq[df_seq["condition"] == cond]
+            if sub.empty:
+                continue
+            x_vals = sub["seq_in_condition"].astype(float).to_numpy()
+            y_vals = sub[value_col].astype(float).to_numpy()
+            ax_seq.scatter(x_vals, y_vals, color=color, alpha=0.7)
+            if len(x_vals) >= 2:
+                slope, intercept = np.polyfit(x_vals, y_vals, 1)
+                x_line = np.array([x_vals.min(), x_vals.max()])
+                y_line = slope * x_line + intercept
+                ax_seq.plot(x_line, y_line, color=color, linewidth=2.0, alpha=0.9,
+                             label=f"{cond}: y={slope:.3f}x+{intercept:.3f}")
+            else:
+                ax_seq.plot([], [], color=color, linewidth=0, label=f"{cond}: n={len(x_vals)}")
+
+        ax_seq.set_xlabel("Trial # (within condition)", fontsize=14)
+        _style_axis(ax_seq, ylabel=ylabel)
+        ax_seq.legend()
+        fig_seq.tight_layout()
+        return fig_seq
 
     for ses in ses_dirs:
         date_str = ses.name.split("_date-")[-1]
@@ -3428,6 +3456,8 @@ def plot_movement_analysis_statistics(
             fig.tight_layout()
             entry["fig"] = fig
 
+            entry["fig_latency_by_trial"] = _plot_by_trial_sequence(df_ses, "latency_s", "Latency (s)")
+
         if valve_latencies:
             df_valve = pd.DataFrame(valve_latencies)
             entry["valve_data"] = df_valve
@@ -3451,6 +3481,8 @@ def plot_movement_analysis_statistics(
             _style_axis(ax_v, ylabel="Consideration Time (s)", xticklabels=["Rewarded", "Unrewarded", "FA"])
             fig_v.tight_layout()
             entry["fig_valve"] = fig_v
+
+            entry["fig_valve_by_trial"] = _plot_by_trial_sequence(df_valve, "movement_from_valve_s", "Consideration Time (s)")
 
         if path_lengths:
             df_path = pd.DataFrame(path_lengths)
@@ -3476,6 +3508,8 @@ def plot_movement_analysis_statistics(
             fig_p.tight_layout()
             entry["fig_path"] = fig_p
 
+            entry["fig_path_by_trial"] = _plot_by_trial_sequence(df_path, "path_length_px", "Path length (px)")
+
         if travel_times:
             df_travel = pd.DataFrame(travel_times)
             entry["travel_data"] = df_travel
@@ -3500,6 +3534,8 @@ def plot_movement_analysis_statistics(
             fig_t.tight_layout()
             entry["fig_travel"] = fig_t
 
+            entry["fig_travel_by_trial"] = _plot_by_trial_sequence(df_travel, "travel_time_s", "Duration (s)")
+
         if tortuosities:
             df_tort = pd.DataFrame(tortuosities)
             entry["tortuosity_data"] = df_tort
@@ -3523,6 +3559,8 @@ def plot_movement_analysis_statistics(
             _style_axis(ax_to, ylabel="Tortuosity", xticklabels=["Rewarded", "Unrewarded", "FA"])
             fig_to.tight_layout()
             entry["fig_tortuosity"] = fig_to
+
+            entry["fig_tortuosity_by_trial"] = _plot_by_trial_sequence(df_tort, "tortuosity", "Tortuosity")
 
         per_session.append(entry)
 
