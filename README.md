@@ -50,6 +50,11 @@ Create SymLink in Windows (*requirement*: ceph server mounted at Z:):
 
 - SymLink should appear in the repo folder
 
+## File Copying using robocop: 
+
+For local analysis, use files copied from ceph to local machine. Use robocopy in powershell: robocopy "Z:\hypnose\rawdata\sub-045_id-284" "E:\rawdata\sub-045_id-284" /E /MT:32 /R:5 /W:5 /LOG:C:\Users\HarrisLab\Desktop\robocopy_log.txt /TEE /NP
+Check log file for files that failed transfer. 
+
 ## Running Analysis: 
 
 The analysis consists of two parts: **trial classification** and **behavioral metric calculation**
