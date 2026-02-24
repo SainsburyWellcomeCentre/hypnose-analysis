@@ -3183,10 +3183,11 @@ def plot_movement_analysis_statistics(
     fa_types="FA_time_in",
     figsize=(10, 6),
     clean_graph: bool = False,
+    hidden_rule_analysis: bool = False,
 ):
     """Scatter movement-related metrics per condition with mean±SEM.
 
-    Produces five figures per session when data are present:
+    Produces five figures per session when data are present (expanded category set when hidden_rule_analysis is True and only a single session is requested):
     - Movement onset latency relative to poke_out (latency_s from speed_analysis.parquet)
     - Animal's Consideration Time (Valve Onset - Movement Onset) (movement_onset_from_valve_s from speed_analysis.parquet)
     - Path length traveled per trial (path_length_px from speed_analysis.parquet)
@@ -3220,17 +3221,6 @@ def plot_movement_analysis_statistics(
     if not ses_dirs:
         raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
 
-    def _condition_label(row):
-        rtc = str(row.get("response_time_category", "")).lower()
-        is_aborted = bool(row.get("is_aborted", False))
-        fa_label = str(row.get("fa_label", "")).lower()
-        if rtc == "rewarded" and not is_aborted:
-            return "rewarded"
-        if rtc == "unrewarded" and not is_aborted:
-            return "unrewarded"
-        if fa_label.startswith("fa_") and fa_filter_fn(fa_label):
-            return "fa"
-        return None
 
     def _kw_mwu_by_group(df, value_col, group_col="condition", min_pair_n=5):
         """Run Kruskal-Wallis across groups, then pairwise Mann-Whitney U with Holm correction if KW is significant.
@@ -3307,7 +3297,73 @@ def plot_movement_analysis_statistics(
 
         return {"kruskal": kruskal_res, "pairwise": pairwise}
 
+
+    def _has_odor(seq, odor_letter: str) -> bool:
+            if seq is None:
+                return False
+            odor_letter = str(odor_letter).upper()
+            if isinstance(seq, (list, tuple, set)):
+                upper_vals = {str(x).upper() for x in seq}
+                return odor_letter in upper_vals
+            s = str(seq).upper()
+            return odor_letter in s
+
+    def _condition_labels(row):
+        if hidden_rule_analysis:
+            labels = []
+            rtc = str(row.get("response_time_category", "")).lower()
+            is_aborted = bool(row.get("is_aborted", False))
+            fa_label = str(row.get("fa_label", "")).lower()
+            hr_success = bool(row.get("hidden_rule_success", False))
+            hr_hit = bool(row.get("hit_hidden_rule", False))
+            odor_seq = row.get("odor_sequence", None)
+            fa_port = row.get("fa_port", None)
+
+            if not is_aborted:
+                if rtc == "rewarded":
+                    labels.append("Rewarded (Total)")
+                    labels.append("Rewarded (HR)" if hr_success else "Rewarded (no HR)")
+                elif rtc == "unrewarded":
+                    labels.append("Unrewarded (Total)")
+                    labels.append("Unrewarded (HR)" if hr_success else "Unrewarded (no HR)")
+            else:
+                if fa_label.startswith("fa_") and fa_filter_fn(fa_label):
+                    labels.append("FA (Total)")
+                    if hr_hit:
+                        labels.append("FA (HR)")
+                        has_f = _has_odor(odor_seq, "F")
+                        has_c = _has_odor(odor_seq, "C")
+                        port = None
+                        try:
+                            port = int(fa_port) if fa_port is not None else None
+                        except Exception:
+                            port = None
+                        if port is not None and (has_f or has_c):
+                            if (has_f and port == 1) or (has_c and port == 2):
+                                labels.append("FA (correct HR Port)")
+                            elif (has_f and port == 2) or (has_c and port == 1):
+                                labels.append("FA (incorrect HR Port)")
+                    else:
+                        labels.append("FA (no HR)")
+
+            return list(dict.fromkeys(labels))
+
+        # Default (non-hidden-rule) labeling
+        rtc = str(row.get("response_time_category", "")).lower()
+        is_aborted = bool(row.get("is_aborted", False))
+        fa_label = str(row.get("fa_label", "")).lower()
+        if rtc == "rewarded" and not is_aborted:
+            return ["rewarded"]
+        if rtc == "unrewarded" and not is_aborted:
+            return ["unrewarded"]
+        if fa_label.startswith("fa_") and fa_filter_fn(fa_label):
+            return ["fa"]
+        return []
+
+
     multi_session = len(ses_dirs) > 1
+    if multi_session:
+        hidden_rule_analysis = False  # ignore expanded categories when pooling sessions
 
     per_session = []
     combined_rows = []
@@ -3316,9 +3372,50 @@ def plot_movement_analysis_statistics(
     combined_travel_rows = []
     combined_tortuosity_rows = []
 
-    cond_positions = {"rewarded": 0.0, "unrewarded": 0.4, "fa": 0.8}
-    cond_colors = {"rewarded": "#4CAF50", "unrewarded": "#F44336", "fa": "#2196F3"}
+    if hidden_rule_analysis:
+        cond_groups = [
+            ["Rewarded (Total)", "Rewarded (no HR)", "Rewarded (HR)"],
+            ["Unrewarded (Total)", "Unrewarded (no HR)", "Unrewarded (HR)"],
+            ["FA (Total)", "FA (no HR)", "FA (HR)", "FA (correct HR Port)", "FA (incorrect HR Port)"],
+        ]
+        cond_order = [c for group in cond_groups for c in group]
+        palette = [
+            "#4CAF50", "#8BC34A", "#2E7D32",  # rewarded variants
+            "#F44336", "#E57373", "#B71C1C",  # unrewarded variants
+            "#2196F3", "#64B5F6", "#0D47A1",  # FA variants
+            "#00BCD4", "#FF9800",              # FA correct/incorrect
+        ]
+        cond_colors = {c: palette[i % len(palette)] for i, c in enumerate(cond_order)}
+
+        def _build_positions(groups, within=0.26, gap=0.55):
+            pos = 0.0
+            positions = {}
+            for gi, group in enumerate(groups):
+                for ci, cond in enumerate(group):
+                    positions[cond] = pos
+                    if ci < len(group) - 1:
+                        pos += within
+                if gi < len(groups) - 1:
+                    pos += gap
+            return positions
+
+        cond_positions = _build_positions(cond_groups)
+    else:
+        cond_order = ["rewarded", "unrewarded", "fa"]
+        cond_colors = {"rewarded": "#4CAF50", "unrewarded": "#F44336", "fa": "#2196F3"}
+        cond_positions = {cond: idx * 0.35 for idx, cond in enumerate(cond_order)}
+
     jitter_span = 0.06  # tighter jitter to match closer grouping
+    cond_pos_values = list(cond_positions.values())
+    _cond_xlim = (
+        (min(cond_pos_values) - 0.2) if cond_pos_values else -0.2,
+        (max(cond_pos_values) + 0.2) if cond_pos_values else 1.0,
+    )
+
+    def _display_label(cond: str) -> str:
+        if cond in {"rewarded", "unrewarded", "fa"}:
+            return cond.capitalize()
+        return cond
 
     def _style_axis(ax, *, ylabel: str, xticklabels=None):
         ax.spines["top"].set_visible(False)
@@ -3338,10 +3435,11 @@ def plot_movement_analysis_statistics(
         df_seq["seq_in_condition"] = df_seq.groupby("condition").cumcount() + 1
 
         fig_seq, ax_seq = plt.subplots(figsize=figsize)
-        for cond, color in cond_colors.items():
+        for cond in cond_order:
             sub = df_seq[df_seq["condition"] == cond]
             if sub.empty:
                 continue
+            color = cond_colors.get(cond, "#555555")
             x_vals = sub["seq_in_condition"].astype(float).to_numpy()
             y_vals = sub[value_col].astype(float).to_numpy()
             ax_seq.scatter(x_vals, y_vals, color=color, alpha=0.7)
@@ -3392,8 +3490,8 @@ def plot_movement_analysis_statistics(
         travel_times = []
         tortuosities = []
         for idx_row, row in trial_data.iterrows():
-            cond = _condition_label(row)
-            if cond is None:
+            conds = _condition_labels(row)
+            if not conds:
                 continue
             bins = speed_df[speed_df["trial_index"] == idx_row]
             if bins.empty:
@@ -3401,37 +3499,46 @@ def plot_movement_analysis_statistics(
             lat = bins["latency_s"].dropna()
             if not lat.empty:
                 lat_val = float(lat.iloc[0])
-                latencies.append({"date": date_str, "condition": cond, "latency_s": lat_val})
+                for cond in conds:
+                    latencies.append({"date": date_str, "condition": cond, "latency_s": lat_val})
 
             if "movement_onset_from_valve_s" in bins.columns:
                 mov = bins["movement_onset_from_valve_s"].dropna()
                 if not mov.empty:
-                    valve_latencies.append({"date": date_str, "condition": cond, "movement_from_valve_s": float(mov.iloc[0])})
+                    mov_val = float(mov.iloc[0])
+                    for cond in conds:
+                        valve_latencies.append({"date": date_str, "condition": cond, "movement_from_valve_s": mov_val})
 
             if "path_length_px" in bins.columns:
                 pl = bins["path_length_px"].dropna()
                 if not pl.empty:
-                    path_lengths.append({
-                        "date": date_str,
-                        "condition": cond,
-                        "path_length_px": float(pl.iloc[0]),
-                    })
+                    pl_val = float(pl.iloc[0])
+                    for cond in conds:
+                        path_lengths.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "path_length_px": pl_val,
+                        })
             if "travel_time_s" in bins.columns:
                 tt = bins["travel_time_s"].dropna()
                 if not tt.empty:
-                    travel_times.append({
-                        "date": date_str,
-                        "condition": cond,
-                        "travel_time_s": float(tt.iloc[0]),
-                    })
+                    tt_val = float(tt.iloc[0])
+                    for cond in conds:
+                        travel_times.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "travel_time_s": tt_val,
+                        })
             if "tortuosity" in bins.columns:
                 tor = bins["tortuosity"].dropna()
                 if not tor.empty:
-                    tortuosities.append({
-                        "date": date_str,
-                        "condition": cond,
-                        "tortuosity": float(tor.iloc[0]),
-                    })
+                    tor_val = float(tor.iloc[0])
+                    for cond in conds:
+                        tortuosities.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "tortuosity": tor_val,
+                        })
 
         if not any([latencies, valve_latencies, path_lengths, travel_times, tortuosities]):
             continue
@@ -3445,10 +3552,11 @@ def plot_movement_analysis_statistics(
 
             if not multi_session:
                 fig, ax = plt.subplots(figsize=figsize)
-                for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                for cond in cond_order:
                     sub = df_ses[df_ses["condition"] == cond]
-                    if sub.empty:
+                    if sub.empty or cond not in cond_positions:
                         continue
+                    color = cond_colors.get(cond, "#555555")
                     y = sub["latency_s"].astype(float)
                     x0 = cond_positions[cond]
                     x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
@@ -3456,10 +3564,10 @@ def plot_movement_analysis_statistics(
                     mean = y.mean()
                     sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
                     ax.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-                ax.set_xticks(list(cond_positions.values()))
-                ax.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-                ax.set_xlim(-0.2, 1.0)
-                _style_axis(ax, ylabel="Latency (s)", xticklabels=["Rewarded", "Unrewarded", "FA"])
+                ax.set_xticks([cond_positions[c] for c in cond_order])
+                ax.set_xlim(_cond_xlim)
+                _style_axis(ax, ylabel="Latency (s)")
+                ax.set_xticklabels([_display_label(c) for c in cond_order], rotation=25, ha="right")
                 fig.tight_layout()
                 entry["fig"] = fig
 
@@ -3472,10 +3580,11 @@ def plot_movement_analysis_statistics(
 
             if not multi_session:
                 fig_v, ax_v = plt.subplots(figsize=figsize)
-                for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                for cond in cond_order:
                     sub = df_valve[df_valve["condition"] == cond]
-                    if sub.empty:
+                    if sub.empty or cond not in cond_positions:
                         continue
+                    color = cond_colors.get(cond, "#555555")
                     y = sub["movement_from_valve_s"].astype(float)
                     x0 = cond_positions[cond]
                     x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
@@ -3483,10 +3592,10 @@ def plot_movement_analysis_statistics(
                     mean = y.mean()
                     sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
                     ax_v.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-                ax_v.set_xticks(list(cond_positions.values()))
-                ax_v.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-                ax_v.set_xlim(-0.2, 1.0)
-                _style_axis(ax_v, ylabel="Consideration Time (s)", xticklabels=["Rewarded", "Unrewarded", "FA"])
+                ax_v.set_xticks([cond_positions[c] for c in cond_order])
+                ax_v.set_xlim(_cond_xlim)
+                _style_axis(ax_v, ylabel="Consideration Time (s)")
+                ax_v.set_xticklabels([_display_label(c) for c in cond_order], rotation=25, ha="right")
                 fig_v.tight_layout()
                 entry["fig_valve"] = fig_v
 
@@ -3499,10 +3608,11 @@ def plot_movement_analysis_statistics(
 
             if not multi_session:
                 fig_p, ax_p = plt.subplots(figsize=figsize)
-                for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                for cond in cond_order:
                     sub = df_path[df_path["condition"] == cond]
-                    if sub.empty:
+                    if sub.empty or cond not in cond_positions:
                         continue
+                    color = cond_colors.get(cond, "#555555")
                     y = sub["path_length_px"].astype(float)
                     x0 = cond_positions[cond]
                     x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
@@ -3510,10 +3620,10 @@ def plot_movement_analysis_statistics(
                     mean = y.mean()
                     sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
                     ax_p.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-                ax_p.set_xticks(list(cond_positions.values()))
-                ax_p.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-                ax_p.set_xlim(-0.2, 1.0)
-                _style_axis(ax_p, ylabel="Path length (px)", xticklabels=["Rewarded", "Unrewarded", "FA"])
+                ax_p.set_xticks([cond_positions[c] for c in cond_order])
+                ax_p.set_xlim(_cond_xlim)
+                _style_axis(ax_p, ylabel="Path length (px)")
+                ax_p.set_xticklabels([_display_label(c) for c in cond_order], rotation=25, ha="right")
                 fig_p.tight_layout()
                 entry["fig_path"] = fig_p
 
@@ -3526,10 +3636,11 @@ def plot_movement_analysis_statistics(
 
             if not multi_session:
                 fig_t, ax_t = plt.subplots(figsize=figsize)
-                for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                for cond in cond_order:
                     sub = df_travel[df_travel["condition"] == cond]
-                    if sub.empty:
+                    if sub.empty or cond not in cond_positions:
                         continue
+                    color = cond_colors.get(cond, "#555555")
                     y = sub["travel_time_s"].astype(float)
                     x0 = cond_positions[cond]
                     x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
@@ -3537,10 +3648,10 @@ def plot_movement_analysis_statistics(
                     mean = y.mean()
                     sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
                     ax_t.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-                ax_t.set_xticks(list(cond_positions.values()))
-                ax_t.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-                ax_t.set_xlim(-0.2, 1.0)
-                _style_axis(ax_t, ylabel="Duration (s)", xticklabels=["Rewarded", "Unrewarded", "FA"])
+                ax_t.set_xticks([cond_positions[c] for c in cond_order])
+                ax_t.set_xlim(_cond_xlim)
+                _style_axis(ax_t, ylabel="Duration (s)")
+                ax_t.set_xticklabels([_display_label(c) for c in cond_order], rotation=25, ha="right")
                 fig_t.tight_layout()
                 entry["fig_travel"] = fig_t
 
@@ -3553,10 +3664,11 @@ def plot_movement_analysis_statistics(
 
             if not multi_session:
                 fig_to, ax_to = plt.subplots(figsize=figsize)
-                for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                for cond in cond_order:
                     sub = df_tort[df_tort["condition"] == cond]
-                    if sub.empty:
+                    if sub.empty or cond not in cond_positions:
                         continue
+                    color = cond_colors.get(cond, "#555555")
                     y = sub["tortuosity"].astype(float)
                     x0 = cond_positions[cond]
                     x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
@@ -3564,10 +3676,10 @@ def plot_movement_analysis_statistics(
                     mean = y.mean()
                     sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
                     ax_to.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-                ax_to.set_xticks(list(cond_positions.values()))
-                ax_to.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-                ax_to.set_xlim(-0.2, 1.0)
-                _style_axis(ax_to, ylabel="Tortuosity", xticklabels=["Rewarded", "Unrewarded", "FA"])
+                ax_to.set_xticks([cond_positions[c] for c in cond_order])
+                ax_to.set_xlim(_cond_xlim)
+                _style_axis(ax_to, ylabel="Tortuosity")
+                ax_to.set_xticklabels([_display_label(c) for c in cond_order], rotation=25, ha="right")
                 fig_to.tight_layout()
                 entry["fig_tortuosity"] = fig_to
 
