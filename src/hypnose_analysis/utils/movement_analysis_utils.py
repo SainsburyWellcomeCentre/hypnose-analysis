@@ -3308,47 +3308,7 @@ def plot_movement_analysis_statistics(
             s = str(seq).upper()
             return odor_letter in s
 
-    def _condition_labels(row):
-        if hidden_rule_analysis:
-            labels = []
-            rtc = str(row.get("response_time_category", "")).lower()
-            is_aborted = bool(row.get("is_aborted", False))
-            fa_label = str(row.get("fa_label", "")).lower()
-            hr_success = bool(row.get("hidden_rule_success", False))
-            hr_hit = bool(row.get("hit_hidden_rule", False))
-            odor_seq = row.get("odor_sequence", None)
-            fa_port = row.get("fa_port", None)
-
-            if not is_aborted:
-                if rtc == "rewarded":
-                    labels.append("Rewarded (Total)")
-                    labels.append("Rewarded (HR)" if hr_success else "Rewarded (no HR)")
-                elif rtc == "unrewarded":
-                    labels.append("Unrewarded (Total)")
-                    labels.append("Unrewarded (HR)" if hr_success else "Unrewarded (no HR)")
-            else:
-                if fa_label.startswith("fa_") and fa_filter_fn(fa_label):
-                    labels.append("FA (Total)")
-                    if hr_hit:
-                        labels.append("FA (HR)")
-                        has_f = _has_odor(odor_seq, "F")
-                        has_c = _has_odor(odor_seq, "C")
-                        port = None
-                        try:
-                            port = int(fa_port) if fa_port is not None else None
-                        except Exception:
-                            port = None
-                        if port is not None and (has_f or has_c):
-                            if (has_f and port == 1) or (has_c and port == 2):
-                                labels.append("FA (correct HR Port)")
-                            elif (has_f and port == 2) or (has_c and port == 1):
-                                labels.append("FA (incorrect HR Port)")
-                    else:
-                        labels.append("FA (no HR)")
-
-            return list(dict.fromkeys(labels))
-
-        # Default (non-hidden-rule) labeling
+    def _condition_labels_base(row):
         rtc = str(row.get("response_time_category", "")).lower()
         is_aborted = bool(row.get("is_aborted", False))
         fa_label = str(row.get("fa_label", "")).lower()
@@ -3360,17 +3320,65 @@ def plot_movement_analysis_statistics(
             return ["fa"]
         return []
 
+    def _condition_labels_hidden(row):
+        labels = []
+        rtc = str(row.get("response_time_category", "")).lower()
+        is_aborted = bool(row.get("is_aborted", False))
+        fa_label = str(row.get("fa_label", "")).lower()
+        hr_success = bool(row.get("hidden_rule_success", False))
+        hr_hit = bool(row.get("hit_hidden_rule", False))
+        odor_seq = row.get("odor_sequence", None)
+        fa_port = row.get("fa_port", None)
+
+        if not is_aborted:
+            if rtc == "rewarded":
+                labels.append("Rewarded (Total)")
+                labels.append("Rewarded (HR)" if hr_success else "Rewarded (no HR)")
+            elif rtc == "unrewarded":
+                labels.append("Unrewarded (Total)")
+                labels.append("Unrewarded (HR)" if hr_success else "Unrewarded (no HR)")
+        else:
+            if fa_label.startswith("fa_") and fa_filter_fn(fa_label):
+                labels.append("FA (Total)")
+                if hr_hit:
+                    labels.append("FA (HR)")
+                    has_f = _has_odor(odor_seq, "F")
+                    has_c = _has_odor(odor_seq, "C")
+                    port = None
+                    try:
+                        port = int(fa_port) if fa_port is not None else None
+                    except Exception:
+                        port = None
+                    if port is not None and (has_f or has_c):
+                        if (has_f and port == 1) or (has_c and port == 2):
+                            labels.append("FA (correct HR Port)")
+                        elif (has_f and port == 2) or (has_c and port == 1):
+                            labels.append("FA (incorrect HR Port)")
+                else:
+                    labels.append("FA (no HR)")
+
+        return list(dict.fromkeys(labels))
+
+    def _condition_labels(row):
+        if hidden_rule_analysis:
+            return _condition_labels_hidden(row)
+        return _condition_labels_base(row)
+
 
     multi_session = len(ses_dirs) > 1
-    if multi_session:
-        hidden_rule_analysis = False  # ignore expanded categories when pooling sessions
 
     per_session = []
-    combined_rows = []
+    combined_rows = []  # base conditions (rewarded/unrewarded/fa)
     combined_valve_rows = []
     combined_path_rows = []
     combined_travel_rows = []
     combined_tortuosity_rows = []
+
+    combined_rows_hr = []  # expanded HR conditions (if enabled)
+    combined_valve_rows_hr = []
+    combined_path_rows_hr = []
+    combined_travel_rows_hr = []
+    combined_tortuosity_rows_hr = []
 
     if hidden_rule_analysis:
         cond_groups = [
@@ -3383,7 +3391,7 @@ def plot_movement_analysis_statistics(
             "#4CAF50", "#8BC34A", "#2E7D32",  # rewarded variants
             "#F44336", "#E57373", "#B71C1C",  # unrewarded variants
             "#2196F3", "#64B5F6", "#0D47A1",  # FA variants
-            "#00BCD4", "#FF9800",              # FA correct/incorrect
+            "#00BCD4", "#00FFBFE8",              # FA correct/incorrect
         ]
         cond_colors = {c: palette[i % len(palette)] for i, c in enumerate(cond_order)}
 
@@ -3404,6 +3412,9 @@ def plot_movement_analysis_statistics(
         cond_order = ["rewarded", "unrewarded", "fa"]
         cond_colors = {"rewarded": "#4CAF50", "unrewarded": "#F44336", "fa": "#2196F3"}
         cond_positions = {cond: idx * 0.35 for idx, cond in enumerate(cond_order)}
+
+    cond_order_hr = cond_order if hidden_rule_analysis else []
+    cond_colors_hr = cond_colors if hidden_rule_analysis else {}
 
     jitter_span = 0.06  # tighter jitter to match closer grouping
     cond_pos_values = list(cond_positions.values())
@@ -3490,8 +3501,10 @@ def plot_movement_analysis_statistics(
         travel_times = []
         tortuosities = []
         for idx_row, row in trial_data.iterrows():
-            conds = _condition_labels(row)
-            if not conds:
+            conds_base = _condition_labels_base(row)
+            conds_hr = _condition_labels_hidden(row) if hidden_rule_analysis else []
+            conds = conds_hr if hidden_rule_analysis else conds_base
+            if not conds_base and not conds_hr:
                 continue
             bins = speed_df[speed_df["trial_index"] == idx_row]
             if bins.empty:
@@ -3501,6 +3514,10 @@ def plot_movement_analysis_statistics(
                 lat_val = float(lat.iloc[0])
                 for cond in conds:
                     latencies.append({"date": date_str, "condition": cond, "latency_s": lat_val})
+                for cond in conds_base:
+                    combined_rows.append({"date": date_str, "condition": cond, "latency_s": lat_val})
+                for cond in conds_hr:
+                    combined_rows_hr.append({"date": date_str, "condition": cond, "latency_s": lat_val})
 
             if "movement_onset_from_valve_s" in bins.columns:
                 mov = bins["movement_onset_from_valve_s"].dropna()
@@ -3508,6 +3525,10 @@ def plot_movement_analysis_statistics(
                     mov_val = float(mov.iloc[0])
                     for cond in conds:
                         valve_latencies.append({"date": date_str, "condition": cond, "movement_from_valve_s": mov_val})
+                    for cond in conds_base:
+                        combined_valve_rows.append({"date": date_str, "condition": cond, "movement_from_valve_s": mov_val})
+                    for cond in conds_hr:
+                        combined_valve_rows_hr.append({"date": date_str, "condition": cond, "movement_from_valve_s": mov_val})
 
             if "path_length_px" in bins.columns:
                 pl = bins["path_length_px"].dropna()
@@ -3515,6 +3536,18 @@ def plot_movement_analysis_statistics(
                     pl_val = float(pl.iloc[0])
                     for cond in conds:
                         path_lengths.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "path_length_px": pl_val,
+                        })
+                    for cond in conds_base:
+                        combined_path_rows.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "path_length_px": pl_val,
+                        })
+                    for cond in conds_hr:
+                        combined_path_rows_hr.append({
                             "date": date_str,
                             "condition": cond,
                             "path_length_px": pl_val,
@@ -3529,12 +3562,36 @@ def plot_movement_analysis_statistics(
                             "condition": cond,
                             "travel_time_s": tt_val,
                         })
+                    for cond in conds_base:
+                        combined_travel_rows.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "travel_time_s": tt_val,
+                        })
+                    for cond in conds_hr:
+                        combined_travel_rows_hr.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "travel_time_s": tt_val,
+                        })
             if "tortuosity" in bins.columns:
                 tor = bins["tortuosity"].dropna()
                 if not tor.empty:
                     tor_val = float(tor.iloc[0])
                     for cond in conds:
                         tortuosities.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "tortuosity": tor_val,
+                        })
+                    for cond in conds_base:
+                        combined_tortuosity_rows.append({
+                            "date": date_str,
+                            "condition": cond,
+                            "tortuosity": tor_val,
+                        })
+                    for cond in conds_hr:
+                        combined_tortuosity_rows_hr.append({
                             "date": date_str,
                             "condition": cond,
                             "tortuosity": tor_val,
@@ -3548,7 +3605,6 @@ def plot_movement_analysis_statistics(
         if latencies:
             df_ses = pd.DataFrame(latencies)
             entry["data"] = df_ses
-            combined_rows.append(df_ses)
 
             if not multi_session:
                 fig, ax = plt.subplots(figsize=figsize)
@@ -3576,7 +3632,6 @@ def plot_movement_analysis_statistics(
         if valve_latencies:
             df_valve = pd.DataFrame(valve_latencies)
             entry["valve_data"] = df_valve
-            combined_valve_rows.append(df_valve)
 
             if not multi_session:
                 fig_v, ax_v = plt.subplots(figsize=figsize)
@@ -3604,7 +3659,6 @@ def plot_movement_analysis_statistics(
         if path_lengths:
             df_path = pd.DataFrame(path_lengths)
             entry["path_data"] = df_path
-            combined_path_rows.append(df_path)
 
             if not multi_session:
                 fig_p, ax_p = plt.subplots(figsize=figsize)
@@ -3632,7 +3686,6 @@ def plot_movement_analysis_statistics(
         if travel_times:
             df_travel = pd.DataFrame(travel_times)
             entry["travel_data"] = df_travel
-            combined_travel_rows.append(df_travel)
 
             if not multi_session:
                 fig_t, ax_t = plt.subplots(figsize=figsize)
@@ -3660,7 +3713,6 @@ def plot_movement_analysis_statistics(
         if tortuosities:
             df_tort = pd.DataFrame(tortuosities)
             entry["tortuosity_data"] = df_tort
-            combined_tortuosity_rows.append(df_tort)
 
             if not multi_session:
                 fig_to, ax_to = plt.subplots(figsize=figsize)
@@ -3712,12 +3764,27 @@ def plot_movement_analysis_statistics(
         "tortuosity": combined_tortuosity_rows,
     }
 
+    metric_frames_hr = {
+        "latency_s": combined_rows_hr,
+        "movement_from_valve_s": combined_valve_rows_hr,
+        "path_length_px": combined_path_rows_hr,
+        "travel_time_s": combined_travel_rows_hr,
+        "tortuosity": combined_tortuosity_rows_hr,
+    }
+
     stats_by_metric = {}
     for metric, rows in metric_frames.items():
         if rows:
-            stats_by_metric[metric] = _build_session_stats(pd.concat(rows, ignore_index=True), metric)
+            stats_by_metric[metric] = _build_session_stats(pd.DataFrame(rows), metric)
         else:
             stats_by_metric[metric] = None
+
+    stats_by_metric_hr = {}
+    for metric, rows in metric_frames_hr.items():
+        if rows:
+            stats_by_metric_hr[metric] = _build_session_stats(pd.DataFrame(rows), metric)
+        else:
+            stats_by_metric_hr[metric] = None
 
     # Normalization factors per metric (min-max across all session means, all conditions)
     norm_factors = {}
@@ -3732,6 +3799,18 @@ def plot_movement_analysis_statistics(
         norm_range = norm_max - norm_min
         norm_factors[metric] = (norm_min, norm_range)
 
+    norm_factors_hr = {}
+    for metric, stats_df in stats_by_metric_hr.items():
+        if stats_df is None or stats_df.empty:
+            continue
+        vals = stats_df["mean"].astype(float).to_numpy()
+        if vals.size == 0:
+            continue
+        norm_min = float(np.nanmin(vals))
+        norm_max = float(np.nanmax(vals))
+        norm_range = norm_max - norm_min
+        norm_factors_hr[metric] = (norm_min, norm_range)
+
     metric_styles = {
         "latency_s": {"color": "#8BC34A", "label": "Latency (s)"},
         "movement_from_valve_s": {"color": "#FF9800", "label": "Consideration (s)"},
@@ -3740,18 +3819,43 @@ def plot_movement_analysis_statistics(
         "tortuosity": {"color": "#3F51B5", "label": "Tortuosity"},
     }
 
-    def _plot_combined_metric(stats_df, ylabel):
+    def _plot_line_with_gaps(ax, x_vals, y_vals, *, color, line_width=2.0, gap_pad=0.18):
+        x_arr = np.asarray(x_vals, dtype=float)
+        y_arr = np.asarray(y_vals, dtype=float)
+        for i in range(len(x_arr) - 1):
+            x1, y1 = x_arr[i], y_arr[i]
+            x2, y2 = x_arr[i + 1], y_arr[i + 1]
+            if x2 <= x1:
+                continue
+            if (x2 - x1) > 1.0:
+                pad = min(gap_pad, (x2 - x1) * 0.4)
+                mid = 0.5 * (x1 + x2)
+                x_left = mid - pad / 2.0
+                x_right = mid + pad / 2.0
+                frac_left = (x_left - x1) / (x2 - x1)
+                frac_right = (x_right - x1) / (x2 - x1)
+                y_left = y1 + (y2 - y1) * frac_left
+                y_right = y1 + (y2 - y1) * frac_right
+                ax.plot([x1, x_left], [y1, y_left], color=color, linewidth=line_width, alpha=0.9)
+                ax.plot([x_right, x2], [y_right, y2], color=color, linewidth=line_width, alpha=0.9)
+            else:
+                ax.plot([x1, x2], [y1, y2], color=color, linewidth=line_width, alpha=0.9)
+
+    def _plot_combined_metric(stats_df, ylabel, conds=("rewarded", "unrewarded", "fa"), colors=None):
         if stats_df is None or stats_df.empty or not session_index:
             return None
         fig, ax = plt.subplots(figsize=figsize)
-        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+        palette_map = colors or {"rewarded": "#4CAF50", "unrewarded": "#F44336", "fa": "#2196F3"}
+        for cond in conds:
+            color = palette_map.get(cond, "#555555")
             sub = stats_df[stats_df["condition"] == cond].sort_values("session_index")
             if sub.empty:
                 continue
             x_vals = sub["session_index"].to_numpy(dtype=float)
             y_vals = sub["mean"].to_numpy(dtype=float)
             y_errs = sub["sem"].to_numpy(dtype=float)
-            ax.plot(x_vals, y_vals, "o-", color=color, label=f"{cond} session means")
+            ax.plot(x_vals, y_vals, "o", color=color, label=f"{cond} session means", markersize=6)
+            _plot_line_with_gaps(ax, x_vals, y_vals, color=color, line_width=2.0, gap_pad=0.18)
             ax.fill_between(x_vals, y_vals - y_errs, y_vals + y_errs, color=color, alpha=0.2, linewidth=0)
         ax.set_xticks(np.arange(len(session_index)))
         ax.set_xticklabels([str(i) for i in range(len(session_index))])
@@ -3762,14 +3866,14 @@ def plot_movement_analysis_statistics(
         fig.tight_layout()
         return fig
 
-    def _plot_normalized_by_condition(cond):
+    def _plot_normalized_by_condition(cond, *, stats_src, norm_src):
         fig, ax = plt.subplots(figsize=figsize)
         plotted = False
         for metric, style in metric_styles.items():
-            stats_df = stats_by_metric.get(metric)
-            if stats_df is None or stats_df.empty or metric not in norm_factors:
+            stats_df = stats_src.get(metric)
+            if stats_df is None or stats_df.empty or metric not in norm_src:
                 continue
-            norm_min, norm_range = norm_factors[metric]
+            norm_min, norm_range = norm_src[metric]
             sub = stats_df[stats_df["condition"] == cond].sort_values("session_index")
             if sub.empty:
                 continue
@@ -3780,7 +3884,8 @@ def plot_movement_analysis_statistics(
                 y_vals = (sub["mean"].to_numpy(dtype=float) - norm_min) / norm_range
                 y_errs = sub["sem"].to_numpy(dtype=float) / norm_range
             x_vals = sub["session_index"].to_numpy(dtype=float)
-            ax.plot(x_vals, y_vals, "o-", color=style["color"], label=style["label"])
+            ax.plot(x_vals, y_vals, "o", color=style["color"], label=style["label"], markersize=6)
+            _plot_line_with_gaps(ax, x_vals, y_vals, color=style["color"], line_width=2.0, gap_pad=0.18)
             ax.fill_between(x_vals, y_vals - y_errs, y_vals + y_errs, color=style["color"], alpha=0.2, linewidth=0)
             plotted = True
         if not plotted:
@@ -3801,12 +3906,30 @@ def plot_movement_analysis_statistics(
         combined_path_fig = _plot_combined_metric(stats_by_metric.get("path_length_px"), "Path length (px)")
         combined_travel_fig = _plot_combined_metric(stats_by_metric.get("travel_time_s"), "Duration (s)")
         combined_tortuosity_fig = _plot_combined_metric(stats_by_metric.get("tortuosity"), "Tortuosity")
+
+        if hidden_rule_analysis:
+            combined_fig_hr = _plot_combined_metric(stats_by_metric_hr.get("latency_s"), "Latency (s)", cond_order_hr, cond_colors_hr)
+            combined_valve_fig_hr = _plot_combined_metric(stats_by_metric_hr.get("movement_from_valve_s"), "Consideration Time (s)", cond_order_hr, cond_colors_hr)
+            combined_path_fig_hr = _plot_combined_metric(stats_by_metric_hr.get("path_length_px"), "Path length (px)", cond_order_hr, cond_colors_hr)
+            combined_travel_fig_hr = _plot_combined_metric(stats_by_metric_hr.get("travel_time_s"), "Duration (s)", cond_order_hr, cond_colors_hr)
+            combined_tortuosity_fig_hr = _plot_combined_metric(stats_by_metric_hr.get("tortuosity"), "Tortuosity", cond_order_hr, cond_colors_hr)
+        else:
+            combined_fig_hr = None
+            combined_valve_fig_hr = None
+            combined_path_fig_hr = None
+            combined_travel_fig_hr = None
+            combined_tortuosity_fig_hr = None
     else:
         combined_fig = None
         combined_valve_fig = None
         combined_path_fig = None
         combined_travel_fig = None
         combined_tortuosity_fig = None
+        combined_fig_hr = None
+        combined_valve_fig_hr = None
+        combined_path_fig_hr = None
+        combined_travel_fig_hr = None
+        combined_tortuosity_fig_hr = None
 
     def _cond_title(c):
         if c == "rewarded":
@@ -3818,20 +3941,28 @@ def plot_movement_analysis_statistics(
         return c
 
     combined_normalized_by_condition = {}
+    combined_normalized_by_condition_hr = {}
     if len(session_index) > 1 and session_index:
         for cond in ["rewarded", "unrewarded", "fa"]:
-            fig_norm = _plot_normalized_by_condition(cond)
+            fig_norm = _plot_normalized_by_condition(cond, stats_src=stats_by_metric, norm_src=norm_factors)
             if fig_norm is not None:
                 fig_norm.axes[0].set_title(_cond_title(cond))
                 combined_normalized_by_condition[cond] = fig_norm
 
+        if hidden_rule_analysis and cond_order_hr:
+            for cond in cond_order_hr:
+                fig_norm_hr = _plot_normalized_by_condition(cond, stats_src=stats_by_metric_hr, norm_src=norm_factors_hr)
+                if fig_norm_hr is not None:
+                    fig_norm_hr.axes[0].set_title(cond)
+                    combined_normalized_by_condition_hr[cond] = fig_norm_hr
+
     # Statistical summaries across all pooled sessions/trials (by condition)
     stats_summary = {}
-    stats_summary["latency_s"] = _kw_mwu_by_group(pd.concat(combined_rows, ignore_index=True) if combined_rows else pd.DataFrame(), "latency_s")
-    stats_summary["movement_from_valve_s"] = _kw_mwu_by_group(pd.concat(combined_valve_rows, ignore_index=True) if combined_valve_rows else pd.DataFrame(), "movement_from_valve_s")
-    stats_summary["path_length_px"] = _kw_mwu_by_group(pd.concat(combined_path_rows, ignore_index=True) if combined_path_rows else pd.DataFrame(), "path_length_px")
-    stats_summary["travel_time_s"] = _kw_mwu_by_group(pd.concat(combined_travel_rows, ignore_index=True) if combined_travel_rows else pd.DataFrame(), "travel_time_s")
-    stats_summary["tortuosity"] = _kw_mwu_by_group(pd.concat(combined_tortuosity_rows, ignore_index=True) if combined_tortuosity_rows else pd.DataFrame(), "tortuosity")
+    stats_summary["latency_s"] = _kw_mwu_by_group(pd.DataFrame(combined_rows) if combined_rows else pd.DataFrame(), "latency_s")
+    stats_summary["movement_from_valve_s"] = _kw_mwu_by_group(pd.DataFrame(combined_valve_rows) if combined_valve_rows else pd.DataFrame(), "movement_from_valve_s")
+    stats_summary["path_length_px"] = _kw_mwu_by_group(pd.DataFrame(combined_path_rows) if combined_path_rows else pd.DataFrame(), "path_length_px")
+    stats_summary["travel_time_s"] = _kw_mwu_by_group(pd.DataFrame(combined_travel_rows) if combined_travel_rows else pd.DataFrame(), "travel_time_s")
+    stats_summary["tortuosity"] = _kw_mwu_by_group(pd.DataFrame(combined_tortuosity_rows) if combined_tortuosity_rows else pd.DataFrame(), "tortuosity")
 
     # Print statistical summary
     print("\n" + "="*60)
@@ -3865,7 +3996,13 @@ def plot_movement_analysis_statistics(
         "combined_path": combined_path_fig,
         "combined_travel": combined_travel_fig,
         "combined_tortuosity": combined_tortuosity_fig,
+        "combined_hr": combined_fig_hr,
+        "combined_valve_hr": combined_valve_fig_hr,
+        "combined_path_hr": combined_path_fig_hr,
+        "combined_travel_hr": combined_travel_fig_hr,
+        "combined_tortuosity_hr": combined_tortuosity_fig_hr,
         "combined_normalized_by_condition": combined_normalized_by_condition,
+        "combined_normalized_by_condition_hr": combined_normalized_by_condition_hr,
         "stats": stats_summary,
     }
 
