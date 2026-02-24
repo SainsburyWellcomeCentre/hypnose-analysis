@@ -2605,16 +2605,20 @@ def plot_traces_with_speed_threshold(
     aborted_color = "#555555"
 
     # Normalize FA labels
+    fa_label_display = "FA"
     if isinstance(fa_types, str):
         if fa_types.lower() == "all":
+            fa_label_display = "all"
             def fa_filter_fn(lbl):
                 return str(lbl).lower().startswith("fa_") if pd.notna(lbl) else False
         else:
             fa_set = {s.strip().lower() for s in re.split(r"[;,]", fa_types) if s.strip()}
+            fa_label_display = ", ".join(sorted(fa_set)) if fa_set else "selected"
             def fa_filter_fn(lbl):
                 return str(lbl).lower() in fa_set if pd.notna(lbl) else False
     else:
         fa_set = {str(s).strip().lower() for s in fa_types}
+        fa_label_display = ", ".join(sorted(fa_set)) if fa_set else "selected"
         def fa_filter_fn(lbl):
             return str(lbl).lower() in fa_set if pd.notna(lbl) else False
 
@@ -3303,6 +3307,8 @@ def plot_movement_analysis_statistics(
 
         return {"kruskal": kruskal_res, "pairwise": pairwise}
 
+    multi_session = len(ses_dirs) > 1
+
     per_session = []
     combined_rows = []
     combined_valve_rows = []
@@ -3437,232 +3443,275 @@ def plot_movement_analysis_statistics(
             entry["data"] = df_ses
             combined_rows.append(df_ses)
 
-            fig, ax = plt.subplots(figsize=figsize)
-            for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-                sub = df_ses[df_ses["condition"] == cond]
-                if sub.empty:
-                    continue
-                y = sub["latency_s"].astype(float)
-                x0 = cond_positions[cond]
-                x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
-                ax.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
-                mean = y.mean()
-                sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
-                ax.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-            ax.set_xticks(list(cond_positions.values()))
-            ax.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-            ax.set_xlim(-0.2, 1.0)
-            _style_axis(ax, ylabel="Latency (s)", xticklabels=["Rewarded", "Unrewarded", "FA"])
-            fig.tight_layout()
-            entry["fig"] = fig
+            if not multi_session:
+                fig, ax = plt.subplots(figsize=figsize)
+                for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                    sub = df_ses[df_ses["condition"] == cond]
+                    if sub.empty:
+                        continue
+                    y = sub["latency_s"].astype(float)
+                    x0 = cond_positions[cond]
+                    x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
+                    ax.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
+                    mean = y.mean()
+                    sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+                    ax.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
+                ax.set_xticks(list(cond_positions.values()))
+                ax.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+                ax.set_xlim(-0.2, 1.0)
+                _style_axis(ax, ylabel="Latency (s)", xticklabels=["Rewarded", "Unrewarded", "FA"])
+                fig.tight_layout()
+                entry["fig"] = fig
 
-            entry["fig_latency_by_trial"] = _plot_by_trial_sequence(df_ses, "latency_s", "Latency (s)")
+                entry["fig_latency_by_trial"] = _plot_by_trial_sequence(df_ses, "latency_s", "Latency (s)")
 
         if valve_latencies:
             df_valve = pd.DataFrame(valve_latencies)
             entry["valve_data"] = df_valve
             combined_valve_rows.append(df_valve)
 
-            fig_v, ax_v = plt.subplots(figsize=figsize)
-            for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-                sub = df_valve[df_valve["condition"] == cond]
-                if sub.empty:
-                    continue
-                y = sub["movement_from_valve_s"].astype(float)
-                x0 = cond_positions[cond]
-                x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
-                ax_v.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
-                mean = y.mean()
-                sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
-                ax_v.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-            ax_v.set_xticks(list(cond_positions.values()))
-            ax_v.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-            ax_v.set_xlim(-0.2, 1.0)
-            _style_axis(ax_v, ylabel="Consideration Time (s)", xticklabels=["Rewarded", "Unrewarded", "FA"])
-            fig_v.tight_layout()
-            entry["fig_valve"] = fig_v
+            if not multi_session:
+                fig_v, ax_v = plt.subplots(figsize=figsize)
+                for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                    sub = df_valve[df_valve["condition"] == cond]
+                    if sub.empty:
+                        continue
+                    y = sub["movement_from_valve_s"].astype(float)
+                    x0 = cond_positions[cond]
+                    x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
+                    ax_v.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
+                    mean = y.mean()
+                    sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+                    ax_v.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
+                ax_v.set_xticks(list(cond_positions.values()))
+                ax_v.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+                ax_v.set_xlim(-0.2, 1.0)
+                _style_axis(ax_v, ylabel="Consideration Time (s)", xticklabels=["Rewarded", "Unrewarded", "FA"])
+                fig_v.tight_layout()
+                entry["fig_valve"] = fig_v
 
-            entry["fig_valve_by_trial"] = _plot_by_trial_sequence(df_valve, "movement_from_valve_s", "Consideration Time (s)")
+                entry["fig_valve_by_trial"] = _plot_by_trial_sequence(df_valve, "movement_from_valve_s", "Consideration Time (s)")
 
         if path_lengths:
             df_path = pd.DataFrame(path_lengths)
             entry["path_data"] = df_path
             combined_path_rows.append(df_path)
 
-            fig_p, ax_p = plt.subplots(figsize=figsize)
-            for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-                sub = df_path[df_path["condition"] == cond]
-                if sub.empty:
-                    continue
-                y = sub["path_length_px"].astype(float)
-                x0 = cond_positions[cond]
-                x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
-                ax_p.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
-                mean = y.mean()
-                sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
-                ax_p.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-            ax_p.set_xticks(list(cond_positions.values()))
-            ax_p.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-            ax_p.set_xlim(-0.2, 1.0)
-            _style_axis(ax_p, ylabel="Path length (px)", xticklabels=["Rewarded", "Unrewarded", "FA"])
-            fig_p.tight_layout()
-            entry["fig_path"] = fig_p
+            if not multi_session:
+                fig_p, ax_p = plt.subplots(figsize=figsize)
+                for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                    sub = df_path[df_path["condition"] == cond]
+                    if sub.empty:
+                        continue
+                    y = sub["path_length_px"].astype(float)
+                    x0 = cond_positions[cond]
+                    x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
+                    ax_p.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
+                    mean = y.mean()
+                    sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+                    ax_p.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
+                ax_p.set_xticks(list(cond_positions.values()))
+                ax_p.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+                ax_p.set_xlim(-0.2, 1.0)
+                _style_axis(ax_p, ylabel="Path length (px)", xticklabels=["Rewarded", "Unrewarded", "FA"])
+                fig_p.tight_layout()
+                entry["fig_path"] = fig_p
 
-            entry["fig_path_by_trial"] = _plot_by_trial_sequence(df_path, "path_length_px", "Path length (px)")
+                entry["fig_path_by_trial"] = _plot_by_trial_sequence(df_path, "path_length_px", "Path length (px)")
 
         if travel_times:
             df_travel = pd.DataFrame(travel_times)
             entry["travel_data"] = df_travel
             combined_travel_rows.append(df_travel)
 
-            fig_t, ax_t = plt.subplots(figsize=figsize)
-            for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-                sub = df_travel[df_travel["condition"] == cond]
-                if sub.empty:
-                    continue
-                y = sub["travel_time_s"].astype(float)
-                x0 = cond_positions[cond]
-                x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
-                ax_t.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
-                mean = y.mean()
-                sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
-                ax_t.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-            ax_t.set_xticks(list(cond_positions.values()))
-            ax_t.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-            ax_t.set_xlim(-0.2, 1.0)
-            _style_axis(ax_t, ylabel="Duration (s)", xticklabels=["Rewarded", "Unrewarded", "FA"])
-            fig_t.tight_layout()
-            entry["fig_travel"] = fig_t
+            if not multi_session:
+                fig_t, ax_t = plt.subplots(figsize=figsize)
+                for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                    sub = df_travel[df_travel["condition"] == cond]
+                    if sub.empty:
+                        continue
+                    y = sub["travel_time_s"].astype(float)
+                    x0 = cond_positions[cond]
+                    x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
+                    ax_t.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
+                    mean = y.mean()
+                    sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+                    ax_t.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
+                ax_t.set_xticks(list(cond_positions.values()))
+                ax_t.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+                ax_t.set_xlim(-0.2, 1.0)
+                _style_axis(ax_t, ylabel="Duration (s)", xticklabels=["Rewarded", "Unrewarded", "FA"])
+                fig_t.tight_layout()
+                entry["fig_travel"] = fig_t
 
-            entry["fig_travel_by_trial"] = _plot_by_trial_sequence(df_travel, "travel_time_s", "Duration (s)")
+                entry["fig_travel_by_trial"] = _plot_by_trial_sequence(df_travel, "travel_time_s", "Duration (s)")
 
         if tortuosities:
             df_tort = pd.DataFrame(tortuosities)
             entry["tortuosity_data"] = df_tort
             combined_tortuosity_rows.append(df_tort)
 
-            fig_to, ax_to = plt.subplots(figsize=figsize)
-            for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-                sub = df_tort[df_tort["condition"] == cond]
-                if sub.empty:
-                    continue
-                y = sub["tortuosity"].astype(float)
-                x0 = cond_positions[cond]
-                x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
-                ax_to.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
-                mean = y.mean()
-                sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
-                ax_to.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
-            ax_to.set_xticks(list(cond_positions.values()))
-            ax_to.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
-            ax_to.set_xlim(-0.2, 1.0)
-            _style_axis(ax_to, ylabel="Tortuosity", xticklabels=["Rewarded", "Unrewarded", "FA"])
-            fig_to.tight_layout()
-            entry["fig_tortuosity"] = fig_to
+            if not multi_session:
+                fig_to, ax_to = plt.subplots(figsize=figsize)
+                for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
+                    sub = df_tort[df_tort["condition"] == cond]
+                    if sub.empty:
+                        continue
+                    y = sub["tortuosity"].astype(float)
+                    x0 = cond_positions[cond]
+                    x_jit = x0 + (np.random.rand(len(y)) - 0.5) * jitter_span
+                    ax_to.scatter(x_jit, y, color=color, alpha=0.6, label=f"{cond} trials")
+                    mean = y.mean()
+                    sem = y.std(ddof=1) / np.sqrt(len(y)) if len(y) > 1 else np.nan
+                    ax_to.errorbar(x0, mean, yerr=sem, fmt="o", color="black", capsize=4)
+                ax_to.set_xticks(list(cond_positions.values()))
+                ax_to.set_xticklabels(["Rewarded", "Unrewarded", "FA"])
+                ax_to.set_xlim(-0.2, 1.0)
+                _style_axis(ax_to, ylabel="Tortuosity", xticklabels=["Rewarded", "Unrewarded", "FA"])
+                fig_to.tight_layout()
+                entry["fig_tortuosity"] = fig_to
 
-            entry["fig_tortuosity_by_trial"] = _plot_by_trial_sequence(df_tort, "tortuosity", "Tortuosity")
+                entry["fig_tortuosity_by_trial"] = _plot_by_trial_sequence(df_tort, "tortuosity", "Tortuosity")
 
-        per_session.append(entry)
+        if not multi_session:
+            per_session.append(entry)
 
-    combined_fig = None
-    combined_valve_fig = None
-    combined_path_fig = None
-    combined_travel_fig = None
-    combined_tortuosity_fig = None
-    if len(per_session) > 1 and combined_rows:
-        all_df = pd.concat(combined_rows, ignore_index=True)
+    # Build chronological session order for combined plots (index = 0..N-1)
+    raw_dates = [ses.name.split("_date-")[-1] for ses in ses_dirs]
+    try:
+        session_dates_order = sorted(set(raw_dates), key=int)
+    except Exception:
+        session_dates_order = sorted(set(raw_dates))
+    session_index = {d: idx for idx, d in enumerate(session_dates_order)}
+
+    def _build_session_stats(df, value_col):
+        if df is None or df.empty or not session_index:
+            return None
+        stats = df.groupby(["condition", "date"])[value_col].agg(["mean", "sem"]).reset_index()
+        stats["session_index"] = stats["date"].map(session_index)
+        stats = stats.dropna(subset=["session_index"]).copy()
+        return stats
+
+    metric_frames = {
+        "latency_s": combined_rows,
+        "movement_from_valve_s": combined_valve_rows,
+        "path_length_px": combined_path_rows,
+        "travel_time_s": combined_travel_rows,
+        "tortuosity": combined_tortuosity_rows,
+    }
+
+    stats_by_metric = {}
+    for metric, rows in metric_frames.items():
+        if rows:
+            stats_by_metric[metric] = _build_session_stats(pd.concat(rows, ignore_index=True), metric)
+        else:
+            stats_by_metric[metric] = None
+
+    # Normalization factors per metric (min-max across all session means, all conditions)
+    norm_factors = {}
+    for metric, stats_df in stats_by_metric.items():
+        if stats_df is None or stats_df.empty:
+            continue
+        vals = stats_df["mean"].astype(float).to_numpy()
+        if vals.size == 0:
+            continue
+        norm_min = float(np.nanmin(vals))
+        norm_max = float(np.nanmax(vals))
+        norm_range = norm_max - norm_min
+        norm_factors[metric] = (norm_min, norm_range)
+
+    metric_styles = {
+        "latency_s": {"color": "#8BC34A", "label": "Latency (s)"},
+        "movement_from_valve_s": {"color": "#FF9800", "label": "Consideration (s)"},
+        "path_length_px": {"color": "#9C27B0", "label": "Path length (px)"},
+        "travel_time_s": {"color": "#795548", "label": "Duration (s)"},
+        "tortuosity": {"color": "#3F51B5", "label": "Tortuosity"},
+    }
+
+    def _plot_combined_metric(stats_df, ylabel):
+        if stats_df is None or stats_df.empty or not session_index:
+            return None
         fig, ax = plt.subplots(figsize=figsize)
         for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-            sub = all_df[all_df["condition"] == cond]
+            sub = stats_df[stats_df["condition"] == cond].sort_values("session_index")
             if sub.empty:
                 continue
-            per_ses = sub.groupby("date")["latency_s"]
-            means = per_ses.mean()
-            sems = per_ses.sem()
-            x_vals = np.arange(len(means))
-            ax.errorbar(x_vals, means.values, yerr=sems.values, fmt="o", color=color, label=f"{cond} session means")
-        ax.set_xticks(np.arange(len(all_df["date"].unique())))
-        ax.set_xticklabels(sorted(all_df["date"].unique()), rotation=45, ha="right", fontsize=12)
-        _style_axis(ax, ylabel="Latency (s)")
+            x_vals = sub["session_index"].to_numpy(dtype=float)
+            y_vals = sub["mean"].to_numpy(dtype=float)
+            y_errs = sub["sem"].to_numpy(dtype=float)
+            ax.plot(x_vals, y_vals, "o-", color=color, label=f"{cond} session means")
+            ax.fill_between(x_vals, y_vals - y_errs, y_vals + y_errs, color=color, alpha=0.2, linewidth=0)
+        ax.set_xticks(np.arange(len(session_index)))
+        ax.set_xticklabels([str(i) for i in range(len(session_index))])
+        ax.set_xlim(-0.5, len(session_index) - 0.5 if session_index else 0.5)
+        ax.set_xlabel("Sessions")
+        _style_axis(ax, ylabel=ylabel)
         ax.legend()
         fig.tight_layout()
-        combined_fig = fig
+        return fig
 
-    if len(per_session) > 1 and combined_valve_rows:
-        all_valve = pd.concat(combined_valve_rows, ignore_index=True)
-        fig_v, ax_v = plt.subplots(figsize=figsize)
-        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-            sub = all_valve[all_valve["condition"] == cond]
+    def _plot_normalized_by_condition(cond):
+        fig, ax = plt.subplots(figsize=figsize)
+        plotted = False
+        for metric, style in metric_styles.items():
+            stats_df = stats_by_metric.get(metric)
+            if stats_df is None or stats_df.empty or metric not in norm_factors:
+                continue
+            norm_min, norm_range = norm_factors[metric]
+            sub = stats_df[stats_df["condition"] == cond].sort_values("session_index")
             if sub.empty:
                 continue
-            per_ses = sub.groupby("date")["movement_from_valve_s"]
-            means = per_ses.mean()
-            sems = per_ses.sem()
-            x_vals = np.arange(len(means))
-            ax_v.errorbar(x_vals, means.values, yerr=sems.values, fmt="o", color=color, label=f"{cond} session means")
-        ax_v.set_xticks(np.arange(len(all_valve["date"].unique())))
-        ax_v.set_xticklabels(sorted(all_valve["date"].unique()), rotation=45, ha="right", fontsize=12)
-        _style_axis(ax_v, ylabel="Consideration Time (s)")
-        ax_v.legend()
-        fig_v.tight_layout()
-        combined_valve_fig = fig_v
+            if norm_range <= 0:
+                y_vals = np.zeros(len(sub))
+                y_errs = np.zeros(len(sub))
+            else:
+                y_vals = (sub["mean"].to_numpy(dtype=float) - norm_min) / norm_range
+                y_errs = sub["sem"].to_numpy(dtype=float) / norm_range
+            x_vals = sub["session_index"].to_numpy(dtype=float)
+            ax.plot(x_vals, y_vals, "o-", color=style["color"], label=style["label"])
+            ax.fill_between(x_vals, y_vals - y_errs, y_vals + y_errs, color=style["color"], alpha=0.2, linewidth=0)
+            plotted = True
+        if not plotted:
+            plt.close(fig)
+            return None
+        ax.set_xticks(np.arange(len(session_index)))
+        ax.set_xticklabels([str(i) for i in range(len(session_index))])
+        ax.set_xlim(-0.5, len(session_index) - 0.5 if session_index else 0.5)
+        ax.set_xlabel("Sessions")
+        _style_axis(ax, ylabel="Normalized metric (0-1)")
+        ax.legend()
+        fig.tight_layout()
+        return fig
 
-    if len(per_session) > 1 and combined_path_rows:
-        all_path = pd.concat(combined_path_rows, ignore_index=True)
-        fig_p, ax_p = plt.subplots(figsize=figsize)
-        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-            sub = all_path[all_path["condition"] == cond]
-            if sub.empty:
-                continue
-            per_ses = sub.groupby("date")["path_length_px"]
-            means = per_ses.mean()
-            sems = per_ses.sem()
-            x_vals = np.arange(len(means))
-            ax_p.errorbar(x_vals, means.values, yerr=sems.values, fmt="o", color=color, label=f"{cond} session means")
-        ax_p.set_xticks(np.arange(len(all_path["date"].unique())))
-        ax_p.set_xticklabels(sorted(all_path["date"].unique()), rotation=45, ha="right", fontsize=12)
-        _style_axis(ax_p, ylabel="Path length (px)")
-        ax_p.legend()
-        fig_p.tight_layout()
-        combined_path_fig = fig_p
+    if len(session_index) > 1:
+        combined_fig = _plot_combined_metric(stats_by_metric.get("latency_s"), "Latency (s)")
+        combined_valve_fig = _plot_combined_metric(stats_by_metric.get("movement_from_valve_s"), "Consideration Time (s)")
+        combined_path_fig = _plot_combined_metric(stats_by_metric.get("path_length_px"), "Path length (px)")
+        combined_travel_fig = _plot_combined_metric(stats_by_metric.get("travel_time_s"), "Duration (s)")
+        combined_tortuosity_fig = _plot_combined_metric(stats_by_metric.get("tortuosity"), "Tortuosity")
+    else:
+        combined_fig = None
+        combined_valve_fig = None
+        combined_path_fig = None
+        combined_travel_fig = None
+        combined_tortuosity_fig = None
 
-    if len(per_session) > 1 and combined_travel_rows:
-        all_travel = pd.concat(combined_travel_rows, ignore_index=True)
-        fig_t, ax_t = plt.subplots(figsize=figsize)
-        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-            sub = all_travel[all_travel["condition"] == cond]
-            if sub.empty:
-                continue
-            per_ses = sub.groupby("date")["travel_time_s"]
-            means = per_ses.mean()
-            sems = per_ses.sem()
-            x_vals = np.arange(len(means))
-            ax_t.errorbar(x_vals, means.values, yerr=sems.values, fmt="o", color=color, label=f"{cond} session means")
-        ax_t.set_xticks(np.arange(len(all_travel["date"].unique())))
-        ax_t.set_xticklabels(sorted(all_travel["date"].unique()), rotation=45, ha="right", fontsize=12)
-        _style_axis(ax_t, ylabel="Duration (s)")
-        ax_t.legend()
-        fig_t.tight_layout()
-        combined_travel_fig = fig_t
+    def _cond_title(c):
+        if c == "rewarded":
+            return "Rewarded"
+        if c == "unrewarded":
+            return "Unrewarded"
+        if c == "fa":
+            return "FA"
+        return c
 
-    if len(per_session) > 1 and combined_tortuosity_rows:
-        all_tort = pd.concat(combined_tortuosity_rows, ignore_index=True)
-        fig_to, ax_to = plt.subplots(figsize=figsize)
-        for cond, color in [("rewarded", "#4CAF50"), ("unrewarded", "#F44336"), ("fa", "#2196F3")]:
-            sub = all_tort[all_tort["condition"] == cond]
-            if sub.empty:
-                continue
-            per_ses = sub.groupby("date")["tortuosity"]
-            means = per_ses.mean()
-            sems = per_ses.sem()
-            x_vals = np.arange(len(means))
-            ax_to.errorbar(x_vals, means.values, yerr=sems.values, fmt="o", color=color, label=f"{cond} session means")
-        ax_to.set_xticks(np.arange(len(all_tort["date"].unique())))
-        ax_to.set_xticklabels(sorted(all_tort["date"].unique()), rotation=45, ha="right", fontsize=12)
-        _style_axis(ax_to, ylabel="Tortuosity")
-        ax_to.legend()
-        fig_to.tight_layout()
-        combined_tortuosity_fig = fig_to
+    combined_normalized_by_condition = {}
+    if len(session_index) > 1 and session_index:
+        for cond in ["rewarded", "unrewarded", "fa"]:
+            fig_norm = _plot_normalized_by_condition(cond)
+            if fig_norm is not None:
+                fig_norm.axes[0].set_title(_cond_title(cond))
+                combined_normalized_by_condition[cond] = fig_norm
 
     # Statistical summaries across all pooled sessions/trials (by condition)
     stats_summary = {}
@@ -3704,6 +3753,7 @@ def plot_movement_analysis_statistics(
         "combined_path": combined_path_fig,
         "combined_travel": combined_travel_fig,
         "combined_tortuosity": combined_tortuosity_fig,
+        "combined_normalized_by_condition": combined_normalized_by_condition,
         "stats": stats_summary,
     }
 
