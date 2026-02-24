@@ -3487,3 +3487,361 @@ def plot_fa_ratio_by_abort_odor(
     print(f"HR trials total: {int(total_hr_all)}")
 
     return fig, axes
+
+
+def plot_hidden_rule_abort_poke_gap(
+    subjid: int,
+    dates=None,
+    fa_types=None,
+    figsize=(10, 6),
+    ax=None,
+    ax_start_end=None,
+    make_second_plot: bool = True,
+    return_both: bool = False,
+):
+    """
+    For aborted trials that hit the hidden rule, compute the latency between the
+    hidden-rule odor's `poke_odor_end` and the last `poke_odor_end` in that trial.
+
+    If `fa_types` is provided (e.g., ["FA_time_in", "FA_time_out"]), trials with
+    `fa_label` in that set are plotted as "FA" and the rest as "No FA". If
+    `fa_types` is None, all trials are shown together.
+
+    Parameters
+    ----------
+    subjid : int
+        Subject ID.
+    dates : iterable | tuple | None
+        Specific dates, list, or inclusive range (start, end). None → all.
+    fa_types : iterable | str | None
+        FA labels to treat as FA. None disables FA split.
+    figsize : tuple
+        Figure size when creating a new axes.
+    ax : matplotlib Axes or None
+        Reuse an existing axes; otherwise create a new figure/axes.
+
+    Returns
+    -------
+    (fig, ax, df) or (fig, ax, df, fig_start_end, ax_start_end)
+        Default: first plot (HR poke_end → last poke_end) and dataframe.
+        If make_second_plot=True, also draws HR poke_start → last poke_end.
+        If return_both=True and second plot is created, both figures/axes are returned.
+    """
+
+    def _parse_hr_pos(val):
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return None
+        if isinstance(val, (int, float)):
+            return int(val)
+        if isinstance(val, (list, tuple)) and len(val) > 0:
+            try:
+                return int(val[0])
+            except Exception:
+                return None
+        if isinstance(val, str):
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, (list, tuple)) and parsed:
+                    return int(parsed[0])
+                if isinstance(parsed, (int, float)):
+                    return int(parsed)
+            except Exception:
+                pass
+        return None
+
+    def _parse_position_dict(val):
+        if isinstance(val, dict):
+            return val
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return {}
+        if isinstance(val, str):
+            try:
+                parsed = json.loads(val)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return {}
+
+    def _to_dt(ts):
+        if ts is None:
+            return pd.NaT
+        return pd.to_datetime(ts, errors="coerce")
+
+    derivatives_dir = get_derivatives_root()
+
+    if fa_types is None:
+        fa_set = None
+    elif isinstance(fa_types, str):
+        fa_set = {fa_types.lower()}
+    else:
+        try:
+            fa_set = {str(x).lower() for x in fa_types}
+        except Exception:
+            fa_set = None
+
+    rows = []
+
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            try:
+                date_val = int(date_str)
+            except Exception:
+                date_val = date_str
+
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+
+            td = _load_table_with_trial_data(results_dir, "trial_data")
+            if td.empty:
+                continue
+
+            td = td.copy()
+            td["is_aborted"] = td.get("is_aborted", False).fillna(False)
+            td["hit_hidden_rule"] = td.get("hit_hidden_rule", False).fillna(False)
+
+            hr_trials = td[(td["is_aborted"] == True) & (td["hit_hidden_rule"] == True)]
+            if hr_trials.empty:
+                continue
+
+            for _, row in hr_trials.iterrows():
+                hr_pos = _parse_hr_pos(row.get("hidden_rule_hit_positions"))
+                if hr_pos is None:
+                    continue
+
+                pos_dict = _parse_position_dict(row.get("position_poke_times"))
+                if not pos_dict:
+                    continue
+
+                hr_end = pd.NaT
+                hr_start = pd.NaT
+                last_end = pd.NaT
+
+                # Sort by numeric position to find the last poke end
+                for key, entry in sorted(pos_dict.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else kv[0]):
+                    try:
+                        pos_num = int(key)
+                    except Exception:
+                        continue
+                    if not isinstance(entry, dict):
+                        continue
+                    end_ts = _to_dt(entry.get("poke_odor_end"))
+                    if pd.notna(end_ts):
+                        last_end = end_ts if pd.isna(last_end) else max(last_end, end_ts)
+                        if pos_num == hr_pos:
+                            hr_end = end_ts
+                            hr_start = _to_dt(entry.get("poke_odor_start"))
+
+                if pd.isna(hr_end) or pd.isna(last_end):
+                    continue
+
+                delta_sec = (last_end - hr_end).total_seconds()
+                delta_start_end = (last_end - hr_start).total_seconds() if pd.notna(hr_start) else np.nan
+
+                if fa_set is None:
+                    category = "All"
+                else:
+                    fa_label = row.get("fa_label")
+                    is_fa = str(fa_label).lower() in fa_set if fa_label is not None else False
+                    category = "FA" if is_fa else "No FA"
+
+                rows.append({
+                    "subjid": sid,
+                    "date": date_val,
+                    "sequence_start": row.get("sequence_start"),
+                    "hidden_rule_position": hr_pos,
+                    "delta_seconds": delta_sec,
+                    "delta_start_end_seconds": delta_start_end,
+                    "category": category,
+                })
+
+    if not rows:
+        print("No aborted hidden-rule trials found with valid poke timings.")
+        return None, None, pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values(["date", "sequence_start"], na_position="last").reset_index(drop=True)
+    df["order"] = range(len(df))
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    categories = ["No FA", "FA"] if fa_set is not None else ["All"]
+    x_positions = {cat: idx for idx, cat in enumerate(categories)}
+    point_color = "#5dade2"  # light blue
+
+    for cat in categories:
+        sub = df[df["category"] == cat]
+        if sub.empty:
+            continue
+        x_pos = x_positions[cat]
+        jitter = np.random.normal(loc=x_pos, scale=0.05, size=len(sub)) if len(sub) > 1 else [x_pos]
+        ax.scatter(jitter, sub["delta_seconds"], color=point_color, alpha=0.8, s=50)
+
+        mean_val = sub["delta_seconds"].mean()
+        sem_val = sub["delta_seconds"].std(ddof=1) / np.sqrt(len(sub)) if len(sub) > 1 else 0.0
+        ax.errorbar(x_pos, mean_val, yerr=sem_val, color="black", fmt='-', lw=2.5, capsize=6, alpha=0.9)
+
+    ax.set_xticks(list(x_positions.values()))
+    ax.set_xticklabels(list(x_positions.keys()), fontsize=11, fontweight='bold')
+    ax.set_xlabel("Category")
+    ax.set_ylabel("Time Difference (s)")
+    ax.set_title(f"Hidden-rule aborted trials: last poke latency (subj {subjid})")
+    ax.grid(True, alpha=0.3)
+    ax.margins(x=0.15)
+
+    fig_start_end = None
+    ax_start_end_obj = None
+
+    if make_second_plot:
+        df_start = df[df["delta_start_end_seconds"].notna()].copy()
+        if not df_start.empty:
+            if ax_start_end is None:
+                fig_start_end, ax_start_end_obj = plt.subplots(figsize=figsize)
+            else:
+                ax_start_end_obj = ax_start_end
+                fig_start_end = ax_start_end_obj.figure
+
+            for cat in categories:
+                sub = df_start[df_start["category"] == cat]
+                if sub.empty:
+                    continue
+                x_pos = x_positions[cat]
+                jitter = np.random.normal(loc=x_pos, scale=0.05, size=len(sub)) if len(sub) > 1 else [x_pos]
+                ax_start_end_obj.scatter(jitter, sub["delta_start_end_seconds"], color=point_color, alpha=0.8, s=50)
+
+                mean_val = sub["delta_start_end_seconds"].mean()
+                sem_val = sub["delta_start_end_seconds"].std(ddof=1) / np.sqrt(len(sub)) if len(sub) > 1 else 0.0
+                ax_start_end_obj.errorbar(x_pos, mean_val, yerr=sem_val, color="black", fmt='-', lw=2.5, capsize=6, alpha=0.9)
+
+            ax_start_end_obj.set_xticks(list(x_positions.values()))
+            ax_start_end_obj.set_xticklabels(list(x_positions.keys()), fontsize=11, fontweight='bold')
+            ax_start_end_obj.set_xlabel("Category")
+            ax_start_end_obj.set_ylabel("Time Difference (s)")
+            ax_start_end_obj.set_title(f"Hidden-rule aborted trials: start→last latency (subj {subjid})")
+            ax_start_end_obj.grid(True, alpha=0.3)
+            ax_start_end_obj.margins(x=0.15)
+
+    if return_both and fig_start_end is not None:
+        return fig, ax, df, fig_start_end, ax_start_end_obj
+
+    return fig, ax, df
+
+
+def plot_hr_reward_fraction_over_trials(
+    subjid: int,
+    dates=None,
+    window_size: int = 20,
+    figsize=(10, 5),
+    ax=None,
+):
+    """
+    Plot moving-window % of rewarded trials that are hidden-rule rewarded.
+
+    - Filters to rewarded trials only (is_aborted=False, response_time_category="rewarded").
+    - Uses hidden_rule_success when present, else falls back to hit_hidden_rule.
+    - Rolls over consecutive rewarded trials across selected sessions.
+
+    Parameters
+    ----------
+    subjid : int
+        Subject ID.
+    dates : iterable | tuple | None
+        Specific dates, list, or inclusive range; None → all.
+    window_size : int
+        Rolling window size for percentage (default 20).
+    figsize : tuple
+        Figure size when creating a new axes.
+    ax : matplotlib Axes or None
+        Reuse an existing axes; otherwise create a new figure/axes.
+
+    Returns
+    -------
+    (fig, ax, df)
+        Matplotlib figure/axes and the dataframe with rolling percentage.
+    """
+
+    window_size = max(int(window_size), 1)
+    derivatives_dir = get_derivatives_root()
+
+    rows = []
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            try:
+                date_val = int(date_str)
+            except Exception:
+                date_val = date_str
+
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+
+            td = _load_table_with_trial_data(results_dir, "trial_data")
+            if td.empty:
+                continue
+
+            td = td.copy()
+            td["is_aborted"] = td.get("is_aborted", False).fillna(False)
+            td["response_time_category"] = td.get("response_time_category", "").astype(str)
+            td["sequence_start"] = pd.to_datetime(td.get("sequence_start"), errors="coerce")
+
+            rewarded = td[(td["is_aborted"] == False) & (td["response_time_category"] == "rewarded")]
+            if rewarded.empty:
+                continue
+
+            if "hidden_rule_success" in rewarded.columns:
+                hr_flag = rewarded["hidden_rule_success"].fillna(False)
+            elif "hit_hidden_rule" in rewarded.columns:
+                hr_flag = rewarded["hit_hidden_rule"].fillna(False)
+            else:
+                hr_flag = pd.Series(False, index=rewarded.index)
+
+            rewarded = rewarded.assign(
+                date=date_val,
+                hr_rewarded=hr_flag.astype(bool),
+            )
+
+            rewarded = rewarded.sort_values("sequence_start")
+            rows.extend(
+                {
+                    "date": date_val,
+                    "sequence_start": seq_start,
+                    "hr_rewarded": bool(hrv),
+                }
+                for seq_start, hrv in zip(rewarded["sequence_start"], rewarded["hr_rewarded"])
+            )
+
+    if not rows:
+        print("No rewarded trials found for requested selection.")
+        return None, None, pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values(["sequence_start", "date"]).reset_index(drop=True)
+    df["trial_idx"] = np.arange(1, len(df) + 1)
+    df["hr_rewarded_flag"] = df["hr_rewarded"].astype(int)
+    df["hr_rewarded_pct"] = df["hr_rewarded_flag"].rolling(window_size, min_periods=1).mean() * 100.0
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
+
+    ax.plot(df["trial_idx"], df["hr_rewarded_pct"], color="black", linewidth=1.6)
+
+    ax.set_xlabel("Consecutive Rewarded Trial #")
+    ax.set_ylabel("HR Rewarded (%)")
+    ax.set_ylim(0, 100)
+    ax.set_title(f"Hidden-rule share of rewarded trials (window={window_size}, subj {subjid})")
+    ax.grid(False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    return fig, ax, df
