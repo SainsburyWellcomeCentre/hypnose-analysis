@@ -26,6 +26,7 @@ import re
 import numpy as np
 import json
 from collections import OrderedDict
+from hypnose_analysis.utils.save_utils import save_figure
 
 CACHE = OrderedDict()
 CACHE_MAX_ITEMS = 40  # Maximum number of cached items
@@ -427,6 +428,8 @@ def plot_behavior_metrics(
     y_range: Optional[Tuple[float, float]] = None,
     plot_HR_separately: bool = False,
     clean_graph: bool = False,
+    save: bool = False,
+    return_paths: bool = False,
 ):
     """
     Plot selected metrics over sessions for one or more subjects.
@@ -448,9 +451,11 @@ def plot_behavior_metrics(
     - y_range: Optional tuple (ymin, ymax); if provided, sets y-limits for each plot.
     - plot_HR_separately: If True and plotting hidden_rule_detection_rate, also plot per-HR-odor detection alongside total.
     - clean_graph: If True, hide title/labels/tick labels/legend while printing labels & tick values.
+    - save: If True, save each figure as PDF via save_figure using subjids/dates to resolve the folder.
+    - return_paths: If True and save=True, return (figs, paths); otherwise return figs.
 
     Returns:
-    - List of matplotlib Figure objects.
+    - List of matplotlib Figure objects, or (figs, paths) if return_paths is True.
     """
     if not variables:
         raise ValueError("Please provide `variables` (list of metric names or dot-paths).")
@@ -540,6 +545,7 @@ def plot_behavior_metrics(
             prot_to_color["Unknown"] = (0.6, 0.6, 0.6, 1.0)
 
     figs = []
+    saved_paths = []
     # One plot per variable
     for var in variables:
         df_var = df[df["variable"] == var]
@@ -721,6 +727,19 @@ def plot_behavior_metrics(
         plt.tight_layout()
         figs.append(fig)
 
+        if save:
+            try:
+                save_name = f"{var}"
+                out_path = save_figure(fig, save_name, subjids=subjids, dates=dates)
+                saved_paths.append(out_path)
+                if verbose:
+                    print(f"[plot_behavior_metrics] Saved figure to {out_path}")
+            except Exception as e:
+                if verbose:
+                    print(f"[plot_behavior_metrics] Failed to save figure for {var}: {e}")
+
+    if return_paths and save:
+        return figs, saved_paths
     return figs
 
 def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_path=None, plot_choice_acc=False, plot_AB=True, clean_graph=False):
