@@ -25,7 +25,7 @@ def nature_style() -> dict:
 
         # Axes
         "axes.linewidth": 0.8,
-        "axes.labelsize": 8,
+        "axes.labelsize": 20,
         "axes.titlesize": 9,
         "axes.labelpad": 3,
         "axes.spines.top": False,

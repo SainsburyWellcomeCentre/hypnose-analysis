@@ -653,15 +653,13 @@ def plot_behavior_metrics(
 
         
         if not clean_graph:
-            ax.set_xlabel("Days", fontsize=30, fontweight='bold')
-            ax.set_ylabel(var.replace("_", " ").title(), fontsize=30, fontweight='bold')
-            ax.set_title(title_formatted, fontsize=20, fontweight='bold')
-        ax.spines['bottom'].set_linewidth(2)
+            ax.set_xlabel("Days")
+            ax.set_ylabel(var.replace("_", " ").title())
+            ax.set_title(title_formatted)
         
         # Remove upper and right spines
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
-        ax.spines["left"].set_linewidth(3)
 
         # No grid
         ax.grid(False)
@@ -911,15 +909,12 @@ def plot_decision_accuracy_by_odor(
                 alpha=0.7 if odor not in ('Total', 'Global Choice Accuracy') else 0.8,
                 zorder=10 if odor in ('Total', 'Global Choice Accuracy') else 1)
     
-    ax.set_xlabel('Days', fontsize=30, fontweight='bold')
-    ax.set_ylabel('Accuracy', fontsize=30, fontweight='bold')
-    ax.tick_params(axis='both', labelsize=26)
+    ax.set_xlabel('Days')
+    ax.set_ylabel('Accuracy')
     ax.set_ylim([0, 1.05])
     ax.set_xlim([-0.1, len(unique_dates) + 0.1])
     ax.axhline(y=0.5, color='gray', linestyle='--', linewidth=1, alpha=0.3)
-    ax.legend(loc='best', fontsize=20)
-    ax.spines['left'].set_linewidth(2)
-    ax.spines['bottom'].set_linewidth(2)
+    ax.legend(loc='best')
         
     # Shift tick positions left by 1 while keeping labels unchanged (day 1 plotted at x=0)
     orig_xticks = ax.get_xticks()
@@ -937,7 +932,7 @@ def plot_decision_accuracy_by_odor(
     title = f"Subject {str(subjid).zfill(3)} - Decision Accuracy by Odor"
     if plot_choice_acc:
         title += " (with Global Choice Accuracy)"
-    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_title(title)
     
     if clean_graph:
         _clean_graph(ax, xlabel="Days", ylabel="Accuracy")
@@ -1125,10 +1120,9 @@ def plot_sampling_times_analysis(
                    capsize=5, capthick=2, linewidth=2, zorder=4)
         ax.set_xticks(positions)
     
-    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
-    ax.set_title(f'Completed Trials: Sampling Time by Position\n(Subject {str(subjid).zfill(3)})', 
-                fontsize=12, fontweight='bold')
+    ax.set_xlabel('Position')
+    ax.set_ylabel('Poke Time (ms)')
+    ax.set_title(f'Completed Trials: Sampling Time by Position\n(Subject {str(subjid).zfill(3)})')
     ax.legend(loc='best')
     
     # ============ PLOT 2: Aborted by Position ============
@@ -1158,10 +1152,9 @@ def plot_sampling_times_analysis(
                    capsize=5, capthick=2, linewidth=2, zorder=4)
         ax.set_xticks(positions)
     
-    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
-    ax.set_title(f'Aborted Trials: Sampling Time by Position\n(excl. abort position)', 
-                fontsize=12, fontweight='bold')
+    ax.set_xlabel('Position')
+    ax.set_ylabel('Poke Time (ms)')
+    ax.set_title(f'Aborted Trials: Sampling Time by Position\n(excl. abort position)')
     ax.legend(loc='best')
     
     # ============ PLOT 3: Completed by Odor ============
@@ -1194,10 +1187,9 @@ def plot_sampling_times_analysis(
         ax.set_xticks(range(len(odors)))
         ax.set_xticklabels(odors)
     
-    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
-    ax.set_title(f'Completed Trials: Sampling Time by Odor\n(Subject {str(subjid).zfill(3)})', 
-                fontsize=12, fontweight='bold')
+    ax.set_xlabel('Odor')
+    ax.set_ylabel('Poke Time (ms)')
+    ax.set_title(f'Completed Trials: Sampling Time by Odor\n(Subject {str(subjid).zfill(3)})')
     ax.legend(loc='best')
     
     # ============ PLOT 4: Aborted by Odor ============
@@ -1230,10 +1222,9 @@ def plot_sampling_times_analysis(
         ax.set_xticks(range(len(odors)))
         ax.set_xticklabels(odors)
     
-    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
-    ax.set_title(f'Aborted Trials: Sampling Time by Odor\n(excl. abort odor)', 
-                fontsize=12, fontweight='bold')
+    ax.set_xlabel('Odor')
+    ax.set_ylabel('Poke Time (ms)')
+    ax.set_title(f'Aborted Trials: Sampling Time by Odor\n(excl. abort odor)')
     ax.legend(loc='best')
     
     # ============ PLOT 5: Average Poke Time per Position over Sessions ============
@@ -1264,11 +1255,10 @@ def plot_sampling_times_analysis(
                     markersize=5,
                     alpha=0.85)
 
-        ax.set_xlabel("Session", fontsize=11, fontweight='bold')
-        ax.set_ylabel("Average Poke Time (ms)", fontsize=11, fontweight='bold')
-        ax.set_title(f'Average Poke Time per Position Across Sessions\n(Subject {str(subjid).zfill(3)})',
-                    fontsize=12, fontweight='bold')
-        ax.legend(loc='best', fontsize=9)
+        ax.set_xlabel("Session")
+        ax.set_ylabel("Average Poke Time (ms)")
+        ax.set_title(f'Average Poke Time per Position Across Sessions\n(Subject {str(subjid).zfill(3)})')
+        ax.legend(loc='best')
     else:
         ax.text(0.5, 0.5, "No data", ha='center', va='center', transform=ax.transAxes)
         ax.set_axis_off()
@@ -1305,11 +1295,10 @@ def plot_sampling_times_analysis(
                     markersize=5,
                     alpha=0.9)
 
-        ax.set_xlabel("Session", fontsize=11, fontweight='bold')
-        ax.set_ylabel("Average Sampling Time (ms)", fontsize=11, fontweight='bold')
-        ax.set_title(f'Average Sampling Time per Odor Across Sessions\n(Subject {str(subjid).zfill(3)})',
-                    fontsize=12, fontweight='bold')
-        ax.legend(loc='best', fontsize=9)
+        ax.set_xlabel("Session")
+        ax.set_ylabel("Average Sampling Time (ms)")
+        ax.set_title(f'Average Sampling Time per Odor Across Sessions\n(Subject {str(subjid).zfill(3)})')
+        ax.legend(loc='best')
     else:
         ax.text(0.5, 0.5, "No data", ha='center', va='center', transform=ax.transAxes)
         ax.set_axis_off()
@@ -1674,10 +1663,9 @@ def plot_abortion_and_fa_rates(
         ax.set_xticks(range(len(positions)))
         ax.set_xticklabels(positions)
     
-    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
-    ax.set_ylabel('FA Rate', fontsize=11, fontweight='bold')
-    ax.set_title(f'FA Rate per Position\n(Subject {str(subjid).zfill(3)})', 
-                fontsize=12, fontweight='bold')
+    ax.set_xlabel('Position')
+    ax.set_ylabel('FA Rate')
+    ax.set_title(f'FA Rate per Position\n(Subject {str(subjid).zfill(3)})')
     ax.set_ylim([0, 1.05])
     ax.legend(loc='best')
     
@@ -1706,10 +1694,9 @@ def plot_abortion_and_fa_rates(
         ax.set_xticks(range(len(odors)))
         ax.set_xticklabels(odors)
     
-    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
-    ax.set_ylabel('FA Rate', fontsize=11, fontweight='bold')
-    ax.set_title(f'FA Rate per Odor\n(Subject {str(subjid).zfill(3)})', 
-                fontsize=12, fontweight='bold')
+    ax.set_xlabel('Odor')
+    ax.set_ylabel('FA Rate')
+    ax.set_title(f'FA Rate per Odor\n(Subject {str(subjid).zfill(3)})')
     ax.set_ylim([0, 1.05])
     ax.legend(loc='best')
     
@@ -1735,10 +1722,9 @@ def plot_abortion_and_fa_rates(
                    capsize=5, capthick=2, linewidth=2, zorder=4)
         ax.set_xticks(positions)
     
-    ax.set_xlabel('Position', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Abortion Rate', fontsize=11, fontweight='bold')
-    ax.set_title(f'Abortion Rate per Position\n(Subject {str(subjid).zfill(3)})', 
-                fontsize=12, fontweight='bold')
+    ax.set_xlabel('Position')
+    ax.set_ylabel('Abortion Rate')
+    ax.set_title(f'Abortion Rate per Position\n(Subject {str(subjid).zfill(3)})')
     ax.set_ylim([0, 1.05])
     ax.legend(loc='best')
     
@@ -1767,10 +1753,9 @@ def plot_abortion_and_fa_rates(
         ax.set_xticks(range(len(odors)))
         ax.set_xticklabels(odors)
     
-    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
-    ax.set_ylabel('Abortion Rate', fontsize=11, fontweight='bold')
-    ax.set_title(f'Abortion Rate per Odor\n(Subject {str(subjid).zfill(3)})', 
-                fontsize=12, fontweight='bold')
+    ax.set_xlabel('Odor')
+    ax.set_ylabel('Abortion Rate')
+    ax.set_title(f'Abortion Rate per Odor\n(Subject {str(subjid).zfill(3)})')
     ax.set_ylim([0, 1.05])
     ax.legend(loc='best')
 
@@ -1798,10 +1783,9 @@ def plot_abortion_and_fa_rates(
         ax.set_xticks(range(len(odors)))
         ax.set_xticklabels(odors)
     
-    ax.set_xlabel('Odor', fontsize=11, fontweight='bold')
-    ax.set_ylabel('FA Ratio (A-B)/(A+B)', fontsize=11, fontweight='bold')
-    ax.set_title(f'FA Ratio (A-B)/(A+B) per Odor\n(Subject {str(subjid).zfill(3)})', 
-                fontsize=12, fontweight='bold')
+    ax.set_xlabel('Odor')
+    ax.set_ylabel('FA Ratio (A-B)/(A+B)')
+    ax.set_title(f'FA Ratio (A-B)/(A+B) per Odor\n(Subject {str(subjid).zfill(3)})')
     ax.set_ylim([-1.1, 1.1])
     ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
     ax.legend(loc='best')
@@ -1993,12 +1977,11 @@ def plot_response_times_completed_vs_fa(
     
     ax.set_xlim([-0.5, 1.5])
     ax.set_xticks(x_positions)
-    ax.set_xticklabels(response_types, fontsize=12, fontweight='bold')
-    ax.set_ylabel('Response Time (ms)', fontsize=12, fontweight='bold')
+    ax.set_xticklabels(response_types)
+    ax.set_ylabel('Response Time (ms)')
     ax.set_ylim([0, y_limit])
-    ax.set_title(f'Average Response Times Comparison\n(Subject {str(subjid).zfill(3)})',
-                fontsize=14, fontweight='bold')
-    ax.legend(loc='best', fontsize=11)
+    ax.set_title(f'Average Response Times Comparison\n(Subject {str(subjid).zfill(3)})')
+    ax.legend(loc='best')
     
     plt.tight_layout()
 
@@ -2663,14 +2646,14 @@ def plot_choice_history(
     ax.set_xlim([x_min - x_padding, x_max + x_padding])
     
     ax.set_yticks([-1, 1])
-    ax.set_yticklabels(['B', 'A'], fontsize=14, fontweight='bold')
-    
-    ax.set_xlabel('Time (seconds)', fontsize=12, fontweight='bold')
-    ax.set_ylabel('Choice', fontsize=12, fontweight='bold')
+    ax.set_yticklabels(['B', 'A'])
+
+    ax.set_xlabel('Time (seconds)')
+    ax.set_ylabel('Choice')
     
     if title is None:
         title = f"Choice History - Subject {str(subjid).zfill(3)}"
-    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.set_title(title)
     
     # Create custom legend
     from matplotlib.lines import Line2D
@@ -2683,7 +2666,7 @@ def plot_choice_history(
         Line2D([0], [0], marker='o', color='w', markerfacecolor='black', 
                markersize=5, markeredgecolor='black', label='Rewarded marker', linestyle='none'),
     ]
-    ax.legend(handles=legend_elements, loc='upper left', fontsize=9, ncol=2)
+    ax.legend(handles=legend_elements, loc='upper left', ncol=2)
     
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -3913,7 +3896,7 @@ def plot_hidden_rule_abort_poke_gap(
         ax.errorbar(x_pos, mean_val, yerr=sem_val, color="black", fmt='-', lw=2.5, capsize=6, alpha=0.9)
 
     ax.set_xticks(list(x_positions.values()))
-    ax.set_xticklabels(list(x_positions.keys()), fontsize=11, fontweight='bold')
+    ax.set_xticklabels(list(x_positions.keys()))
     ax.set_xlabel("Category")
     ax.set_ylabel("Time Difference (s)")
     ax.set_title(f"Hidden-rule aborted trials: last poke latency (subj {subjid})")
@@ -3944,7 +3927,7 @@ def plot_hidden_rule_abort_poke_gap(
                 ax_start_end_obj.errorbar(x_pos, mean_val, yerr=sem_val, color="black", fmt='-', lw=2.5, capsize=6, alpha=0.9)
 
             ax_start_end_obj.set_xticks(list(x_positions.values()))
-            ax_start_end_obj.set_xticklabels(list(x_positions.keys()), fontsize=11, fontweight='bold')
+            ax_start_end_obj.set_xticklabels(list(x_positions.keys()))
             ax_start_end_obj.set_xlabel("Category")
             ax_start_end_obj.set_ylabel("Time Difference (s)")
             ax_start_end_obj.set_title(f"Hidden-rule aborted trials: start→last latency (subj {subjid})")
@@ -4094,8 +4077,6 @@ def plot_hr_reward_fraction_over_trials(
     ax.set_ylim(0, 100)
     ax.set_title(f"Hidden-rule share of rewarded trials (window={window_size}, subj {subjid})")
     ax.grid(False)
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
 
     if save:
         try:
