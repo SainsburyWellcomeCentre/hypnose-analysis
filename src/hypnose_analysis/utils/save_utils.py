@@ -190,6 +190,7 @@ def save_figure(
     *,
     subjids,
     dates=None,
+    subdir: str | Path | None = None,
     dpi: int = 600,
     bbox_inches=None,
 ):
@@ -205,6 +206,9 @@ def save_figure(
         Subject id(s) related to the figure.
     dates : int | list[int] | None
         Session date(s). Determines whether we save at session- or subject-level.
+    subdir : str | Path | None
+        Optional subdirectory inside the resolved figures directory. When provided,
+        the folder is created automatically (e.g., "movement_figures").
     dpi : int
         Dots per inch passed to savefig (default 300).
     """
@@ -222,8 +226,15 @@ def save_figure(
 
     filename = f"{save_name}_{subj_tag}_{date_tag}.pdf"
 
-    fig_dir = resolve_figure_dir(subjids, dates)
-    out_path = Path(fig_dir) / filename
+    fig_dir = Path(resolve_figure_dir(subjids, dates))
+    if subdir:
+        # Normalize to a relative path segment and avoid absolute traversal
+        subdir_path = Path(str(subdir).strip()).as_posix().strip("./")
+        if subdir_path:
+            fig_dir = fig_dir / subdir_path
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    out_path = fig_dir / filename
 
     bbox = bbox_inches if bbox_inches is not None else "tight"
     fig.savefig(out_path, bbox_inches=bbox, dpi=dpi)

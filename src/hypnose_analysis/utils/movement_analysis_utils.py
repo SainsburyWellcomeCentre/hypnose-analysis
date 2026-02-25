@@ -35,11 +35,15 @@ from hypnose_analysis.utils.visualization_utils import (
     _ensure_metrics_json,
     load_tracking_with_behavior,
 )
+from hypnose_analysis.utils.save_utils import save_figure
 import re
 import numpy as np
 import json
 from collections import OrderedDict
 from scipy.stats import kruskal, mannwhitneyu
+
+
+MOVEMENT_FIGURES_SUBDIR = "movement_figures"
 
 
 def _binned_speed(tracking_df, t_zero, t_end, pre_buffer_s, bin_s, mode):
@@ -817,9 +821,6 @@ def plot_movement_with_behavior(
     if invert_y:
         ax.invert_yaxis()
     ax.set_aspect('equal', adjustable='box')
-    ax.set_facecolor('white')
-    fig.patch.set_facecolor('white')
-    ax.grid(True, alpha=0.3)
     ax.legend()
     plt.tight_layout()
 
@@ -860,7 +861,6 @@ def plot_movement_with_behavior(
             if invert_y:
                 ax_i.invert_yaxis()
             ax_i.set_aspect('equal', adjustable='box')
-            ax_i.grid(True, alpha=0.3)
         
         # Hide unused axes if any
         for j in range(len(facet_plots), len(facet_axes_flat)):
@@ -891,10 +891,12 @@ def plot_trial_traces_by_mode(
     color_by_trial_id=False,
     figsize=(18, 6),
     smooth_window=5,
-    linewidth=1.4,
-    alpha=0.35,
     fa_types="FA_time_in",
     invert_y=True,
+    *,
+    save=False,
+    verbose=True,
+    return_paths=False,
 ):
     """
     Plot centroid traces (SLEAP) for trials filtered by mode, collapsing multiple dates into one plane.
@@ -926,14 +928,16 @@ def plot_trial_traces_by_mode(
         Figure size.
     smooth_window : int
         Rolling window for centroid smoothing (frames).
-    linewidth : float
-        Line width for individual traces.
-    alpha : float
-        Transparency for individual traces.
     fa_types : str
         Comma-separated FA labels to include (e.g., "FA_time_in" or "FA_time_in,FA_time_out" or "all").
     invert_y : bool
         If True, invert Y-axis to match video coordinates.
+    save : bool
+        When True, persist each generated figure to the movement_figures subdirectory.
+    verbose : bool
+        Print save status messages when saving figures.
+    return_paths : bool
+        If True and save=True, also return the saved figure paths alongside the figure handles.
     """
 
     allowed_modes = {
@@ -1553,12 +1557,12 @@ def plot_trial_traces_by_mode(
                 t_arr = np.asarray(seg.get("time"))
                 bins_df = seg.get("speed_bins")
                 if t_arr is None or bins_df is None or len(x) < 2:
-                    ax.plot(x, y, color="#B0B0B0", alpha=alpha, linewidth=linewidth, label=label)
+                    ax.plot(x, y, color="#B0B0B0", label=label)
                     return
                 try:
                     seg_mid_times = t_arr[:-1] + (t_arr[1:] - t_arr[:-1]) / 2
                 except Exception:
-                    ax.plot(x, y, color="#B0B0B0", alpha=alpha, linewidth=linewidth, label=label)
+                    ax.plot(x, y, color="#B0B0B0", label=label)
                     return
                 seg_arr = np.stack([np.column_stack([x[:-1], y[:-1]]), np.column_stack([x[1:], y[1:]])], axis=1)
                 colors = []
@@ -1576,7 +1580,7 @@ def plot_trial_traces_by_mode(
                         colors.append(speed_cmap(speed_norm(spd)))
                     else:
                         colors.append("#B0B0B0")
-                lc = LineCollection(seg_arr, colors=colors, linewidth=linewidth, alpha=alpha)
+                lc = LineCollection(seg_arr, colors=colors)
                 ax.add_collection(lc)
             elif color_by_index:
                 if x.size < 2 or y.size < 2:
@@ -1586,11 +1590,11 @@ def plot_trial_traces_by_mode(
                     return
                 seg_arr = np.concatenate([points[:-1], points[1:]], axis=1)
                 idx_vals = np.linspace(0, 1, len(seg_arr))
-                lc = LineCollection(seg_arr, cmap=index_cmap, norm=index_norm, linewidth=linewidth, alpha=alpha)
+                lc = LineCollection(seg_arr, cmap=index_cmap, norm=index_norm)
                 lc.set_array(idx_vals)
                 ax.add_collection(lc)
             else:
-                ax.plot(x, y, color=seg["color"], alpha=alpha, linewidth=linewidth, label=label)
+                ax.plot(x, y, color=seg["color"], label=label)
 
         for seg in segs:
             label = None
@@ -1624,8 +1628,8 @@ def plot_trial_traces_by_mode(
                 poly_x = np.concatenate([mean_x + nx * sem_r, (mean_x - nx * sem_r)[::-1]])
                 poly_y = np.concatenate([mean_y + ny * sem_r, (mean_y - ny * sem_r)[::-1]])
 
-                ax.fill(poly_x, poly_y, color="#DDDDDD", alpha=0.35, linewidth=0)
-                ax.plot(mean_x, mean_y, color="black", linewidth=2.0, label=f"{category} mean")
+                ax.fill(poly_x, poly_y, color="#DDDDDD", alpha=0.35)
+                ax.plot(mean_x, mean_y, color="black", label=f"{category} mean")
 
         if color_by_speed_active:
             sm = cm.ScalarMappable(norm=speed_norm, cmap=speed_cmap)
@@ -1647,13 +1651,30 @@ def plot_trial_traces_by_mode(
         if invert_y:
             ax.invert_yaxis()
         ax.set_aspect('equal', adjustable='box')
-        ax.grid(True, alpha=0.3)
         handles, labels = ax.get_legend_handles_labels()
         if handles:
             ax.legend()
 
     figs = []
     axes_out = []
+    saved_paths = []
+
+    def _slugify(value: str) -> str:
+        slug = re.sub(r"[^0-9a-zA-Z]+", "_", str(value)).strip("_")
+        return slug.lower() or "figure"
+
+    suffix_parts = [mode]
+    if show_average:
+        suffix_parts.append("average")
+    if highlight_hr:
+        suffix_parts.append("hr_highlight")
+    if color_by_index:
+        suffix_parts.append("idx_color")
+    if color_by_speed:
+        suffix_parts.append("speed_color")
+    if color_by_trial_id:
+        suffix_parts.append("trialid_color")
+    save_suffix = "_".join(filter(None, suffix_parts))
 
     def _make_fig(axis_key, title=None):
         fig, ax = plt.subplots(1, 1, figsize=figsize)
@@ -1663,6 +1684,24 @@ def plot_trial_traces_by_mode(
         plt.tight_layout()
         figs.append(fig)
         axes_out.append(ax)
+
+        if save:
+            axis_slug = _slugify(axis_key)
+            save_name = f"trial_traces_{axis_slug}_{save_suffix}" if save_suffix else f"trial_traces_{axis_slug}"
+            try:
+                out_path = save_figure(
+                    fig,
+                    save_name,
+                    subjids=[subjid],
+                    dates=dates,
+                    subdir=MOVEMENT_FIGURES_SUBDIR,
+                )
+                saved_paths.append(out_path)
+                if verbose:
+                    print(f"[plot_trial_traces_by_mode] Saved figure to {out_path}")
+            except Exception as exc:
+                if verbose:
+                    print(f"[plot_trial_traces_by_mode] Failed to save figure '{save_name}': {exc}")
 
     # Layout by mode (separate figure per axis)
     if mode in {"rewarded", "rewarded_hr", "completed", "fa_by_response"}:
@@ -1687,7 +1726,10 @@ def plot_trial_traces_by_mode(
         for key in axis_keys:
             _make_fig(key, key)
 
-    return figs if len(figs) > 1 else (figs[0], axes_out[0])
+    result = figs if len(figs) > 1 else (figs[0], axes_out[0])
+    if save and return_paths:
+        return result, saved_paths
+    return result
 
 
 def run_speed_analysis_batch(
@@ -2380,12 +2422,40 @@ def plot_epoch_speeds_by_condition(
     threshold_alpha: float = 10.0,
     threshold_beta: float = 10.0,
     figsize=(8, 5),
+    save: bool = False,
+    verbose: bool = True,
+    return_paths: bool = False,
 ):
     """Plot cue-port speed epochs from precomputed speed_analysis.parquet.
 
     Uses outputs from compute_speed_analysis (same parameters) to build per-session, per-condition
     per-trial traces with session mean overlay and optional threshold lines. Violin plots are omitted.
+    Figures can optionally be saved into the movement_figures subdirectory when `save=True`.
     """
+
+    saved_paths = []
+
+    def _slugify(value: str) -> str:
+        slug = re.sub(r"[^0-9a-zA-Z]+", "_", str(value)).strip("_")
+        return slug.lower() or "figure"
+
+    def _save_fig(fig, save_name: str, date_scope):
+        if not save:
+            return
+        try:
+            out_path = save_figure(
+                fig,
+                save_name,
+                subjids=[subjid],
+                dates=date_scope,
+                subdir=MOVEMENT_FIGURES_SUBDIR,
+            )
+            saved_paths.append(out_path)
+            if verbose:
+                print(f"[plot_epoch_speeds_by_condition] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_epoch_speeds_by_condition] Failed to save figure '{save_name}': {exc}")
 
     if mode not in {"max", "mean"}:
         raise ValueError("mode must be 'max' or 'mean'")
@@ -2499,6 +2569,10 @@ def plot_epoch_speeds_by_condition(
             fig_t.tight_layout()
             figs_by_cond[cond] = fig_t
 
+            date_scope = [int(date_str)] if str(date_str).isdigit() else [date_str]
+            save_name = f"epoch_speeds_{_slugify(cond)}_{_slugify(mode)}_{_slugify(date_str)}"
+            _save_fig(fig_t, save_name, date_scope)
+
             if trial_arrays:
                 combined_data[cond].append((date_str, mids_all, np.nanmean(np.vstack(trial_arrays), axis=0)))
 
@@ -2532,8 +2606,17 @@ def plot_epoch_speeds_by_condition(
             fig.tight_layout()
             combined_figs[cond] = fig
 
-    return {"per_session": per_session, "combined": combined_figs}
+            date_scope = []
+            if combined_data[cond]:
+                for date_str, *_ in combined_data[cond]:
+                    date_scope.append(int(date_str) if str(date_str).isdigit() else date_str)
+            save_name = f"epoch_speeds_combined_{_slugify(cond)}_{_slugify(mode)}"
+            _save_fig(fig, save_name, date_scope or dates)
 
+    result = {"per_session": per_session, "combined": combined_figs}
+    if save and return_paths:
+        return result, saved_paths
+    return result
 
 def plot_traces_with_speed_threshold(
     subjid,
@@ -2548,6 +2631,9 @@ def plot_traces_with_speed_threshold(
     smooth_window: int = 5,
     figsize=(10, 8),
     invert_y: bool = True,
+    save: bool = False,
+    verbose: bool = True,
+    return_paths: bool = False,
 ):
     """Plot spatial traces for rewarded, unrewarded, and FA trials with a speed threshold marker.
 
@@ -2584,11 +2670,42 @@ def plot_traces_with_speed_threshold(
         Figure size for each condition plot.
     invert_y : bool
         If True, invert Y-axis to match video coordinates.
+    save : bool
+        When True, saves each generated figure into movement_figures via save_figure().
+    verbose : bool
+        If True, logs save successes/failures.
+    return_paths : bool
+        When True and save is enabled, returns list of saved file paths alongside the figures.
 
     Returns
     -------
-    dict with keys "rewarded", "unrewarded", "fa" mapping to matplotlib figures.
+    dict with keys "rewarded", "unrewarded", "fa" mapping to matplotlib figures. When
+    return_paths is True, also returns the list of saved file paths.
     """
+
+    saved_paths = []
+
+    def _slugify(value: str) -> str:
+        slug = re.sub(r"[^0-9a-zA-Z]+", "_", str(value)).strip("_")
+        return slug.lower() or "figure"
+
+    def _save_fig(fig, save_name: str, date_scope):
+        if not save:
+            return
+        try:
+            out_path = save_figure(
+                fig,
+                save_name,
+                subjids=[subjid],
+                dates=date_scope,
+                subdir=MOVEMENT_FIGURES_SUBDIR,
+            )
+            saved_paths.append(out_path)
+            if verbose:
+                print(f"[plot_traces_with_speed_threshold] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_traces_with_speed_threshold] Failed to save figure '{save_name}': {exc}")
 
     # Ensure helper is available even if an old module version was loaded
     try:
@@ -2621,6 +2738,13 @@ def plot_traces_with_speed_threshold(
         fa_label_display = ", ".join(sorted(fa_set)) if fa_set else "selected"
         def fa_filter_fn(lbl):
             return str(lbl).lower() in fa_set if pd.notna(lbl) else False
+
+    suffix_parts = [mode]
+    if fa_label_display:
+        suffix_parts.append(_slugify(fa_label_display))
+    if smooth_window > 1:
+        suffix_parts.append(f"smooth{smooth_window}")
+    save_suffix = "_".join(filter(None, suffix_parts))
 
     if mode not in {"max", "mean"}:
         raise ValueError("mode must be 'max' or 'mean'")
@@ -2967,18 +3091,29 @@ def plot_traces_with_speed_threshold(
             continue
         fig, ax = plt.subplots(figsize=figsize)
         for tr in traces[cond]:
-            ax.plot(tr["x"], tr["y"], color=tr["color"], alpha=0.35, linewidth=1.2)
+            ax.plot(tr["x"], tr["y"], color=tr["color"])
         for mk in markers[cond]:
-            ax.scatter(mk["xy"][0], mk["xy"][1], color="black", s=18, zorder=5)
+            ax.scatter(mk["xy"][0], mk["xy"][1], color="black", zorder=5)
         ax.set_title(f"{label} traces with speed-threshold crossing")
         ax.set_xlabel("X Position (px)")
         ax.set_ylabel("Y Position (px)")
         if invert_y:
             ax.invert_yaxis()
         ax.set_aspect('equal', adjustable='box')
-        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
         figs[cond] = fig
 
+        cond_dates_raw = sorted({tr.get("session") for tr in traces[cond] if tr.get("session")})
+        date_scope = []
+        for date_str in cond_dates_raw:
+            date_scope.append(int(date_str) if str(date_str).isdigit() else date_str)
+        save_name = f"speed_threshold_traces_{_slugify(cond)}"
+        if save_suffix:
+            save_name = f"{save_name}_{save_suffix}"
+        _save_fig(fig, save_name, date_scope or dates)
+
+    if save and return_paths:
+        return figs, saved_paths
     return figs
 
 
@@ -2992,27 +3127,64 @@ def plot_tortuosity_lines_overlay(
     fixed_goal_a_xy=(208, 930),
     fixed_goal_b_xy=(973, 930),
     figsize=(8, 8),
+    save: bool = False,
+    verbose: bool = True,
+    return_paths: bool = False,
 ):
     """Plot traces by condition with both data-derived tortuosity lines and fixed lines overlaid.
 
     Uses speed_analysis.parquet to align start/end times per trial. For each trial, draws the trajectory,
     a line from start→goal derived from tracking, and a fixed start→goal line (A/B) using provided coordinates.
-    Returns a dict of figures keyed by (date, condition).
+    Returns a dict of figures keyed by (date, condition). When save=True, PDFs are written into
+    movement_figures via save_figure(), and return_paths controls whether saved paths are returned.
     """
 
+    saved_paths = []
+
+    def _slugify(value: str) -> str:
+        slug = re.sub(r"[^0-9a-zA-Z]+", "_", str(value)).strip("_")
+        return slug.lower() or "figure"
+
+    def _save_fig(fig, save_name: str, date_scope):
+        if not save:
+            return
+        try:
+            out_path = save_figure(
+                fig,
+                save_name,
+                subjids=[subjid],
+                dates=date_scope,
+                subdir=MOVEMENT_FIGURES_SUBDIR,
+            )
+            saved_paths.append(out_path)
+            if verbose:
+                print(f"[plot_tortuosity_lines_overlay] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_tortuosity_lines_overlay] Failed to save figure '{save_name}': {exc}")
+
     # FA filter
+    fa_label_display = "FA"
     if isinstance(fa_types, str):
         if fa_types.lower() == "all":
+            fa_label_display = "all"
             def fa_filter_fn(lbl):
                 return str(lbl).lower().startswith("fa_") if pd.notna(lbl) else False
         else:
             fa_set = {s.strip().lower() for s in re.split(r"[;,]", fa_types) if s.strip()}
+            fa_label_display = ", ".join(sorted(fa_set)) if fa_set else "selected"
             def fa_filter_fn(lbl):
                 return str(lbl).lower() in fa_set if pd.notna(lbl) else False
     else:
         fa_set = {str(s).strip().lower() for s in fa_types}
+        fa_label_display = ", ".join(sorted(fa_set)) if fa_set else "selected"
         def fa_filter_fn(lbl):
             return str(lbl).lower() in fa_set if pd.notna(lbl) else False
+
+    suffix_parts = [f"bin{bin_ms}"]
+    if fa_label_display:
+        suffix_parts.append(_slugify(fa_label_display))
+    save_suffix = "_".join(filter(None, suffix_parts))
 
     subj_str = f"sub-{str(subjid).zfill(3)}"
     subj_dirs = list(get_derivatives_root().glob(f"{subj_str}_id-*"))
@@ -3153,26 +3325,29 @@ def plot_tortuosity_lines_overlay(
                 continue
             fig, ax = plt.subplots(figsize=figsize)
             for (x_arr, y_arr), (sxy, gxy), (fsxy, fgxy) in zip(traces[cond], data_lines[cond], fixed_lines[cond]):
-                ax.plot(x_arr, y_arr, color=cond_colors[cond], alpha=0.35, linewidth=1.2)
-                ax.plot([sxy[0], gxy[0]], [sxy[1], gxy[1]], color=data_line_color, linestyle="--", linewidth=1.4, alpha=0.9)
-                ax.plot([fsxy[0], fgxy[0]], [fsxy[1], fgxy[1]], color=fixed_line_color, linestyle="-", linewidth=1.4, alpha=0.9)
+                ax.plot(x_arr, y_arr, color=cond_colors[cond])
+                ax.plot([sxy[0], gxy[0]], [sxy[1], gxy[1]], color=data_line_color, linestyle="--")
+                ax.plot([fsxy[0], fgxy[0]], [fsxy[1], fgxy[1]], color=fixed_line_color)
             # Always show a reference fixed B line for visual comparison
             ax.plot(
                 [fixed_start_xy[0], fixed_goal_b_xy[0]],
                 [fixed_start_xy[1], fixed_goal_b_xy[1]],
                 color=fixed_line_color,
-                linestyle="-",
-                linewidth=1.6,
-                alpha=0.6,
             )
             ax.set_title(f"{cond.capitalize()} traces with data vs fixed lines — {date_str}")
             ax.set_xlabel("X (px)")
             ax.set_ylabel("Y (px)")
             ax.set_aspect("equal", adjustable="box")
             ax.invert_yaxis()
-            ax.grid(True, alpha=0.3)
             figs[(date_str, cond)] = fig
 
+            date_scope = [int(date_str)] if str(date_str).isdigit() else [date_str]
+            save_name = f"tortuosity_overlay_{_slugify(cond)}_{_slugify(date_str)}"
+            if save_suffix:
+                save_name = f"{save_name}_{save_suffix}"
+            _save_fig(fig, save_name, date_scope or dates)
+    if save and return_paths:
+        return figs, saved_paths
     return figs
 
 
@@ -3184,6 +3359,9 @@ def plot_movement_analysis_statistics(
     figsize=(10, 6),
     clean_graph: bool = False,
     hidden_rule_analysis: bool = False,
+    save: bool = False,
+    verbose: bool = True,
+    return_paths: bool = False,
 ):
     """Scatter movement-related metrics per condition with mean±SEM.
 
@@ -3194,8 +3372,34 @@ def plot_movement_analysis_statistics(
     - Movement duration per trial (travel_time_s from speed_analysis.parquet)
     - Tortuosity per trial (tortuosity from speed_analysis.parquet)
 
-    Returns dict with per-session figs and combined figs when multiple dates are provided.
+    Returns dict with per-session figs and combined figs when multiple dates are provided. When
+    save=True, each figure is written to movement_figures via save_figure(); return_paths=True
+    additionally returns the list of saved file paths.
     """
+
+    saved_paths = []
+
+    def _slugify(value: str) -> str:
+        slug = re.sub(r"[^0-9a-zA-Z]+", "_", str(value)).strip("_")
+        return slug.lower() or "figure"
+
+    def _save_fig(fig, save_name: str, date_scope):
+        if not save or fig is None:
+            return
+        try:
+            out_path = save_figure(
+                fig,
+                save_name,
+                subjids=[subjid],
+                dates=date_scope,
+                subdir=MOVEMENT_FIGURES_SUBDIR,
+            )
+            saved_paths.append(out_path)
+            if verbose:
+                print(f"[plot_movement_analysis_statistics] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_movement_analysis_statistics] Failed to save figure '{save_name}': {exc}")
 
     # FA filter
     if isinstance(fa_types, str):
@@ -3471,6 +3675,8 @@ def plot_movement_analysis_statistics(
 
     for ses in ses_dirs:
         date_str = ses.name.split("_date-")[-1]
+        date_scope = [int(date_str)] if str(date_str).isdigit() else [date_str]
+        date_slug = _slugify(date_str)
         results_dir = ses / "saved_analysis_results"
         if not results_dir.exists():
             continue
@@ -3627,7 +3833,13 @@ def plot_movement_analysis_statistics(
                 fig.tight_layout()
                 entry["fig"] = fig
 
-                entry["fig_latency_by_trial"] = _plot_by_trial_sequence(df_ses, "latency_s", "Latency (s)")
+                save_name = f"movement_stats_latency_{date_slug}"
+                _save_fig(fig, save_name, date_scope)
+
+                fig_seq = _plot_by_trial_sequence(df_ses, "latency_s", "Latency (s)")
+                entry["fig_latency_by_trial"] = fig_seq
+                save_name_seq = f"movement_stats_latency_sequence_{date_slug}"
+                _save_fig(fig_seq, save_name_seq, date_scope)
 
         if valve_latencies:
             df_valve = pd.DataFrame(valve_latencies)
@@ -3654,7 +3866,13 @@ def plot_movement_analysis_statistics(
                 fig_v.tight_layout()
                 entry["fig_valve"] = fig_v
 
-                entry["fig_valve_by_trial"] = _plot_by_trial_sequence(df_valve, "movement_from_valve_s", "Consideration Time (s)")
+                save_name_valve = f"movement_stats_consideration_{date_slug}"
+                _save_fig(fig_v, save_name_valve, date_scope)
+
+                fig_valve_seq = _plot_by_trial_sequence(df_valve, "movement_from_valve_s", "Consideration Time (s)")
+                entry["fig_valve_by_trial"] = fig_valve_seq
+                save_name_valve_seq = f"movement_stats_consideration_sequence_{date_slug}"
+                _save_fig(fig_valve_seq, save_name_valve_seq, date_scope)
 
         if path_lengths:
             df_path = pd.DataFrame(path_lengths)
@@ -3681,7 +3899,13 @@ def plot_movement_analysis_statistics(
                 fig_p.tight_layout()
                 entry["fig_path"] = fig_p
 
-                entry["fig_path_by_trial"] = _plot_by_trial_sequence(df_path, "path_length_px", "Path length (px)")
+                save_name_path = f"movement_stats_path_length_{date_slug}"
+                _save_fig(fig_p, save_name_path, date_scope)
+
+                fig_path_seq = _plot_by_trial_sequence(df_path, "path_length_px", "Path length (px)")
+                entry["fig_path_by_trial"] = fig_path_seq
+                save_name_path_seq = f"movement_stats_path_length_sequence_{date_slug}"
+                _save_fig(fig_path_seq, save_name_path_seq, date_scope)
 
         if travel_times:
             df_travel = pd.DataFrame(travel_times)
@@ -3708,7 +3932,13 @@ def plot_movement_analysis_statistics(
                 fig_t.tight_layout()
                 entry["fig_travel"] = fig_t
 
-                entry["fig_travel_by_trial"] = _plot_by_trial_sequence(df_travel, "travel_time_s", "Duration (s)")
+                save_name_travel = f"movement_stats_duration_{date_slug}"
+                _save_fig(fig_t, save_name_travel, date_scope)
+
+                fig_travel_seq = _plot_by_trial_sequence(df_travel, "travel_time_s", "Duration (s)")
+                entry["fig_travel_by_trial"] = fig_travel_seq
+                save_name_travel_seq = f"movement_stats_duration_sequence_{date_slug}"
+                _save_fig(fig_travel_seq, save_name_travel_seq, date_scope)
 
         if tortuosities:
             df_tort = pd.DataFrame(tortuosities)
@@ -3734,8 +3964,13 @@ def plot_movement_analysis_statistics(
                 ax_to.set_xticklabels([_display_label(c) for c in cond_order], rotation=25, ha="right")
                 fig_to.tight_layout()
                 entry["fig_tortuosity"] = fig_to
+                save_name_tort = f"movement_stats_tortuosity_{date_slug}"
+                _save_fig(fig_to, save_name_tort, date_scope)
 
-                entry["fig_tortuosity_by_trial"] = _plot_by_trial_sequence(df_tort, "tortuosity", "Tortuosity")
+                fig_tort_seq = _plot_by_trial_sequence(df_tort, "tortuosity", "Tortuosity")
+                entry["fig_tortuosity_by_trial"] = fig_tort_seq
+                save_name_tort_seq = f"movement_stats_tortuosity_sequence_{date_slug}"
+                _save_fig(fig_tort_seq, save_name_tort_seq, date_scope)
 
         if not multi_session:
             per_session.append(entry)
@@ -3902,17 +4137,27 @@ def plot_movement_analysis_statistics(
 
     if len(session_index) > 1:
         combined_fig = _plot_combined_metric(stats_by_metric.get("latency_s"), "Latency (s)")
+        _save_fig(combined_fig, "movement_stats_combined_latency", dates)
         combined_valve_fig = _plot_combined_metric(stats_by_metric.get("movement_from_valve_s"), "Consideration Time (s)")
+        _save_fig(combined_valve_fig, "movement_stats_combined_consideration", dates)
         combined_path_fig = _plot_combined_metric(stats_by_metric.get("path_length_px"), "Path length (px)")
+        _save_fig(combined_path_fig, "movement_stats_combined_path_length", dates)
         combined_travel_fig = _plot_combined_metric(stats_by_metric.get("travel_time_s"), "Duration (s)")
+        _save_fig(combined_travel_fig, "movement_stats_combined_duration", dates)
         combined_tortuosity_fig = _plot_combined_metric(stats_by_metric.get("tortuosity"), "Tortuosity")
+        _save_fig(combined_tortuosity_fig, "movement_stats_combined_tortuosity", dates)
 
         if hidden_rule_analysis:
             combined_fig_hr = _plot_combined_metric(stats_by_metric_hr.get("latency_s"), "Latency (s)", cond_order_hr, cond_colors_hr)
+            _save_fig(combined_fig_hr, "movement_stats_combined_latency_hr", dates)
             combined_valve_fig_hr = _plot_combined_metric(stats_by_metric_hr.get("movement_from_valve_s"), "Consideration Time (s)", cond_order_hr, cond_colors_hr)
+            _save_fig(combined_valve_fig_hr, "movement_stats_combined_consideration_hr", dates)
             combined_path_fig_hr = _plot_combined_metric(stats_by_metric_hr.get("path_length_px"), "Path length (px)", cond_order_hr, cond_colors_hr)
+            _save_fig(combined_path_fig_hr, "movement_stats_combined_path_length_hr", dates)
             combined_travel_fig_hr = _plot_combined_metric(stats_by_metric_hr.get("travel_time_s"), "Duration (s)", cond_order_hr, cond_colors_hr)
+            _save_fig(combined_travel_fig_hr, "movement_stats_combined_duration_hr", dates)
             combined_tortuosity_fig_hr = _plot_combined_metric(stats_by_metric_hr.get("tortuosity"), "Tortuosity", cond_order_hr, cond_colors_hr)
+            _save_fig(combined_tortuosity_fig_hr, "movement_stats_combined_tortuosity_hr", dates)
         else:
             combined_fig_hr = None
             combined_valve_fig_hr = None
@@ -3948,6 +4193,8 @@ def plot_movement_analysis_statistics(
             if fig_norm is not None:
                 fig_norm.axes[0].set_title(_cond_title(cond))
                 combined_normalized_by_condition[cond] = fig_norm
+                save_name_norm = f"movement_stats_normalized_{_slugify(cond)}"
+                _save_fig(fig_norm, save_name_norm, dates)
 
         if hidden_rule_analysis and cond_order_hr:
             for cond in cond_order_hr:
@@ -3955,6 +4202,8 @@ def plot_movement_analysis_statistics(
                 if fig_norm_hr is not None:
                     fig_norm_hr.axes[0].set_title(cond)
                     combined_normalized_by_condition_hr[cond] = fig_norm_hr
+                    save_name_norm_hr = f"movement_stats_normalized_{_slugify(cond)}_hr"
+                    _save_fig(fig_norm_hr, save_name_norm_hr, dates)
 
     # Statistical summaries across all pooled sessions/trials (by condition)
     stats_summary = {}
@@ -3989,7 +4238,7 @@ def plot_movement_analysis_statistics(
 
     print("\n" + "="*60 + "\n")
 
-    return {
+    result = {
         "per_session": per_session,
         "combined": combined_fig,
         "combined_valve": combined_valve_fig,
@@ -4005,4 +4254,10 @@ def plot_movement_analysis_statistics(
         "combined_normalized_by_condition_hr": combined_normalized_by_condition_hr,
         "stats": stats_summary,
     }
+
+    if save and return_paths:
+        return result, saved_paths
+    return result
+
+
 
