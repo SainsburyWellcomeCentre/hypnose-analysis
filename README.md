@@ -34,7 +34,7 @@ Within your working directory use a terminal to clone the repo to your local fol
 
 Directories in this repo are resolved with a symlink inside /data pointing to the mounted server containing data. Depending on local structure of mounting the server, the symlink may need adjusting. 
 
-Create SymLink in Windows (*requirement*: ceph server mounted at Z:): 
+1. Windows (requires Ceph server mounted at Z:):
 
 - Open a PowerShell Terminal as Administrator
 
@@ -49,6 +49,16 @@ Create SymLink in Windows (*requirement*: ceph server mounted at Z:):
 - Create SymLink to ceph data storage by running ```New-Item -ItemType SymbolicLink -Path ".\data\rawdata" -Target "Z:\hypnose\rawdata" ```
 
 - SymLink should appear in the repo folder
+
+2. macOS (requires server mounted as /Volumes/harris)
+
+- cd into hyopnose-analysis (repo main folder)
+
+- remove existing symlink or folders by running ```rm -rf ./data/rawdata```
+
+- create data directory by running ```mkdir -p ./data```
+
+- create the synmlink to ceph by running: ```ln -s /Volumes/harris/hypnose/rawdata ./data/rawdata```
 
 ## File Copying using robocop: 
 

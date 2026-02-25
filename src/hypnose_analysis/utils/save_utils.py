@@ -11,16 +11,15 @@ from hypnose_analysis.paths import get_derivatives_root
 # Style Presets
 # --------------------------------------
 
-def nature_style():
-
-    mpl.rcParams.update({
-
+def nature_style() -> dict:
+    """
+    Return rcParams dict for 'nature-style' figures.
+    """
+    return {
         # Font
         "font.family": "sans-serif",
         "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
         "font.size": 8,
-
-        # Ensure math matches sans-serif
         "mathtext.fontset": "dejavusans",
         "mathtext.default": "regular",
 
@@ -31,10 +30,8 @@ def nature_style():
         "axes.labelpad": 3,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.grid": False,
+        "axes.grid": False,          # ensure no grid
         "axes.facecolor": "white",
-
-        # Avoid annoying scientific offset text unless needed
         "axes.formatter.useoffset": False,
 
         # Lines
@@ -47,12 +44,12 @@ def nature_style():
         "ytick.direction": "out",
         "xtick.major.width": 0.8,
         "ytick.major.width": 0.8,
-        "xtick.major.size": 3,
-        "ytick.major.size": 3,
+        "xtick.major.size": 6,
+        "ytick.major.size": 6,
         "xtick.minor.visible": False,
         "ytick.minor.visible": False,
-        "xtick.labelsize": 7,
-        "ytick.labelsize": 7,
+        "xtick.labelsize": 12,
+        "ytick.labelsize": 12,
 
         # Legend
         "legend.frameon": False,
@@ -60,26 +57,29 @@ def nature_style():
         "legend.handlelength": 1.2,
         "legend.handletextpad": 0.4,
 
-        # Color cycle (NPG-inspired)
+        # Color cycle
         "axes.prop_cycle": cycler(color=[
             "#E64B35", "#4DBBD5", "#00A087",
             "#3C5488", "#F39B7F", "#8491B4",
             "#91D1C2", "#DC0000", "#7E6148"
         ]),
 
-        # Figure
-        "figure.dpi": 300,
+        # Figure (keep display compact; saving uses explicit dpi)
+        "figure.dpi": 110,
+        "savefig.dpi": 600,
         "figure.facecolor": "white",
 
-        # Saving (Vector-friendly)
-        "pdf.fonttype": 42,   # editable text in Illustrator
+        # PDF/SVG
+        "pdf.fonttype": 42,
         "ps.fonttype": 42,
         "svg.fonttype": "none",
 
-        # Avoid rasterizing composite images in PDF
         "image.composite_image": False,
-    })
+    }
 
+
+# Apply the style globally so display and saved figures match
+mpl.rcParams.update(nature_style())
 
 # --------------------------------------
 # Size Presets
@@ -184,7 +184,15 @@ def resolve_figure_dir(subjids, dates=None) -> Path:
     return fig_dir
 
 
-def save_figure(fig: mpl.figure.Figure, save_name: str, *, subjids, dates=None, dpi: int = 600):
+def save_figure(
+    fig: mpl.figure.Figure,
+    save_name: str,
+    *,
+    subjids,
+    dates=None,
+    dpi: int = 600,
+    bbox_inches=None,
+):
     """Save a matplotlib figure as PDF into a location derived from subject/session scope.
 
     Parameters
@@ -206,8 +214,6 @@ def save_figure(fig: mpl.figure.Figure, save_name: str, *, subjids, dates=None, 
     if not save_name:
         raise ValueError("save_name must be non-empty")
     
-    nature_style()  # apply consistent styling
-
     subj_list = _coerce_list(subjids)
     date_list = _coerce_list(dates)
 
@@ -218,6 +224,9 @@ def save_figure(fig: mpl.figure.Figure, save_name: str, *, subjids, dates=None, 
 
     fig_dir = resolve_figure_dir(subjids, dates)
     out_path = Path(fig_dir) / filename
-    fig.savefig(out_path, bbox_inches="tight", dpi=dpi)
+
+    bbox = bbox_inches if bbox_inches is not None else "tight"
+    fig.savefig(out_path, bbox_inches=bbox, dpi=dpi)
+
     return out_path
 

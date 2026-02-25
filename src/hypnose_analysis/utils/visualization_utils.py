@@ -742,7 +742,18 @@ def plot_behavior_metrics(
         return figs, saved_paths
     return figs
 
-def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_path=None, plot_choice_acc=False, plot_AB=True, clean_graph=False):
+def plot_decision_accuracy_by_odor(
+    subjid,
+    dates=None,
+    figsize=(12, 6),
+    save_path=None,
+    plot_choice_acc=False,
+    plot_AB=True,
+    clean_graph=False,
+    *,
+    save=False,
+    verbose=True,
+):
     """
     Plot decision accuracy by odor (A, B) and total over dates.
     Optionally include global choice accuracy as a separate line.
@@ -935,10 +946,40 @@ def plot_decision_accuracy_by_odor(subjid, dates=None, figsize=(12, 6), save_pat
     
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
+
+    if save:
+        try:
+            suffix = "with_AB" if plot_AB else "total_only"
+            if plot_choice_acc:
+                suffix += "_choice"
+            save_name = f"decision_accuracy_by_odor_{suffix}"
+            out_path = save_figure(
+                fig,
+                save_name,
+                subjids=[subjid],
+                dates=dates,
+            )
+            if verbose:
+                print(
+                    f"[plot_decision_accuracy_by_odor] Saved figure to {out_path}"
+                )
+        except Exception as exc:
+            if verbose:
+                print(
+                    "[plot_decision_accuracy_by_odor] Failed to save figure: "
+                    f"{exc}"
+                )
     
     return fig, ax
 
-def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 18)):
+def plot_sampling_times_analysis(
+    subjid,
+    dates=None,
+    figsize=(16, 18),
+    *,
+    save=False,
+    verbose=True,
+):
     """
     Plot sampling times (poke durations) by position and by odor for completed and aborted trials.
     OPTIMIZED: Vectorized JSON parsing instead of row-by-row loops.
@@ -1088,7 +1129,6 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 18)):
     ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
     ax.set_title(f'Completed Trials: Sampling Time by Position\n(Subject {str(subjid).zfill(3)})', 
                 fontsize=12, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
     # ============ PLOT 2: Aborted by Position ============
@@ -1122,7 +1162,6 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 18)):
     ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
     ax.set_title(f'Aborted Trials: Sampling Time by Position\n(excl. abort position)', 
                 fontsize=12, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
     # ============ PLOT 3: Completed by Odor ============
@@ -1159,7 +1198,6 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 18)):
     ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
     ax.set_title(f'Completed Trials: Sampling Time by Odor\n(Subject {str(subjid).zfill(3)})', 
                 fontsize=12, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
     # ============ PLOT 4: Aborted by Odor ============
@@ -1196,7 +1234,6 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 18)):
     ax.set_ylabel('Poke Time (ms)', fontsize=11, fontweight='bold')
     ax.set_title(f'Aborted Trials: Sampling Time by Odor\n(excl. abort odor)', 
                 fontsize=12, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
     # ============ PLOT 5: Average Poke Time per Position over Sessions ============
@@ -1231,7 +1268,6 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 18)):
         ax.set_ylabel("Average Poke Time (ms)", fontsize=11, fontweight='bold')
         ax.set_title(f'Average Poke Time per Position Across Sessions\n(Subject {str(subjid).zfill(3)})',
                     fontsize=12, fontweight='bold')
-        ax.grid(True, alpha=0.25, axis='y')
         ax.legend(loc='best', fontsize=9)
     else:
         ax.text(0.5, 0.5, "No data", ha='center', va='center', transform=ax.transAxes)
@@ -1273,21 +1309,74 @@ def plot_sampling_times_analysis(subjid, dates=None, figsize=(16, 18)):
         ax.set_ylabel("Average Sampling Time (ms)", fontsize=11, fontweight='bold')
         ax.set_title(f'Average Sampling Time per Odor Across Sessions\n(Subject {str(subjid).zfill(3)})',
                     fontsize=12, fontweight='bold')
-        ax.grid(True, alpha=0.25, axis='y')
         ax.legend(loc='best', fontsize=9)
     else:
         ax.text(0.5, 0.5, "No data", ha='center', va='center', transform=ax.transAxes)
         ax.set_axis_off()
 
     plt.tight_layout()
+
+    if save:
+        panel_names = [
+            "completed_by_position",
+            "aborted_by_position",
+            "completed_by_odor",
+            "aborted_by_odor",
+            "avg_position_over_sessions",
+            "avg_odor_over_sessions",
+        ]
+        axes_flat = [axes[0, 0], axes[0, 1], axes[1, 0], axes[1, 1], axes[2, 0], axes[2, 1]]
+
+        try:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+        except Exception as exc:
+            renderer = None
+            if verbose:
+                print(
+                    "[plot_sampling_times_analysis] Unable to draw figure before saving: "
+                    f"{exc}"
+                )
+
+        if renderer is not None:
+            for ax_obj, name in zip(axes_flat, panel_names):
+                if ax_obj is None:
+                    continue
+                try:
+                    bbox = ax_obj.get_tightbbox(renderer)
+                    if bbox is None:
+                        continue
+                    bbox = bbox.expanded(1.02, 1.08)
+                    bbox_inches = bbox.transformed(fig.dpi_scale_trans.inverted())
+                    save_name = f"sampling_times_analysis_{name}"
+                    out_path = save_figure(
+                        fig,
+                        save_name,
+                        subjids=[subjid],
+                        dates=dates,
+                        bbox_inches=bbox_inches,
+                    )
+                    if verbose:
+                        print(
+                            f"[plot_sampling_times_analysis] Saved subplot '{name}' to {out_path}"
+                        )
+                except Exception as exc:
+                    if verbose:
+                        print(
+                            f"[plot_sampling_times_analysis] Failed to save subplot '{name}': {exc}"
+                        )
+
     return fig, axes
 
 def plot_abortion_and_fa_rates(
-    subjid, 
-    dates=None, 
+    subjid,
+    dates=None,
     figsize=(18, 14),
     include_noninitiated_in_fa_odor=True,
-    fa_types='FA_time_in'  # NEW PARAMETER
+    fa_types='FA_time_in',
+    *,
+    save=False,
+    verbose=True,
 ):
     """
     Plot FA rates, abortion rates, and FA ratio by position and odor across sessions.
@@ -1308,6 +1397,10 @@ def plot_abortion_and_fa_rates(
         - 'FA_Time_In,FA_Time_Out' : multiple specific types (comma-separated)
         - 'All' : all FA types starting with 'FA_'
         (default: 'FA_time_in')
+    save : bool, optional
+        If True, save each subplot as an individual PDF (default: False).
+    verbose : bool, optional
+        If True, print save status messages (default: True).
     """
     base_path = get_rawdata_root()
     server_root = get_server_root()
@@ -1553,12 +1646,14 @@ def plot_abortion_and_fa_rates(
     ax5 = fig.add_subplot(gs[2, :])  # Spans full width
     
     axes = [ax1, ax2, ax3, ax4, ax5]
+    panel_has_data = [False] * len(axes)
     
     # ============ PLOT 1: FA Rate per Position (with Non-Initiated) ============
     ax = ax1
     df_fa_pos = df[(df["metric_type"] == "fa_rate") & (df["category"] == "position")].copy()
     
     if not df_fa_pos.empty:
+        panel_has_data[0] = True
         # Sort positions: Non-Initiated first, then 1, 2, 3, 4, 5
         positions = ["Non-Initiated"] + sorted([p for p in df_fa_pos["position_or_odor"].unique() if p != "Non-Initiated"])
         position_to_x = {pos: i for i, pos in enumerate(positions)}
@@ -1584,7 +1679,6 @@ def plot_abortion_and_fa_rates(
     ax.set_title(f'FA Rate per Position\n(Subject {str(subjid).zfill(3)})', 
                 fontsize=12, fontweight='bold')
     ax.set_ylim([0, 1.05])
-    ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
     # ============ PLOT 2: FA Rate per Odor ============
@@ -1592,6 +1686,7 @@ def plot_abortion_and_fa_rates(
     df_fa_odor = df[(df["metric_type"] == "fa_rate") & (df["category"] == "odor")].copy()
     
     if not df_fa_odor.empty:
+        panel_has_data[1] = True
         odors = sorted(df_fa_odor["position_or_odor"].unique())
         odor_to_x = {odor: i for i, odor in enumerate(odors)}
         
@@ -1616,7 +1711,6 @@ def plot_abortion_and_fa_rates(
     ax.set_title(f'FA Rate per Odor\n(Subject {str(subjid).zfill(3)})', 
                 fontsize=12, fontweight='bold')
     ax.set_ylim([0, 1.05])
-    ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
     # ============ PLOT 3: Abortion Rate per Position ============
@@ -1624,6 +1718,7 @@ def plot_abortion_and_fa_rates(
     df_ab_pos = df[(df["metric_type"] == "abortion_rate") & (df["category"] == "position")].copy()
     
     if not df_ab_pos.empty:
+        panel_has_data[2] = True
         positions = sorted(df_ab_pos["position_or_odor"].unique())
         
         for pos in positions:
@@ -1645,7 +1740,6 @@ def plot_abortion_and_fa_rates(
     ax.set_title(f'Abortion Rate per Position\n(Subject {str(subjid).zfill(3)})', 
                 fontsize=12, fontweight='bold')
     ax.set_ylim([0, 1.05])
-    ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
     # ============ PLOT 4: Abortion Rate per Odor ============
@@ -1653,6 +1747,7 @@ def plot_abortion_and_fa_rates(
     df_ab_odor = df[(df["metric_type"] == "abortion_rate") & (df["category"] == "odor")].copy()
     
     if not df_ab_odor.empty:
+        panel_has_data[3] = True
         odors = sorted(df_ab_odor["position_or_odor"].unique())
         odor_to_x = {odor: i for i, odor in enumerate(odors)}
         
@@ -1677,13 +1772,13 @@ def plot_abortion_and_fa_rates(
     ax.set_title(f'Abortion Rate per Odor\n(Subject {str(subjid).zfill(3)})', 
                 fontsize=12, fontweight='bold')
     ax.set_ylim([0, 1.05])
-    ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
 
     
     # ============ PLOT 5: FA Ratio (A-B) / (A+B) per Odor (full width) ============
     ax = ax5
     if not df_port.empty:
+        panel_has_data[4] = True
         odors = sorted(df_port["odor"].unique())
         odor_to_x = {odor: i for i, odor in enumerate(odors)}
         
@@ -1709,12 +1804,69 @@ def plot_abortion_and_fa_rates(
                 fontsize=12, fontweight='bold')
     ax.set_ylim([-1.1, 1.1])
     ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
-    ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best')
     
+    plt.tight_layout()
+
+    saved_paths = []
+    if save:
+        panel_names = [
+            "fa_rate_per_position",
+            "fa_rate_per_odor",
+            "abortion_rate_per_position",
+            "abortion_rate_per_odor",
+            "fa_ratio_per_odor",
+        ]
+        try:
+            fig.canvas.draw()
+            renderer = fig.canvas.get_renderer()
+        except Exception as exc:
+            renderer = None
+            if verbose:
+                print(
+                    "[plot_abortion_and_fa_rates] Unable to draw figure before saving: "
+                    f"{exc}"
+                )
+        if renderer is not None:
+            for ax, has_data, name in zip(axes, panel_has_data, panel_names):
+                if not has_data:
+                    continue
+                try:
+                    bbox = ax.get_tightbbox(renderer)
+                    if bbox is None:
+                        continue
+                    bbox = bbox.expanded(1.02, 1.08)
+                    bbox_inches = bbox.transformed(fig.dpi_scale_trans.inverted())
+                    save_name = f"plot_abortion_and_fa_rates_{name}"
+                    out_path = save_figure(
+                        fig,
+                        save_name,
+                        subjids=[subjid],
+                        dates=dates,
+                        bbox_inches=bbox_inches,
+                    )
+                    saved_paths.append(out_path)
+                    if verbose:
+                        print(
+                            f"[plot_abortion_and_fa_rates] Saved subplot '{name}' to {out_path}"
+                        )
+                except Exception as exc:
+                    if verbose:
+                        print(
+                            f"[plot_abortion_and_fa_rates] Failed to save subplot '{name}': {exc}"
+                        )
+
     return fig, axes
 
-def plot_response_times_completed_vs_fa(subjid, dates=None, figsize=(12, 8), y_limit=20000):
+def plot_response_times_completed_vs_fa(
+    subjid,
+    dates=None,
+    figsize=(12, 8),
+    y_limit=20000,
+    *,
+    save=False,
+    verbose=True,
+):
     """
     Scatter plot comparing average response times for completed sequences vs FA Time In abortions.
     Both metrics on the same plot sharing Y-axis for easy comparison.
@@ -1729,6 +1881,10 @@ def plot_response_times_completed_vs_fa(subjid, dates=None, figsize=(12, 8), y_l
         Figure size (default: (12, 8))
     y_limit : float, optional
         Maximum Y-axis value to display (default: 20000). Points above this are excluded.
+    save : bool, optional
+        If True, save the generated figure using save_figure (default: False).
+    verbose : bool, optional
+        If True, print status messages (default: True).
     
     Returns:
     --------
@@ -1842,10 +1998,25 @@ def plot_response_times_completed_vs_fa(subjid, dates=None, figsize=(12, 8), y_l
     ax.set_ylim([0, y_limit])
     ax.set_title(f'Average Response Times Comparison\n(Subject {str(subjid).zfill(3)})',
                 fontsize=14, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
     ax.legend(loc='best', fontsize=11)
     
     plt.tight_layout()
+
+    if save:
+        try:
+            save_name = "response_times_completed_vs_fa"
+            out_path = save_figure(fig, save_name, subjids=[subjid], dates=dates)
+            if verbose:
+                print(
+                    f"[plot_response_times_completed_vs_fa] Saved figure to {out_path}"
+                )
+        except Exception as exc:
+            if verbose:
+                print(
+                    "[plot_response_times_completed_vs_fa] Failed to save figure: "
+                    f"{exc}"
+                )
+
     return fig, ax
 
 def plot_fa_ratio_a_over_sessions(
@@ -2189,7 +2360,6 @@ def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), t
     ax.set_ylabel('Cumulative Rewards')
     ax.set_title(title if title else 'Accumulated Rewards Over Time')
     ax.legend()
-    ax.grid(True)
     
     plt.tight_layout()
     
@@ -2201,7 +2371,16 @@ def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), t
     
     return fig, ax
 
-def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_path=None):
+def plot_choice_history(
+    subjid,
+    dates=None,
+    figsize=(16, 8),
+    title=None,
+    save_path=None,
+    *,
+    save=False,
+    verbose=True,
+):
     """
     Plot choice history over time for one or more sessions.
     
@@ -2228,6 +2407,10 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
         Plot title. If None, uses default
     save_path : str or Path, optional
         If provided, saves the plot to this path
+    save : bool, optional
+        If True, save the generated figure via save_figure (default False).
+    verbose : bool, optional
+        If True, print save status messages (default True).
     
     Returns:
     --------
@@ -2502,7 +2685,6 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     ]
     ax.legend(handles=legend_elements, loc='upper left', fontsize=9, ncol=2)
     
-    ax.grid(True, alpha=0.2, axis='x')
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     
@@ -2511,7 +2693,22 @@ def plot_choice_history(subjid, dates=None, figsize=(16, 8), title=None, save_pa
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved to {save_path}")
-    
+
+    if save:
+        try:
+            save_name = "choice_history"
+            out_path = save_figure(
+                fig,
+                save_name,
+                subjids=[subjid],
+                dates=dates,
+            )
+            if verbose:
+                print(f"[plot_choice_history] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_choice_history] Failed to save figure: {exc}")
+
     plt.show()
     
     return fig, ax
@@ -2950,7 +3147,6 @@ def plot_fa_ratio_by_hr_position(
         ax_scatter.set_ylabel('FA Ratio (A-B)/(A+B)', fontsize=11, fontweight='bold')
         ax_scatter.set_ylim([-1.1, 1.1])
         ax_scatter.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
-        ax_scatter.grid(True, alpha=0.3, axis='y')
         ax_scatter.set_title(f'HR Odor: {hr_odor} - By Category\n(Subject {str(subjid).zfill(3)})', 
                     fontsize=12, fontweight='bold')
         
@@ -3001,7 +3197,6 @@ def plot_fa_ratio_by_hr_position(
         ax_line.set_ylabel('FA Ratio (A-B)/(A+B)', fontsize=11, fontweight='bold')
         ax_line.set_ylim([-1.1, 1.1])
         ax_line.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
-        ax_line.grid(True, alpha=0.3)
         
         # Set x-axis to whole numbers
         max_session = int(df_odor_sorted["session_idx"].max())
@@ -3414,7 +3609,6 @@ def plot_fa_ratio_by_abort_odor(
         ax.set_ylabel('FA Ratio (A-B)/(A+B)', fontsize=11, fontweight='bold')
         ax.set_ylim([-1.1, 1.1])
         ax.axhline(y=0, color='gray', linestyle='--', linewidth=1, alpha=0.7)
-        ax.grid(True, alpha=0.3, axis='y')
         ax.set_title(f'{odor}', fontsize=12, fontweight='bold')
         
         # Set x-axis limits with padding
@@ -3517,6 +3711,9 @@ def plot_hidden_rule_abort_poke_gap(
     ax_start_end=None,
     make_second_plot: bool = True,
     return_both: bool = False,
+    *,
+    save: bool = False,
+    verbose: bool = True,
 ):
     """
     For aborted trials that hit the hidden rule, compute the latency between the
@@ -3538,6 +3735,10 @@ def plot_hidden_rule_abort_poke_gap(
         Figure size when creating a new axes.
     ax : matplotlib Axes or None
         Reuse an existing axes; otherwise create a new figure/axes.
+    save : bool, optional
+        If True, save generated figures (default False).
+    verbose : bool, optional
+        If True, print save status messages (default True).
 
     Returns
     -------
@@ -3545,6 +3746,10 @@ def plot_hidden_rule_abort_poke_gap(
         Default: first plot (HR poke_end → last poke_end) and dataframe.
         If make_second_plot=True, also draws HR poke_start → last poke_end.
         If return_both=True and second plot is created, both figures/axes are returned.
+
+    Notes
+    -----
+    If `save=True`, each generated figure is written via save_figure().
     """
 
     def _parse_hr_pos(val):
@@ -3712,7 +3917,6 @@ def plot_hidden_rule_abort_poke_gap(
     ax.set_xlabel("Category")
     ax.set_ylabel("Time Difference (s)")
     ax.set_title(f"Hidden-rule aborted trials: last poke latency (subj {subjid})")
-    ax.grid(True, alpha=0.3)
     ax.margins(x=0.15)
 
     fig_start_end = None
@@ -3744,12 +3948,35 @@ def plot_hidden_rule_abort_poke_gap(
             ax_start_end_obj.set_xlabel("Category")
             ax_start_end_obj.set_ylabel("Time Difference (s)")
             ax_start_end_obj.set_title(f"Hidden-rule aborted trials: start→last latency (subj {subjid})")
-            ax_start_end_obj.grid(True, alpha=0.3)
             ax_start_end_obj.margins(x=0.15)
+
+    if save:
+        figures_to_save = [
+            (fig, "hidden_rule_abort_poke_gap_end_latency"),
+            (fig_start_end, "hidden_rule_abort_poke_gap_start_latency"),
+        ]
+        for candidate_fig, suffix in figures_to_save:
+            if candidate_fig is None:
+                continue
+            try:
+                out_path = save_figure(
+                    candidate_fig,
+                    suffix,
+                    subjids=[subjid],
+                    dates=dates,
+                )
+                if verbose:
+                    print(
+                        f"[plot_hidden_rule_abort_poke_gap] Saved figure '{suffix}' to {out_path}"
+                    )
+            except Exception as exc:
+                if verbose:
+                    print(
+                        f"[plot_hidden_rule_abort_poke_gap] Failed to save '{suffix}': {exc}"
+                    )
 
     if return_both and fig_start_end is not None:
         return fig, ax, df, fig_start_end, ax_start_end_obj
-
     return fig, ax, df
 
 
@@ -3759,6 +3986,9 @@ def plot_hr_reward_fraction_over_trials(
     window_size: int = 20,
     figsize=(10, 5),
     ax=None,
+    *,
+    save: bool = False,
+    verbose: bool = True,
 ):
     """
     Plot moving-window % of rewarded trials that are hidden-rule rewarded.
@@ -3779,6 +4009,10 @@ def plot_hr_reward_fraction_over_trials(
         Figure size when creating a new axes.
     ax : matplotlib Axes or None
         Reuse an existing axes; otherwise create a new figure/axes.
+    save : bool, optional
+        If True, save the generated figure (default False).
+    verbose : bool, optional
+        If True, print save status messages (default True).
 
     Returns
     -------
@@ -3862,5 +4096,25 @@ def plot_hr_reward_fraction_over_trials(
     ax.grid(False)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
+
+    if save:
+        try:
+            out_path = save_figure(
+                fig,
+                "hr_reward_fraction_over_trials",
+                subjids=[subjid],
+                dates=dates,
+            )
+            if verbose:
+                print(
+                    "[plot_hr_reward_fraction_over_trials] Saved figure to "
+                    f"{out_path}"
+                )
+        except Exception as exc:
+            if verbose:
+                print(
+                    "[plot_hr_reward_fraction_over_trials] Failed to save figure: "
+                    f"{exc}"
+                )
 
     return fig, ax, df
