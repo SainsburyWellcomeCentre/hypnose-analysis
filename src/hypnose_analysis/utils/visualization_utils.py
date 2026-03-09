@@ -967,6 +967,198 @@ def plot_decision_accuracy_by_odor(
     
     return fig, ax
 
+def plot_decision_accuracy_rolling_average(
+    subjid,
+    dates=None,
+    save=False,
+    window_size=20.0,
+    step_size=1.0,
+):
+    """
+    Plot rolling decision accuracy for one subject across one or more sessions.
+
+    Creates two figures:
+    1) Completed trials only (is_aborted == False)
+    2) All trials
+
+    Decision accuracy is computed as:
+    (# trials with response_time_category == "rewarded") / (# trials in window)
+
+    Rolling windows are built over consecutive trials across selected sessions, so
+    windows naturally continue from the end of session n to the beginning of
+    session n+1.
+
+    Parameters
+    ----------
+    subjid : int
+        Subject ID.
+    dates : tuple, list, or None
+        Date range tuple, explicit list of dates, or None for all sessions.
+    save : bool, optional
+        If True, save both figures via save_figure().
+    window_size : float
+        Rolling window size in trials. Converted to int and clamped to >= 1.
+    step_size : float
+        Step size in trials between consecutive windows. Converted to int and
+        clamped to >= 1. A larger step size reduces the number of plotted points.
+
+    Returns
+    -------
+    (fig_completed, ax_completed, fig_all, ax_all)
+        Matplotlib figures and axes for completed-only and all-trials views.
+    """
+    derivatives_dir = get_derivatives_root()
+    window_n = max(1, int(window_size))
+    step_n = max(1, int(step_size))
+
+    # Collect per-session trial tables in chronological order.
+    session_rows = []
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        for ses in ses_dirs:
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            td = _load_table_with_trial_data(results_dir, "trial_data")
+            if td.empty:
+                continue
+
+            td = td.copy()
+            td["is_aborted"] = td.get("is_aborted", False).fillna(False)
+            td["response_time_category"] = td.get("response_time_category", "").astype(str)
+
+            # Prefer true trial-time ordering when available.
+            if "sequence_start" in td.columns:
+                td["sequence_start"] = pd.to_datetime(td["sequence_start"], errors="coerce")
+                td = td.sort_values("sequence_start", na_position="last")
+            elif "timestamp" in td.columns:
+                td["timestamp"] = pd.to_datetime(td["timestamp"], errors="coerce")
+                td = td.sort_values("timestamp", na_position="last")
+
+            td = td.reset_index(drop=True)
+            td["date"] = int(date_str) if str(date_str).isdigit() else date_str
+            session_rows.append(td)
+
+    if not session_rows:
+        print("No data found")
+        return None, None, None, None
+
+    all_trials = pd.concat(session_rows, ignore_index=True)
+
+    def _build_plot_df(df_in: pd.DataFrame, completed_only: bool) -> pd.DataFrame:
+        df = df_in.copy()
+        if completed_only:
+            df = df[df["is_aborted"] == False].copy()
+        df = df.reset_index(drop=True)
+
+        if df.empty:
+            return df
+
+        df["trial_idx"] = np.arange(1, len(df) + 1)
+        df["is_rewarded"] = (df["response_time_category"] == "rewarded").astype(int)
+
+        # Compute windowed accuracy using a custom stride (step_n).
+        df["decision_accuracy"] = np.nan
+        n_trials = len(df)
+        for end in range(window_n, n_trials + 1, step_n):
+            start = end - window_n
+            acc = float(df.iloc[start:end]["is_rewarded"].mean())
+            # Store value at the right edge of the current window.
+            df.iloc[end - 1, df.columns.get_loc("decision_accuracy")] = acc
+        return df
+
+    def _session_start_positions(plot_df: pd.DataFrame):
+        if plot_df.empty or "date" not in plot_df.columns:
+            return [], []
+        starts = plot_df.groupby("date", sort=False)["trial_idx"].min().sort_values()
+        return starts.values.tolist(), [str(d) for d in starts.index.tolist()]
+
+    def _draw_plot(plot_df: pd.DataFrame, title: str):
+        fig, ax = plt.subplots(figsize=(12, 6))
+
+        if plot_df.empty:
+            ax.text(0.5, 0.5, "No data", ha="center", va="center", transform=ax.transAxes)
+            ax.set_axis_off()
+            return fig, ax
+
+        valid = plot_df.dropna(subset=["decision_accuracy"])
+        if not valid.empty:
+            ax.plot(
+                valid["trial_idx"].values,
+                valid["decision_accuracy"].values,
+                color="black",
+                linewidth=2.0,
+                alpha=0.9,
+            )
+
+        start_x, _ = _session_start_positions(plot_df)
+        if start_x:
+            for i, x in enumerate(start_x):
+                ax.axvline(
+                    x=x,
+                    color="#1f77b4",
+                    linestyle=":",
+                    linewidth=1.4,
+                    alpha=0.9,
+                    zorder=1,
+                    label="Session start" if i == 0 else None,
+                )
+
+        ax.set_xlabel("Trials")
+        ax.set_ylabel("Decision Accuracy")
+        ax.set_ylim(0, 1.05)
+        ax.set_xlim(1, max(int(plot_df["trial_idx"].max()), 1))
+        ax.set_title(title)
+        ax.grid(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        if start_x:
+            ax.legend(loc="lower right")
+
+        plt.tight_layout()
+        return fig, ax
+
+    completed_df = _build_plot_df(all_trials, completed_only=True)
+    all_df = _build_plot_df(all_trials, completed_only=False)
+
+    fig_completed, ax_completed = _draw_plot(
+        completed_df,
+        f"Subject {str(subjid).zfill(3)} - Decision Accuracy Rolling Average (Completed Only, window={window_n}, step={step_n})",
+    )
+    fig_all, ax_all = _draw_plot(
+        all_df,
+        f"Subject {str(subjid).zfill(3)} - Decision Accuracy Rolling Average (All Trials, window={window_n}, step={step_n})",
+    )
+
+    if save:
+        try:
+            save_figure(
+                fig_completed,
+                f"decision_accuracy_rolling_average_completed_w{window_n}_s{step_n}",
+                subjids=[subjid],
+                dates=dates,
+            )
+        except Exception as exc:
+            print(
+                "[plot_decision_accuracy_rolling_average] Failed to save completed-only figure: "
+                f"{exc}"
+            )
+        try:
+            save_figure(
+                fig_all,
+                f"decision_accuracy_rolling_average_all_trials_w{window_n}_s{step_n}",
+                subjids=[subjid],
+                dates=dates,
+            )
+        except Exception as exc:
+            print(
+                "[plot_decision_accuracy_rolling_average] Failed to save all-trials figure: "
+                f"{exc}"
+            )
+
+    return fig_completed, ax_completed, fig_all, ax_all
+
 def plot_sampling_times_analysis(
     subjid,
     dates=None,
