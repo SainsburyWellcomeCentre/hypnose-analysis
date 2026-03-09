@@ -973,6 +973,7 @@ def plot_decision_accuracy_rolling_average(
     save=False,
     window_size=20.0,
     step_size=1.0,
+    include_avg=False,
 ):
     """
     Plot rolling decision accuracy for one subject across one or more sessions.
@@ -984,9 +985,8 @@ def plot_decision_accuracy_rolling_average(
     Decision accuracy is computed as:
     (# trials with response_time_category == "rewarded") / (# trials in window)
 
-    Rolling windows are built over consecutive trials across selected sessions, so
-    windows naturally continue from the end of session n to the beginning of
-    session n+1.
+    Rolling windows are computed within each session only (no cross-session
+    sharing). The plotted line remains continuous over global trial index.
 
     Parameters
     ----------
@@ -1001,6 +1001,11 @@ def plot_decision_accuracy_rolling_average(
     step_size : float
         Step size in trials between consecutive windows. Converted to int and
         clamped to >= 1. A larger step size reduces the number of plotted points.
+    include_avg : bool, optional
+        If True, fill early windows of each session using session-average padding:
+        rate = (sum(available_data) + missing * session_avg) / window_size.
+        If False (default), windows are plotted only when a full in-session window
+        is available.
 
     Returns
     -------
@@ -1038,41 +1043,62 @@ def plot_decision_accuracy_rolling_average(
 
             td = td.reset_index(drop=True)
             td["date"] = int(date_str) if str(date_str).isdigit() else date_str
+            td["_session_uid"] = str(ses.name)
             session_rows.append(td)
 
     if not session_rows:
         print("No data found")
         return None, None, None, None
 
-    all_trials = pd.concat(session_rows, ignore_index=True)
+    def _build_plot_df(session_tables, completed_only: bool) -> pd.DataFrame:
+        pieces = []
+        global_trial_counter = 0
 
-    def _build_plot_df(df_in: pd.DataFrame, completed_only: bool) -> pd.DataFrame:
-        df = df_in.copy()
-        if completed_only:
-            df = df[df["is_aborted"] == False].copy()
-        df = df.reset_index(drop=True)
+        for ses_df in session_tables:
+            df = ses_df.copy()
+            if completed_only:
+                df = df[df["is_aborted"] == False].copy()
+            df = df.reset_index(drop=True)
+            if df.empty:
+                continue
 
-        if df.empty:
-            return df
+            df["is_rewarded"] = (df["response_time_category"] == "rewarded").astype(int)
+            df["decision_accuracy"] = np.nan
 
-        df["trial_idx"] = np.arange(1, len(df) + 1)
-        df["is_rewarded"] = (df["response_time_category"] == "rewarded").astype(int)
+            rewards = df["is_rewarded"].to_numpy(dtype=float)
+            n_trials = len(df)
+            overall_rate = float(np.mean(rewards)) if n_trials > 0 else 0.0
 
-        # Compute windowed accuracy using a custom stride (step_n).
-        df["decision_accuracy"] = np.nan
-        n_trials = len(df)
-        for end in range(window_n, n_trials + 1, step_n):
-            start = end - window_n
-            acc = float(df.iloc[start:end]["is_rewarded"].mean())
-            # Store value at the right edge of the current window.
-            df.iloc[end - 1, df.columns.get_loc("decision_accuracy")] = acc
-        return df
+            if include_avg:
+                eval_indices = range(0, n_trials, step_n)
+                for i in eval_indices:
+                    if i < window_n:
+                        available_data = rewards[: i + 1]
+                        missing = window_n - len(available_data)
+                        rate = (float(np.sum(available_data)) + missing * overall_rate) / float(window_n)
+                    else:
+                        available_data = rewards[i - window_n + 1 : i + 1]
+                        rate = float(np.mean(available_data))
+                    df.iloc[i, df.columns.get_loc("decision_accuracy")] = rate
+            else:
+                for end in range(window_n, n_trials + 1, step_n):
+                    start = end - window_n
+                    rate = float(np.mean(rewards[start:end]))
+                    df.iloc[end - 1, df.columns.get_loc("decision_accuracy")] = rate
+
+            df["trial_idx"] = np.arange(global_trial_counter + 1, global_trial_counter + n_trials + 1)
+            global_trial_counter += n_trials
+            pieces.append(df)
+
+        if not pieces:
+            return pd.DataFrame()
+        return pd.concat(pieces, ignore_index=True)
 
     def _session_start_positions(plot_df: pd.DataFrame):
-        if plot_df.empty or "date" not in plot_df.columns:
+        if plot_df.empty or "_session_uid" not in plot_df.columns:
             return [], []
-        starts = plot_df.groupby("date", sort=False)["trial_idx"].min().sort_values()
-        return starts.values.tolist(), [str(d) for d in starts.index.tolist()]
+        starts = plot_df.groupby("_session_uid", sort=False)["trial_idx"].min().sort_values()
+        return starts.values.tolist(), [str(s) for s in starts.index.tolist()]
 
     def _draw_plot(plot_df: pd.DataFrame, title: str):
         fig, ax = plt.subplots(figsize=(12, 6))
@@ -1119,23 +1145,25 @@ def plot_decision_accuracy_rolling_average(
         plt.tight_layout()
         return fig, ax
 
-    completed_df = _build_plot_df(all_trials, completed_only=True)
-    all_df = _build_plot_df(all_trials, completed_only=False)
+    completed_df = _build_plot_df(session_rows, completed_only=True)
+    all_df = _build_plot_df(session_rows, completed_only=False)
+
+    mode_label = "include_avg" if include_avg else "standard"
 
     fig_completed, ax_completed = _draw_plot(
         completed_df,
-        f"Subject {str(subjid).zfill(3)} - Decision Accuracy Rolling Average (Completed Only, window={window_n}, step={step_n})",
+        f"Subject {str(subjid).zfill(3)} - Decision Accuracy Rolling Average (Completed Only, window={window_n}, step={step_n}, mode={mode_label})",
     )
     fig_all, ax_all = _draw_plot(
         all_df,
-        f"Subject {str(subjid).zfill(3)} - Decision Accuracy Rolling Average (All Trials, window={window_n}, step={step_n})",
+        f"Subject {str(subjid).zfill(3)} - Decision Accuracy Rolling Average (All Trials, window={window_n}, step={step_n}, mode={mode_label})",
     )
 
     if save:
         try:
             save_figure(
                 fig_completed,
-                f"decision_accuracy_rolling_average_completed_w{window_n}_s{step_n}",
+                f"decision_accuracy_rolling_average_completed_w{window_n}_s{step_n}_{mode_label}",
                 subjids=[subjid],
                 dates=dates,
             )
@@ -1147,7 +1175,7 @@ def plot_decision_accuracy_rolling_average(
         try:
             save_figure(
                 fig_all,
-                f"decision_accuracy_rolling_average_all_trials_w{window_n}_s{step_n}",
+                f"decision_accuracy_rolling_average_all_trials_w{window_n}_s{step_n}_{mode_label}",
                 subjids=[subjid],
                 dates=dates,
             )
