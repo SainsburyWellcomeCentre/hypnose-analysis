@@ -2837,6 +2837,31 @@ def plot_traces_with_speed_threshold(
             return 1
         return None
 
+    def _port_for_coloring(row, cond):
+        """Choose plotting port by explicit behavior columns first.
+
+        - FA trials: use fa_port
+        - Rewarded trials: use first_supply_port
+        - Unrewarded trials: use first_reward_poke_port
+        Falls back to generic inference if needed.
+        """
+        if cond == "fa":
+            preferred_col = "fa_port"
+        elif cond == "unrewarded":
+            preferred_col = "first_reward_poke_port"
+        else:
+            preferred_col = "first_supply_port"
+
+        if preferred_col in row and pd.notna(row[preferred_col]):
+            try:
+                return int(row[preferred_col])
+            except Exception:
+                try:
+                    return int(float(row[preferred_col]))
+                except Exception:
+                    pass
+        return _infer_port(row)
+
     def _category_from_row(row):
         odor = str(row.get("last_odor_name") or row.get("last_odor") or "A")
         if odor in {"A", "OdorA", "1"}:
@@ -2956,7 +2981,7 @@ def plot_traces_with_speed_threshold(
                     nearest_idx = int(np.argmin(np.abs((seg["time"] - thr_time).dt.total_seconds())))
                     marker = (x[nearest_idx], y[nearest_idx])
 
-                port = _infer_port(row)
+                port = _port_for_coloring(row, cond)
                 if cond == "fa":
                     color = port_colors_fa.get(port, port_colors_fa[1])
                 else:
@@ -3072,7 +3097,7 @@ def plot_traces_with_speed_threshold(
                 nearest_idx = int(np.argmin(np.abs((seg["time"] - thr_time).dt.total_seconds())))
                 marker = (x[nearest_idx], y[nearest_idx])
 
-            port = _infer_port(row)
+            port = _port_for_coloring(row, cond)
             if cond == "fa":
                 color = port_colors_fa.get(port, port_colors_fa[1])
             else:

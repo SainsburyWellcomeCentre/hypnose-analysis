@@ -744,7 +744,6 @@ def plot_decision_accuracy_by_odor(
     subjid,
     dates=None,
     figsize=(12, 6),
-    save_path=None,
     plot_choice_acc=False,
     plot_AB=True,
     clean_graph=False,
@@ -765,8 +764,6 @@ def plot_decision_accuracy_by_odor(
         Date or date range. If None, plots all available dates.
     figsize : tuple, optional
         Figure size (default: (12, 6))
-    save_path : str, optional
-        Path to save the figure. If None, figure is not saved.
     plot_choice_acc : bool, optional
         If True, also plot global choice accuracy as a dark grey line (default: False)
     plot_AB : bool, optional
@@ -939,9 +936,6 @@ def plot_decision_accuracy_by_odor(
 
     plt.tight_layout()
     
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-
     if save:
         try:
             suffix = "with_AB" if plot_AB else "total_only"
@@ -1052,7 +1046,7 @@ def plot_decision_accuracy_rolling_average(
 
     def _build_plot_df(session_tables, completed_only: bool) -> pd.DataFrame:
         pieces = []
-        global_trial_counter = 0
+        global_x_counter = 0
 
         for ses_df in session_tables:
             df = ses_df.copy()
@@ -1080,14 +1074,30 @@ def plot_decision_accuracy_rolling_average(
                         available_data = rewards[i - window_n + 1 : i + 1]
                         rate = float(np.mean(available_data))
                     df.iloc[i, df.columns.get_loc("decision_accuracy")] = rate
+
+                # In include_avg mode, keep one x-unit per trial.
+                x_local = np.arange(1, n_trials + 1)
             else:
                 for end in range(window_n, n_trials + 1, step_n):
                     start = end - window_n
                     rate = float(np.mean(rewards[start:end]))
                     df.iloc[end - 1, df.columns.get_loc("decision_accuracy")] = rate
 
-            df["trial_idx"] = np.arange(global_trial_counter + 1, global_trial_counter + n_trials + 1)
-            global_trial_counter += n_trials
+                # Shift x so first valid full window of each session is at x=1.
+                # Example window=30: point at trial 30 is displayed at session x=1.
+                x_local = np.arange(1, n_trials + 1) - (window_n - 1)
+
+            # Keep global trial index for debugging/reference.
+            df["trial_idx"] = np.arange(1, n_trials + 1)
+
+            # Display x-index used for plotting; session-wise compressed in standard mode.
+            df["plot_x_idx"] = x_local + global_x_counter
+            if include_avg:
+                session_span = n_trials
+            else:
+                # Visual span equals number of possible full-window endpoints.
+                session_span = max(1, n_trials - window_n + 1)
+            global_x_counter += session_span
             pieces.append(df)
 
         if not pieces:
@@ -1097,7 +1107,10 @@ def plot_decision_accuracy_rolling_average(
     def _session_start_positions(plot_df: pd.DataFrame):
         if plot_df.empty or "_session_uid" not in plot_df.columns:
             return [], []
-        starts = plot_df.groupby("_session_uid", sort=False)["trial_idx"].min().sort_values()
+        valid = plot_df.dropna(subset=["decision_accuracy"])
+        if valid.empty:
+            return [], []
+        starts = valid.groupby("_session_uid", sort=False)["plot_x_idx"].min().sort_values()
         return starts.values.tolist(), [str(s) for s in starts.index.tolist()]
 
     def _draw_plot(plot_df: pd.DataFrame, title: str):
@@ -1108,10 +1121,27 @@ def plot_decision_accuracy_rolling_average(
             ax.set_axis_off()
             return fig, ax
 
-        valid = plot_df.dropna(subset=["decision_accuracy"])
-        if not valid.empty:
+        # Plot each session separately so no line bridges session boundaries.
+        if "_session_uid" in plot_df.columns:
+            for _, ses_df in plot_df.groupby("_session_uid", sort=False):
+                if ses_df.empty:
+                    continue
+                valid = ses_df.dropna(subset=["decision_accuracy"])
+                if valid.empty:
+                    continue
+                ax.plot(
+                    valid["plot_x_idx"].values,
+                    valid["decision_accuracy"].values,
+                    color="black",
+                    linewidth=2.0,
+                    alpha=0.9,
+                )
+        else:
+            valid = plot_df.dropna(subset=["decision_accuracy"])
+            if valid.empty:
+                valid = plot_df
             ax.plot(
-                valid["trial_idx"].values,
+                valid["plot_x_idx"].values,
                 valid["decision_accuracy"].values,
                 color="black",
                 linewidth=2.0,
@@ -1134,7 +1164,8 @@ def plot_decision_accuracy_rolling_average(
         ax.set_xlabel("Trials")
         ax.set_ylabel("Decision Accuracy")
         ax.set_ylim(0, 1.05)
-        ax.set_xlim(1, max(int(plot_df["trial_idx"].max()), 1))
+        x_max = int(np.nanmax(plot_df["plot_x_idx"].values)) if not plot_df.empty else 1
+        ax.set_xlim(1, max(x_max, 1))
         ax.set_title(title)
         ax.grid(False)
         ax.spines["top"].set_visible(False)
@@ -2363,7 +2394,16 @@ def plot_fa_ratio_a_over_sessions(
 # =========================================================== Movement & Behavior Plotting Functions ================================================================
 
 
-def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), title=None, save_path=None):
+def plot_cumulative_rewards(
+    subjids,
+    dates,
+    split_days=False,
+    figsize=(12, 6),
+    title=None,
+    *,
+    save=False,
+    verbose=True,
+):
     """
     Plot cumulative rewards with inter-session gap collapsing.
     
@@ -2383,8 +2423,10 @@ def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), t
         Figure size (default: (12, 6))
     title : str, optional
         Plot title
-    save_path : str or Path, optional
-        Save path for figure
+    save : bool, optional
+        If True, save figure via save_figure (default: False).
+    verbose : bool, optional
+        If True, print save status messages (default: True).
     
     Returns:
     --------
@@ -2566,9 +2608,20 @@ def plot_cumulative_rewards(subjids, dates, split_days=False, figsize=(12, 6), t
     
     plt.tight_layout()
     
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Plot saved to {save_path}")
+    if save:
+        try:
+            suffix = "split_days" if split_days else "continuous"
+            out_path = save_figure(
+                fig,
+                f"cumulative_rewards_{suffix}",
+                subjids=list(subjids) if isinstance(subjids, (list, tuple)) else [subjids],
+                dates=dates,
+            )
+            if verbose:
+                print(f"[plot_cumulative_rewards] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_cumulative_rewards] Failed to save figure: {exc}")
     
     plt.show()
     
@@ -2579,7 +2632,6 @@ def plot_choice_history(
     dates=None,
     figsize=(16, 8),
     title=None,
-    save_path=None,
     *,
     save=False,
     verbose=True,
@@ -2608,8 +2660,6 @@ def plot_choice_history(
         Figure size (default: (16, 8))
     title : str, optional
         Plot title. If None, uses default
-    save_path : str or Path, optional
-        If provided, saves the plot to this path
     save : bool, optional
         If True, save the generated figure via save_figure (default False).
     verbose : bool, optional
@@ -2893,10 +2943,6 @@ def plot_choice_history(
     
     plt.tight_layout()
     
-    if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Plot saved to {save_path}")
-
     if save:
         try:
             save_name = "choice_history"
