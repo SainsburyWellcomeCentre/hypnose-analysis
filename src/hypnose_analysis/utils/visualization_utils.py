@@ -968,6 +968,7 @@ def plot_decision_accuracy_rolling_average(
     window_size=20.0,
     step_size=1.0,
     include_avg=False,
+    hr_only=False,
 ):
     """
     Plot rolling decision accuracy for one subject across one or more sessions.
@@ -977,7 +978,11 @@ def plot_decision_accuracy_rolling_average(
     2) All trials
 
     Decision accuracy is computed as:
-    (# trials with response_time_category == "rewarded") / (# trials in window)
+    (# trials in numerator condition) / (# trials in window)
+
+    Numerator condition:
+    - hr_only=False: response_time_category == "rewarded"
+    - hr_only=True: response_time_category == "rewarded" AND hidden_rule_success == True
 
     Rolling windows are computed within each session only (no cross-session
     sharing). The plotted line remains continuous over global trial index.
@@ -1000,6 +1005,9 @@ def plot_decision_accuracy_rolling_average(
         rate = (sum(available_data) + missing * session_avg) / window_size.
         If False (default), windows are plotted only when a full in-session window
         is available.
+    hr_only : bool, optional
+        If True, numerator counts only trials that are both rewarded and
+        hidden_rule_success == True. Denominator remains unchanged.
 
     Returns
     -------
@@ -1056,7 +1064,18 @@ def plot_decision_accuracy_rolling_average(
             if df.empty:
                 continue
 
-            df["is_rewarded"] = (df["response_time_category"] == "rewarded").astype(int)
+            rewarded_mask = (df["response_time_category"] == "rewarded")
+            if hr_only:
+                hr_mask = df.get("hidden_rule_success", False)
+                if isinstance(hr_mask, pd.Series):
+                    hr_mask = hr_mask.fillna(False).astype(bool)
+                else:
+                    hr_mask = pd.Series(False, index=df.index)
+                numerator_mask = rewarded_mask & hr_mask
+            else:
+                numerator_mask = rewarded_mask
+
+            df["is_rewarded"] = numerator_mask.astype(int)
             df["decision_accuracy"] = np.nan
 
             rewards = df["is_rewarded"].to_numpy(dtype=float)
@@ -1180,21 +1199,22 @@ def plot_decision_accuracy_rolling_average(
     all_df = _build_plot_df(session_rows, completed_only=False)
 
     mode_label = "include_avg" if include_avg else "standard"
+    hr_label = "hr_only" if hr_only else "all_rewarded"
 
     fig_completed, ax_completed = _draw_plot(
         completed_df,
-        f"Subject {str(subjid).zfill(3)} - Decision Accuracy Rolling Average (Completed Only, window={window_n}, step={step_n}, mode={mode_label})",
+        f"Subject {str(subjid).zfill(3)} - Decision Accuracy Rolling Average (Completed Only, window={window_n}, step={step_n}, mode={mode_label}, numerator={hr_label})",
     )
     fig_all, ax_all = _draw_plot(
         all_df,
-        f"Subject {str(subjid).zfill(3)} - Decision Accuracy Rolling Average (All Trials, window={window_n}, step={step_n}, mode={mode_label})",
+        f"Subject {str(subjid).zfill(3)} - Decision Accuracy Rolling Average (All Trials, window={window_n}, step={step_n}, mode={mode_label}, numerator={hr_label})",
     )
 
     if save:
         try:
             save_figure(
                 fig_completed,
-                f"decision_accuracy_rolling_average_completed_w{window_n}_s{step_n}_{mode_label}",
+                f"decision_accuracy_rolling_average_completed_w{window_n}_s{step_n}_{mode_label}_{hr_label}",
                 subjids=[subjid],
                 dates=dates,
             )
@@ -1206,7 +1226,7 @@ def plot_decision_accuracy_rolling_average(
         try:
             save_figure(
                 fig_all,
-                f"decision_accuracy_rolling_average_all_trials_w{window_n}_s{step_n}_{mode_label}",
+                f"decision_accuracy_rolling_average_all_trials_w{window_n}_s{step_n}_{mode_label}_{hr_label}",
                 subjids=[subjid],
                 dates=dates,
             )
@@ -2632,6 +2652,7 @@ def plot_choice_history(
     dates=None,
     figsize=(16, 8),
     title=None,
+    fa_types=("FA_time_in", "FA_time_out"),
     *,
     save=False,
     verbose=True,
@@ -2660,6 +2681,9 @@ def plot_choice_history(
         Figure size (default: (16, 8))
     title : str, optional
         Plot title. If None, uses default
+    fa_types : str | Iterable[str], optional
+        FA labels to highlight on aborted trials. Matching is case-insensitive.
+        Defaults to ("FA_time_in", "FA_time_out").
     save : bool, optional
         If True, save the generated figure via save_figure (default False).
     verbose : bool, optional
@@ -2672,6 +2696,12 @@ def plot_choice_history(
     base_path = get_rawdata_root()
     server_root = get_server_root()
     derivatives_dir = get_derivatives_root()
+
+    # Normalize FA filter labels
+    if isinstance(fa_types, str):
+        fa_set = {s.strip().lower() for s in re.split(r"[;,]", fa_types) if s.strip()}
+    else:
+        fa_set = {str(s).strip().lower() for s in fa_types} if fa_types is not None else set()
     
     subj_str = f"sub-{str(subjid).zfill(3)}"
     subject_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
@@ -2713,6 +2743,9 @@ def plot_choice_history(
                     "is_hr": is_hr,
                     "date_str": date_str,
                     "session_idx": session_idx,
+                    "abortion_time": pd.to_datetime(r.get("abortion_time"), errors="coerce") if "abortion_time" in r else pd.NaT,
+                    "fa_port": r.get("fa_port") if "fa_port" in r else np.nan,
+                    "fa_label": str(r.get("fa_label", "")).strip().lower(),
                 })
 
         if not views["trial_data"].empty:
@@ -2876,9 +2909,32 @@ def plot_choice_history(
         
         # Plot the trial
         if trial_type == 'aborted':
-            # Regular aborted: grey line
-            ax.plot([x, x], [0, 0.6], color='#888888', linewidth=linewidth, alpha=alpha, zorder=1)
-            ax.scatter([x], [0.6], color='#888888', s=15, marker='^', alpha=alpha, zorder=2)
+            # Regular aborted: grey line with optional FA-based port direction and marker.
+            fa_label = str(trial.get('fa_label', '')).strip().lower()
+            fa_port_raw = trial.get('fa_port', np.nan)
+            fa_match = (fa_label in fa_set) if fa_set else False
+
+            y_end = 0.6
+            tri_marker = '^'
+            if fa_match and pd.notna(fa_port_raw):
+                try:
+                    fa_port = int(float(fa_port_raw))
+                    if fa_port == 2:
+                        y_end = -0.6
+                        tri_marker = 'v'
+                    else:
+                        y_end = 0.6
+                        tri_marker = '^'
+                except Exception:
+                    pass
+
+            ax.plot([x, x], [0, y_end], color='#888888', linewidth=linewidth, alpha=alpha, zorder=1)
+            ax.scatter([x], [y_end], color='#888888', s=15, marker=tri_marker, alpha=alpha, zorder=2)
+
+            # Blue marker indicates this aborted trial matched the requested FA labels.
+            if fa_match:
+                ax.scatter([x], [y_end], color='#1f77b4', s=24, marker='o',
+                           edgecolors='white', linewidth=0.8, zorder=3)
         
         elif trial_type == 'hr_aborted':
             # HR aborted: yellow short line like regular aborts, oriented by odor side
