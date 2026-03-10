@@ -2937,11 +2937,28 @@ def plot_choice_history(
                            edgecolors='white', linewidth=0.8, zorder=3)
         
         elif trial_type == 'hr_aborted':
-            # HR aborted: yellow short line like regular aborts, oriented by odor side
+            # HR aborted: if matching requested FA labels, use fa_port direction and blue end-dot.
+            # Otherwise keep the yellow arrowhead behavior.
+            fa_label = str(trial.get('fa_label', '')).strip().lower()
+            fa_port_raw = trial.get('fa_port', np.nan)
+            fa_match = (fa_label in fa_set) if fa_set else False
+
             y_end = 0.6 * direction
-            tri_marker = '^' if direction >= 0 else 'v'
+            if fa_match and pd.notna(fa_port_raw):
+                try:
+                    fa_port = int(float(fa_port_raw))
+                    y_end = 0.6 if fa_port == 1 else -0.6
+                except Exception:
+                    pass
+
             ax.plot([x, x], [0, y_end], color=color, linewidth=linewidth, alpha=alpha, zorder=1, linestyle=linestyle)
-            ax.scatter([x], [y_end], color=color, s=15, marker=tri_marker, alpha=alpha, zorder=2)
+
+            if fa_match:
+                ax.scatter([x], [y_end], color='#1f77b4', s=24, marker='o',
+                           edgecolors='white', linewidth=0.8, zorder=3)
+            else:
+                tri_marker = '^' if y_end >= 0 else 'v'
+                ax.scatter([x], [y_end], color=color, s=15, marker=tri_marker, alpha=alpha, zorder=2)
         
         else:
             # Completed trials (regular or HR)
