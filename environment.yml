@@ -1,0 +1,25 @@
+name: hypnose-analysis
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.10,<3.13
+  - numpy<2
+  - pandas
+  - matplotlib
+  - scipy
+  - tqdm
+  - pillow
+  - ipython
+  - ipywidgets
+  - ipykernel
+  - ipympl
+  - pyyaml
+  - opencv         
+  - dotmap         
+  - pip
+  - pip:
+    - moviepy
+    - swc-aeon
+    - harp-python
+    - -e .

@@ -1,4 +1,4 @@
-# Hypnose Processing
+# Hypnose Analysis
 
 This repository is utilised for processing and visualising data acquired from Hypnose Harris lab project.
 
@@ -16,19 +16,14 @@ Within your working directory use a terminal to clone the repo to your local fol
 
 ```git clone github.com/SainsburyWellcomeCentre/hypnose-analysis```
 
-2. Create a conda virtual environment with preferred replacement for env-name and activate
+2. Create and activate the conda environment using the environment.yml file
 
-```conda create -n env-name python=3.12``` 
+```conda env create -f environment.yml```
+```conda activate hypnose-analysis```
 
-3. Add virtual environment as kernel to run notebooks 
+3. Add the environment as a kernel to run notebooks
 
-```conda install -c conda-forge notebook ipykernel```
-
-```python -m ipykernel install --user --name=env-name --display-name="Display Name"```
-
-4. Install dependencies and editable install of hypnose-analysis package
-
-```pip install -e .```
+```python -m ipykernel install --user --name=hypnose-analysis --display-name="Hypnose Analysis"```
 
 5. Symlink: 
 
