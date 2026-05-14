@@ -40,6 +40,7 @@ import matplotlib.dates as mdates
 import matplotlib.ticker as ticker
 from IPython import get_ipython
 
+PRE_ODOR_GRACE_MS = 25.0
 
 
 
@@ -95,6 +96,33 @@ class TimestampedCsvReader(Csv):
 def vprint(verbose: bool, *args, **kwargs):
     if verbose:
         print(*args, **kwargs)
+
+
+def _last_poke_end_before(series_bool: pd.Series, ts: pd.Timestamp | None) -> pd.Timestamp | None:
+    if ts is None or series_bool is None or series_bool.empty:
+        return None
+    before = series_bool.loc[:ts]
+    if before.empty:
+        return None
+    falls = ~before & before.shift(1, fill_value=False)
+    if not falls.any():
+        return None
+    return falls[falls].index[-1]
+
+
+def _grace_overlap_ms(last_poke_end, window_start, window_end, grace_ms: float = PRE_ODOR_GRACE_MS) -> tuple[float, pd.Timestamp | None]:
+    if last_poke_end is None or window_start is None or window_end is None:
+        return 0.0, None
+    if last_poke_end > window_start:
+        return 0.0, None
+    grace_end = last_poke_end + pd.Timedelta(milliseconds=grace_ms)
+    if grace_end <= window_start:
+        return 0.0, None
+    overlap_end = min(window_end, grace_end)
+    if overlap_end <= window_start:
+        return 0.0, None
+    overlap_ms = (overlap_end - window_start).total_seconds() * 1000.0
+    return float(overlap_ms), overlap_end
 
 
 def _ensure_int_list(value, *, subtract_one: bool = False) -> list[int]:
@@ -1652,6 +1680,15 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             intervals.append((cur, window_end))
         
         if not intervals:
+            last_poke_end = _last_poke_end_before(s_bool, window_start)
+            grace_ms, grace_end = _grace_overlap_ms(last_poke_end, window_start, window_end)
+            if grace_ms > 0.0:
+                return {
+                    'poke_time_ms': grace_ms,
+                    'poke_first_in': window_start,
+                    'poke_odor_start': window_start,
+                    'poke_odor_end': grace_end,
+                }
             return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start, 'poke_odor_end': None}
         
         # Merge across gaps <= sample_offset_time_ms
@@ -1673,7 +1710,8 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         return {
             'poke_time_ms': float(first_block_ms),
             'poke_first_in': first_in,
-            'poke_odor_start': window_start
+            'poke_odor_start': window_start,
+            'poke_odor_end': first_block_end_capped,
         }
 
     
@@ -1829,6 +1867,18 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             # Window slice
             w = s_bool.loc[odor_start:odor_end]
             if w.empty and not state_at_start:
+                last_poke_end = _last_poke_end_before(s_bool, odor_start)
+                grace_ms, grace_end = _grace_overlap_ms(last_poke_end, odor_start, odor_end)
+                if grace_ms > 0.0:
+                    position_poke_times[position] = {
+                        'position': position,
+                        'odor_name': loc['odor_name'],
+                        'poke_time_ms': grace_ms,
+                        'poke_odor_start': odor_start,
+                        'poke_odor_end': grace_end,
+                        'poke_first_in': odor_start,
+                        'required_min_sampling_time_ms': resolve_min_sampling_time_ms(loc['odor_name'])
+                    }
                 continue
 
             # Edges relative to start state
@@ -1848,6 +1898,18 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
                 intervals.append((current_start, odor_end))  # clip at odor_end
 
             if not intervals:
+                last_poke_end = _last_poke_end_before(s_bool, odor_start)
+                grace_ms, grace_end = _grace_overlap_ms(last_poke_end, odor_start, odor_end)
+                if grace_ms > 0.0:
+                    position_poke_times[position] = {
+                        'position': position,
+                        'odor_name': loc['odor_name'],
+                        'poke_time_ms': grace_ms,
+                        'poke_odor_start': odor_start,
+                        'poke_odor_end': grace_end,
+                        'poke_first_in': odor_start,
+                        'required_min_sampling_time_ms': resolve_min_sampling_time_ms(loc['odor_name'])
+                    }
                 continue
 
             # Merge across gaps <= sample_offset_time_ms
@@ -3266,6 +3328,15 @@ def abortion_classification(data, events, classification, odor_map, root, verbos
         if cur is not None:
             intervals.append((cur, window_end))
         if not intervals:
+            last_poke_end = _last_poke_end_before(s_bool, window_start)
+            grace_ms, grace_end = _grace_overlap_ms(last_poke_end, window_start, window_end)
+            if grace_ms > 0.0:
+                return {
+                    'poke_time_ms': grace_ms,
+                    'poke_first_in': window_start,
+                    'poke_odor_start': window_start,
+                    'poke_odor_end': grace_end,
+                }
             return {'poke_time_ms': 0.0, 'poke_first_in': None, 'poke_odor_start': window_start}
         merged = [intervals[0]]
         for s2, e2 in intervals[1:]:
