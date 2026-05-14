@@ -4335,7 +4335,7 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
                     df_norm.to_parquet(f_parquet, index=False)
                     manifest.setdefault("tables_parquet", {})[name] = f_parquet.name
                 except Exception as e:
-                    vprint(verbose, f"[save] WARNING: failed writing parquet for {name}: {e}")
+                    print(f"[save] WARNING: failed writing parquet for {name}: {e}")
             saved_names.add(name)
             return True
         except Exception as e:
