@@ -22,15 +22,17 @@ from hypnose_analysis.paths import (
     get_derivatives_root,
     get_server_root,
 )
-from hypnose_analysis.utils.visualization_utils import (
-    _clean_graph, 
-    _update_cache, 
+from hypnose_analysis.helpers import (
+    _filter_session_dirs,
     _get_from_cache,
+    _iter_subject_dirs,
+    _update_cache,
+)
+from hypnose_analysis.utils.visualization_utils import (
+    _clean_graph,
     _load_table_with_trial_data,
     _load_trial_views,
     _extract_metric_value,
-    _iter_subject_dirs,
-    _filter_session_dirs,
     _load_protocol_from_summary,
     _ensure_metrics_json,
     load_tracking_with_behavior,
@@ -39,7 +41,6 @@ from hypnose_analysis.utils.save_utils import save_figure
 import re
 import numpy as np
 import json
-from collections import OrderedDict
 from scipy.stats import kruskal, mannwhitneyu
 
 

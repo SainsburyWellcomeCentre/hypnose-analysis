@@ -16,6 +16,12 @@ from hypnose_analysis.utils.metrics_utils import (
 )
 from datetime import timedelta, datetime
 from hypnose_analysis.utils.classification_utils import load_all_streams, load_experiment
+from hypnose_analysis.helpers import (
+    _filter_session_dirs,
+    _get_from_cache,
+    _iter_subject_dirs,
+    _update_cache,
+)
 from hypnose_analysis.paths import (
     get_data_root,
     get_rawdata_root,
@@ -25,11 +31,7 @@ from hypnose_analysis.paths import (
 import re
 import numpy as np
 import json
-from collections import OrderedDict
 from hypnose_analysis.utils.save_utils import save_figure
-
-CACHE = OrderedDict()
-CACHE_MAX_ITEMS = 40  # Maximum number of cached items
 
 
 def _clean_graph(ax, *, xlabel: Optional[str] = None, ylabel: Optional[str] = None):
@@ -69,33 +71,6 @@ def _clean_graph(ax, *, xlabel: Optional[str] = None, ylabel: Optional[str] = No
             leg.remove()
         except Exception:
             pass
-
-def _update_cache(subjid, dates, data, kind="trial_data"):
-    """
-    Update the cache with data for each (subjid, date) pair, with a specified kind.
-    Only updates/overwrites the dates provided. Keeps other cached dates for the subject.
-    If the cache exceeds the maximum size, remove the oldest entries.
-    """
-    global CACHE
-    for date in dates:
-        key = (subjid, date, kind)
-        if key in CACHE:
-            del CACHE[key]
-        CACHE[key] = {
-            "kind": kind,
-            "data": data[date]
-        }
-    while len(CACHE) > CACHE_MAX_ITEMS:
-        CACHE.popitem(last=False)
-
-def _get_from_cache(subjid, date, kind):
-    """
-    Retrieve cached data for (subjid, date) and kind. Returns the data or None.
-    """
-    key = (subjid, date, kind)
-    if key in CACHE and CACHE[key]["kind"] == kind:
-        return CACHE[key]["data"]
-    return None
 
 def _load_table_with_trial_data(results_dir: Path, name: str) -> pd.DataFrame:
     """Load trial_data (parquet->csv) or a saved CSV table by name, using cache if available."""
@@ -333,52 +308,6 @@ def _extract_metric_value(metrics: dict, var_path: str):
     except Exception:
         return float("nan")
     
-def _iter_subject_dirs(derivatives_dir: Path, subjids: Optional[Iterable[int]]):
-    if subjids is None:
-        for d in sorted(derivatives_dir.glob("sub-*_id-*")):
-            name = d.name.split("_")[0].replace("sub-", "")
-            try:
-                yield int(name), d
-            except Exception:
-                continue
-    else:
-        for sid in subjids:
-            sub_str = f"sub-{str(int(sid)).zfill(3)}"
-            dirs = sorted(derivatives_dir.glob(f"{sub_str}_id-*"))
-            if dirs:
-                yield int(sid), dirs[0]
-
-def _filter_session_dirs(subj_dir: Path, dates: Optional[Union[Iterable[Union[int,str]], tuple]]):
-    ses_dirs = sorted(subj_dir.glob("ses-*_date-*"))
-    if dates is None:
-        return ses_dirs
-    # dates can be list/iterable or (start, end) tuple
-    def norm_date(d):
-        s = str(d)
-        return int(s) if s.isdigit() else None
-    if isinstance(dates, tuple) and len(dates) == 2:
-        start = norm_date(dates[0]); end = norm_date(dates[1])
-        out = []
-        for d in ses_dirs:
-            try:
-                ds = int(d.name.split("_date-")[-1])
-                if (start is None or ds >= start) and (end is None or ds <= end):
-                    out.append(d)
-            except Exception:
-                pass
-        return out
-    # iterable of dates
-    wanted = {norm_date(d) for d in dates}
-    out = []
-    for d in ses_dirs:
-        try:
-            ds = int(d.name.split("_date-")[-1])
-            if ds in wanted:
-                out.append(d)
-        except Exception:
-            pass
-    return out
-
 def _load_protocol_from_summary(results_dir: Path) -> str:
     try:
         with open(results_dir / "summary.json", "r", encoding="utf-8") as f:
