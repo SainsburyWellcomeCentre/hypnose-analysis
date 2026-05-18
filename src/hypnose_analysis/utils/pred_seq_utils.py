@@ -75,6 +75,10 @@ def _sequence_label(seq):
 	return "-".join(parts) if parts else None
 
 
+def _sequence_len_ok(seq, *, min_len: int = 3) -> bool:
+	return isinstance(seq, (list, tuple)) and len(seq) >= min_len
+
+
 def _last_position_entry(pos_dict):
 	if not isinstance(pos_dict, dict):
 		return None
@@ -444,6 +448,12 @@ def response_time(
 		groups = {}
 		for _, row in completed.iterrows():
 			seq = _parse_json_value(row.get("odor_sequence"))
+			if not _sequence_len_ok(seq):
+				continue
+			if not _sequence_len_ok(seq):
+				continue
+			if not _sequence_len_ok(seq):
+				continue
 			seq_label = _sequence_label(seq)
 			if not seq_label:
 				continue
