@@ -132,15 +132,17 @@ def _extract_position_entry(pos_dict, position: int):
 def _plot_box_with_points(ax, groups, y_label, x_label):
 	labels = list(groups.keys())
 	data = [groups[label] for label in labels]
-	mean_half_width = 0.12
-	cap_half_width = 0.06
-	mean_lw = 0.9
-	sem_lw = 0.9
+	mean_half_width = 0.18
+	cap_half_width = 0.10
+	mean_lw = 2.2
+	sem_lw = 1.4
+	jitter_half_width = 0.15
+	rng = np.random.default_rng(0)
 	for i, values in enumerate(data, start=1):
 		if not values:
 			continue
-		x = np.full(len(values), i, dtype=float)
-		ax.scatter(x, values, s=18, color="blue", alpha=0.7, zorder=2)
+		x = i + rng.uniform(-jitter_half_width, jitter_half_width, size=len(values))
+		ax.scatter(x, values, s=18, color="blue", alpha=0.4, zorder=2)
 		mean_val = float(np.mean(values))
 		sem_val = float(np.std(values, ddof=1) / np.sqrt(len(values))) if len(values) > 1 else 0.0
 		ax.hlines(
@@ -323,19 +325,20 @@ def _plot_summary_rolling(session_data, *, color_map, group_order, ylabel, title
 
 	fig, ax = plt.subplots(figsize=(12, 6))
 
+	# Width reserved on the X axis for a session that has no plottable rolling-window
+	# points (e.g. fewer than window_size trials of any group). Keeps multi-day plots
+	# from different categories visually aligned in day count.
+	empty_session_span = 20
+
 	global_offset = 0
-	session_starts = []
+	boundary_lines = []
 	legend_done = set()
 
 	for s in session_data:
-		n_trials = int(s.get("n_trials") or 0)
-		if n_trials <= 0:
-			for vals in s["groups"].values():
-				if vals:
-					n_trials = max(n_trials, max(idx for idx, _ in vals))
-
-		session_starts.append(global_offset + 1)
-
+		# Compute rolling-window points and per-session local bounds in one pass.
+		session_points = {}
+		min_x = None
+		max_x = None
 		for group in groups:
 			entries = s["groups"].get(group, [])
 			if not entries:
@@ -344,25 +347,36 @@ def _plot_summary_rolling(session_data, *, color_map, group_order, ylabel, title
 			idxs = np.array([e[0] for e in entries_sorted])
 			vals = np.array([e[1] for e in entries_sorted], dtype=float)
 			n = len(vals)
-			xs, ys = [], []
+			pts = []
 			for end in range(window_n, n + 1, step_n):
 				start = end - window_n
 				rate = float(np.nanmean(vals[start:end]))
-				xs.append(global_offset + int(idxs[end - 1]))
-				ys.append(rate)
-			if not xs:
-				continue
+				local_x = int(idxs[end - 1])
+				pts.append((local_x, rate))
+				min_x = local_x if min_x is None else min(min_x, local_x)
+				max_x = local_x if max_x is None else max(max_x, local_x)
+			if pts:
+				session_points[group] = pts
+
+		if global_offset > 0:
+			boundary_lines.append(global_offset - 0.5)
+
+		if min_x is None:
+			global_offset += empty_session_span
+			continue
+
+		shift = global_offset - min_x
+		for group, pts in session_points.items():
+			xs = [lx + shift for lx, _ in pts]
+			ys = [y for _, y in pts]
 			color = _resolve_color(group, color_map)
 			label = group if group not in legend_done else None
 			legend_done.add(group)
 			ax.plot(xs, ys, color=color, linewidth=2, alpha=0.9, label=label)
 
-		if n_trials > 0:
-			global_offset += n_trials
+		global_offset += max_x - min_x + 1
 
-	for i, x in enumerate(session_starts):
-		if i == 0:
-			continue
+	for x in boundary_lines:
 		ax.axvline(
 			x=x,
 			color="#1f77b4",
@@ -372,9 +386,13 @@ def _plot_summary_rolling(session_data, *, color_map, group_order, ylabel, title
 			zorder=1,
 		)
 
-	ax.set_xlabel("Trials")
+	ax.set_xlabel("Trials (adjusted)")
 	ax.set_ylabel(ylabel)
 	ax.set_title(title)
+	if global_offset > 0:
+		ax.set_xlim(left=0, right=global_offset - 1)
+	else:
+		ax.set_xlim(left=0)
 	ax.spines["top"].set_visible(False)
 	ax.spines["right"].set_visible(False)
 	if ylim_bottom is not None:
@@ -424,6 +442,25 @@ def _is_multi_session(date_vals):
 	return date_vals is not None and len(date_vals) > 1
 
 
+def _apply_shared_ylim(figs_to_share, *, bottom_zero=False):
+	"""Set a common ylim across multiple figures so plots from a single call line up.
+
+	The shared bottom is min of each figure's current bottom (or 0 if ``bottom_zero``),
+	and the shared top is max of each figure's current top.
+	"""
+	if not figs_to_share:
+		return
+	axes = [fig.axes[0] for fig in figs_to_share if fig.axes]
+	if not axes:
+		return
+	bottoms = [a.get_ylim()[0] for a in axes]
+	tops = [a.get_ylim()[1] for a in axes]
+	common_bottom = 0.0 if bottom_zero else min(bottoms)
+	common_top = max(tops)
+	for a in axes:
+		a.set_ylim(common_bottom, common_top)
+
+
 def _summary_save_suffix(moving_avg, window_size, step_size):
 	if moving_avg:
 		return f"rolling_w{int(window_size)}_s{int(step_size)}"
@@ -436,7 +473,7 @@ def last_odor_poke_time(
 	*,
 	save: bool = False,
 	moving_avg: bool = False,
-	window_size: int = 20,
+	window_size: int = 10,
 	step_size: int = 1,
 ):
 	"""
@@ -536,7 +573,7 @@ def trial_poke_duration(
 	*,
 	save: bool = False,
 	moving_avg: bool = False,
-	window_size: int = 20,
+	window_size: int = 10,
 	step_size: int = 1,
 ):
 	"""
@@ -598,12 +635,13 @@ def trial_poke_duration(
 				ordered = {k: pooled[k] for k in _order_sequence_labels(pooled)}
 				_plot_box_with_points(ax, ordered, "Trial Poke Duration (ms)", "Odor Sequence")
 				ax.set_title(f"Subjid {subjid} {cat} trial poke duration")
-				ax.set_ylim(bottom=0)
 				fig.tight_layout()
 				figs.append(fig)
 				if save:
 					save_figure(fig, f"trial_poke_duration_{cat}", subjids=[subjid], dates=date_vals)
 
+		summary_figs = []
+		summary_save_specs = []
 		if _is_multi_session(date_vals):
 			mode_label = "rolling" if moving_avg else "daily mean"
 			for cat in summary_cats:
@@ -616,18 +654,19 @@ def trial_poke_duration(
 					moving_avg=moving_avg,
 					window_size=window_size,
 					step_size=step_size,
-					ylim_bottom=0,
 				)
 				if summary_fig is not None:
 					figs.append(summary_fig)
+					summary_figs.append(summary_fig)
 					if save:
 						suffix = _summary_save_suffix(moving_avg, window_size, step_size)
-						save_figure(
-							summary_fig,
-							f"trial_poke_duration_{cat}_summary_{suffix}",
-							subjids=[subjid],
-							dates=date_vals,
+						summary_save_specs.append(
+							(summary_fig, f"trial_poke_duration_{cat}_summary_{suffix}")
 						)
+
+		_apply_shared_ylim(summary_figs)
+		for fig, name in summary_save_specs:
+			save_figure(fig, name, subjids=[subjid], dates=date_vals)
 
 	return figs
 
@@ -638,7 +677,7 @@ def first_odor_poke_duration(
 	*,
 	save: bool = False,
 	moving_avg: bool = False,
-	window_size: int = 20,
+	window_size: int = 10,
 	step_size: int = 1,
 ):
 	"""
@@ -719,79 +758,88 @@ def poke_time_all_pos(
 	*,
 	save: bool = False,
 	moving_avg: bool = False,
-	window_size: int = 20,
+	window_size: int = 10,
 	step_size: int = 1,
 ):
 	"""
-	Boxplot of poke duration pooled across positions, grouped by odor name.
+	Boxplots of poke duration pooled across positions, grouped by odor name.
 
-	A cross-date summary plot is added (daily mean per session, or rolling within
-	session if ``moving_avg=True``).
+	Two plots are produced per subject: one for completed trials (is_aborted=False)
+	and one for aborted trials (is_aborted=True), so poke durations can be compared
+	between the two. Cross-date summary plots are added for each (daily mean per
+	session, or rolling within session if ``moving_avg=True``).
 	"""
 	figs = []
+	categories = [("completed", False), ("aborted", True)]
 	for subjid, date_vals, results_dirs in _collect_sessions(subjids, dates):
-		pooled = {}
-		session_records = []
+		per_cat_pooled = {name: {} for name, _ in categories}
+		per_cat_sessions = {name: [] for name, _ in categories}
+
 		for results_dir in results_dirs:
 			df = _load_sorted_session(results_dir)
 			if df.empty:
-				session_records.append({"n_trials": 0, "groups": {}})
+				for name, _ in categories:
+					per_cat_sessions[name].append({"n_trials": 0, "groups": {}})
 				continue
 			n_trials = len(df)
-			completed = df[df.get("is_aborted") == False]
-			session_groups = {}
-			for _, row in completed.iterrows():
-				pos_dict = _parse_json_value(row.get("position_poke_times"))
-				if not isinstance(pos_dict, dict):
-					continue
-				trial_idx = int(row["_trial_idx"])
-				for entry in pos_dict.values():
-					if not isinstance(entry, dict):
+			for name, aborted_flag in categories:
+				cat_df = df[df.get("is_aborted") == aborted_flag]
+				session_groups = {}
+				for _, row in cat_df.iterrows():
+					pos_dict = _parse_json_value(row.get("position_poke_times"))
+					if not isinstance(pos_dict, dict):
 						continue
-					odor_name = entry.get("odor_name")
-					poke_ms = entry.get("poke_time_ms")
-					if odor_name is None or poke_ms is None:
-						continue
-					key = str(odor_name)
-					poke_val = float(poke_ms)
-					session_groups.setdefault(key, []).append((trial_idx, poke_val))
-					pooled.setdefault(key, []).append(poke_val)
-			session_records.append({"n_trials": n_trials, "groups": session_groups})
+					trial_idx = int(row["_trial_idx"])
+					for entry in pos_dict.values():
+						if not isinstance(entry, dict):
+							continue
+						odor_name = entry.get("odor_name")
+						poke_ms = entry.get("poke_time_ms")
+						if odor_name is None or poke_ms is None:
+							continue
+						key = str(odor_name)
+						poke_val = float(poke_ms)
+						session_groups.setdefault(key, []).append((trial_idx, poke_val))
+						per_cat_pooled[name].setdefault(key, []).append(poke_val)
+				per_cat_sessions[name].append({"n_trials": n_trials, "groups": session_groups})
 
-		if pooled:
-			fig, ax = plt.subplots(figsize=(10, 5))
-			ordered = {k: pooled[k] for k in _order_odor_labels(pooled)}
-			_plot_box_with_points(ax, ordered, "Poke Duration (ms)", "Odor")
-			ax.set_title(f"Subjid {subjid} poke duration (all positions)")
-			ax.set_ylim(bottom=0)
-			fig.tight_layout()
-			figs.append(fig)
-			if save:
-				save_figure(fig, "poke_time_all_pos", subjids=[subjid], dates=date_vals)
+		for name, _ in categories:
+			pooled = per_cat_pooled[name]
+			if pooled:
+				fig, ax = plt.subplots(figsize=(10, 5))
+				ordered = {k: pooled[k] for k in _order_odor_labels(pooled)}
+				_plot_box_with_points(ax, ordered, "Poke Duration (ms)", "Odor")
+				ax.set_title(f"Subjid {subjid} poke duration (all positions, {name})")
+				ax.set_ylim(bottom=0)
+				fig.tight_layout()
+				figs.append(fig)
+				if save:
+					save_figure(fig, f"poke_time_all_pos_{name}", subjids=[subjid], dates=date_vals)
 
 		if _is_multi_session(date_vals):
 			mode_label = "rolling" if moving_avg else "daily mean"
-			summary_fig = _plot_summary(
-				session_records,
-				color_map=ODOR_COLORS,
-				group_order=ODOR_ORDER,
-				ylabel="Poke Duration (ms)",
-				title=f"Subjid {subjid} poke duration (all positions) ({mode_label})",
-				moving_avg=moving_avg,
-				window_size=window_size,
-				step_size=step_size,
-				ylim_bottom=0,
-			)
-			if summary_fig is not None:
-				figs.append(summary_fig)
-				if save:
-					suffix = _summary_save_suffix(moving_avg, window_size, step_size)
-					save_figure(
-						summary_fig,
-						f"poke_time_all_pos_summary_{suffix}",
-						subjids=[subjid],
-						dates=date_vals,
-					)
+			for name, _ in categories:
+				summary_fig = _plot_summary(
+					per_cat_sessions[name],
+					color_map=ODOR_COLORS,
+					group_order=ODOR_ORDER,
+					ylabel="Poke Duration (ms)",
+					title=f"Subjid {subjid} poke duration (all positions, {name}) ({mode_label})",
+					moving_avg=moving_avg,
+					window_size=window_size,
+					step_size=step_size,
+					ylim_bottom=0,
+				)
+				if summary_fig is not None:
+					figs.append(summary_fig)
+					if save:
+						suffix = _summary_save_suffix(moving_avg, window_size, step_size)
+						save_figure(
+							summary_fig,
+							f"poke_time_all_pos_{name}_summary_{suffix}",
+							subjids=[subjid],
+							dates=date_vals,
+						)
 
 	return figs
 
@@ -802,7 +850,7 @@ def response_time(
 	*,
 	save: bool = False,
 	moving_avg: bool = False,
-	window_size: int = 20,
+	window_size: int = 10,
 	step_size: int = 1,
 ):
 	"""
@@ -866,6 +914,8 @@ def response_time(
 			if save:
 				save_figure(fig, "response_time", subjids=[subjid], dates=date_vals)
 
+		summary_figs = []
+		summary_save_specs = []
 		if _is_multi_session(date_vals):
 			mode_label = "rolling" if moving_avg else "daily mean"
 			for cat in summary_cats:
@@ -881,14 +931,16 @@ def response_time(
 				)
 				if summary_fig is not None:
 					figs.append(summary_fig)
+					summary_figs.append(summary_fig)
 					if save:
 						suffix = _summary_save_suffix(moving_avg, window_size, step_size)
-						save_figure(
-							summary_fig,
-							f"response_time_{cat}_summary_{suffix}",
-							subjids=[subjid],
-							dates=date_vals,
+						summary_save_specs.append(
+							(summary_fig, f"response_time_{cat}_summary_{suffix}")
 						)
+
+		_apply_shared_ylim(summary_figs)
+		for fig, name in summary_save_specs:
+			save_figure(fig, name, subjids=[subjid], dates=date_vals)
 
 	return figs
 
@@ -899,7 +951,7 @@ def fa_analysis(
 	*,
 	save: bool = False,
 	moving_avg: bool = False,
-	window_size: int = 20,
+	window_size: int = 10,
 	step_size: int = 1,
 ):
 	"""
@@ -1006,11 +1058,13 @@ def fa_analysis(
 			labels = []
 			has_any = False
 			fig, ax = plt.subplots(figsize=(12, 5))
-			mean_half_width = 0.10
-			cap_half_width = 0.05
-			mean_lw = 0.9
-			sem_lw = 0.9
+			mean_half_width = 0.14
+			cap_half_width = 0.08
+			mean_lw = 2.2
+			sem_lw = 1.4
 			point_offset = 0.18
+			jitter_half_width = 0.12
+			rng = np.random.default_rng(0)
 
 			for i, odor in enumerate(ordered_odors, start=1):
 				odor_groups = resp_groups[odor]
@@ -1027,8 +1081,8 @@ def fa_analysis(
 						continue
 					has_any = True
 					x_pos = i + offset
-					xs = np.full(len(values), x_pos, dtype=float)
-					ax.scatter(xs, values, s=18, color=color, alpha=0.7, zorder=2)
+					xs = x_pos + rng.uniform(-jitter_half_width, jitter_half_width, size=len(values))
+					ax.scatter(xs, values, s=18, color=color, alpha=0.4, zorder=2)
 					mean_val = float(np.mean(values))
 					sem_val = (
 						float(np.std(values, ddof=1) / np.sqrt(len(values)))
@@ -1089,6 +1143,8 @@ def fa_analysis(
 			else:
 				plt.close(fig)
 
+		resp_summary_figs = []
+		resp_summary_save_specs = []
 		if _is_multi_session(date_vals):
 			mode_label = "rolling" if moving_avg else "daily mean"
 			summary_fig = _plot_summary(
@@ -1126,13 +1182,15 @@ def fa_analysis(
 				)
 				if resp_summary_fig is not None:
 					figs.append(resp_summary_fig)
+					resp_summary_figs.append(resp_summary_fig)
 					if save:
 						suffix = _summary_save_suffix(moving_avg, window_size, step_size)
-						save_figure(
-							resp_summary_fig,
-							f"fa_response_time_port{port_label}_summary_{suffix}",
-							subjids=[subjid],
-							dates=date_vals,
+						resp_summary_save_specs.append(
+							(resp_summary_fig, f"fa_response_time_port{port_label}_summary_{suffix}")
 						)
+
+		_apply_shared_ylim(resp_summary_figs)
+		for fig, name in resp_summary_save_specs:
+			save_figure(fig, name, subjids=[subjid], dates=date_vals)
 
 	return figs
