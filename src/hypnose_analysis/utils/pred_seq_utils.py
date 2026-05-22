@@ -862,19 +862,18 @@ def response_time(
 	figs = []
 	summary_cats = ["rewarded", "unrewarded"]
 	for subjid, date_vals, results_dirs in _collect_sessions(subjids, dates):
-		pooled = {}
-		per_cat_sessions = {cat: [] for cat in summary_cats}
+		# Pass 1: collect raw records per session (no filtering yet) so we can
+		# compute a group-wise outlier threshold from all sessions combined.
+		sessions_raw = []
 		for results_dir in results_dirs:
 			df = _load_sorted_session(results_dir)
 			if df.empty:
-				for cat in summary_cats:
-					per_cat_sessions[cat].append({"n_trials": 0, "groups": {}})
+				sessions_raw.append({"n_trials": 0, "records": []})
 				continue
 			n_trials = len(df)
 			completed = df[df.get("is_aborted") == False]
 			completed = completed[completed.get("response_time_category") != "timeout_delayed"]
-
-			per_cat_session_groups = {cat: {} for cat in summary_cats}
+			records = []
 			for _, row in completed.iterrows():
 				seq = _parse_json_value(row.get("odor_sequence"))
 				if not _sequence_len_ok(seq):
@@ -896,13 +895,49 @@ def response_time(
 					continue
 				rt_ms = float((supply_dt - poke_end_dt).total_seconds() * 1000.0)
 				trial_idx = int(row["_trial_idx"])
-				pooled.setdefault(seq_label, []).append(rt_ms)
 				cat = row.get("response_time_category")
-				if cat in per_cat_session_groups:
-					per_cat_session_groups[cat].setdefault(seq_label, []).append((trial_idx, rt_ms))
+				records.append((trial_idx, seq_label, cat, rt_ms))
+			sessions_raw.append({"n_trials": n_trials, "records": records})
 
+		# Compute per-sequence outlier threshold = 10 × group mean across all sessions.
+		group_values = {}
+		for s in sessions_raw:
+			for _, seq_label, _, v in s["records"]:
+				group_values.setdefault(seq_label, []).append(v)
+		thresholds = {g: 10.0 * float(np.mean(vs)) for g, vs in group_values.items() if vs}
+
+		# Filter and log exclusions.
+		excluded_log = []
+		for sess_idx, s in enumerate(sessions_raw):
+			date_tag = date_vals[sess_idx] if sess_idx < len(date_vals) else "?"
+			filtered = []
+			for rec in s["records"]:
+				_, seq_label, _, v = rec
+				if v > thresholds.get(seq_label, np.inf):
+					excluded_log.append((seq_label, date_tag, v))
+					continue
+				filtered.append(rec)
+			s["records"] = filtered
+
+		if excluded_log:
+			print(
+				f"[response_time] Subjid {subjid}: excluded {len(excluded_log)} "
+				f"sample(s) > 10x group mean:"
+			)
+			for seq_label, date_tag, v in excluded_log:
+				print(f"  {seq_label}: 1 sample ({v:.1f} ms) from {date_tag}")
+
+		# Pass 2: build pooled + per-cat session structures from filtered records.
+		pooled = {}
+		per_cat_sessions = {cat: [] for cat in summary_cats}
+		for s in sessions_raw:
+			per_cat_session_groups = {cat: {} for cat in summary_cats}
+			for trial_idx, seq_label, cat, v in s["records"]:
+				pooled.setdefault(seq_label, []).append(v)
+				if cat in per_cat_session_groups:
+					per_cat_session_groups[cat].setdefault(seq_label, []).append((trial_idx, v))
 			for cat in summary_cats:
-				per_cat_sessions[cat].append({"n_trials": n_trials, "groups": per_cat_session_groups[cat]})
+				per_cat_sessions[cat].append({"n_trials": s["n_trials"], "groups": per_cat_session_groups[cat]})
 
 		if pooled:
 			fig, ax = plt.subplots(figsize=(10, 5))
@@ -948,6 +983,7 @@ def response_time(
 def fa_analysis(
 	subjids: Optional[Iterable[int]] = None,
 	dates: Optional[Union[Iterable[Union[int, str]], tuple]] = None,
+	fa_types: Optional[Iterable[str]] = None,
 	*,
 	save: bool = False,
 	moving_avg: bool = False,
@@ -966,25 +1002,31 @@ def fa_analysis(
 	figs = []
 	odor_whitelist = {"OdorC", "OdorD", "OdorE", "OdorF", "OdorG"}
 	fa_labels = {"FA_time_in", "FA_time_out"}
+	if fa_types is not None:
+		fa_labels = set(fa_types)
 	for subjid, date_vals, results_dirs in _collect_sessions(subjids, dates):
 		poke_groups = {}
-		resp_groups = {}
 		poke_session_records = []
-		resp_session_records = {"A": [], "B": []}
+		# Raw FA response-time records per session: list of (trial_idx, odor, port, value).
+		# These are filtered for outliers below before being expanded into resp_groups
+		# and resp_session_records.
+		resp_raw_per_session = []
+		session_n_trials = []
 
 		for results_dir in results_dirs:
 			df = _load_sorted_session(results_dir)
 			if df.empty:
 				poke_session_records.append({"n_trials": 0, "groups": {}})
-				resp_session_records["A"].append({"n_trials": 0, "groups": {}})
-				resp_session_records["B"].append({"n_trials": 0, "groups": {}})
+				resp_raw_per_session.append([])
+				session_n_trials.append(0)
 				continue
 			n_trials = len(df)
+			session_n_trials.append(n_trials)
 			aborted = df[df.get("is_aborted") == True]
 			fa_df = aborted[aborted.get("fa_label").isin(fa_labels)]
 
 			session_poke = {}
-			session_resp = {"A": {}, "B": {}}
+			session_resp_raw = []
 			for _, row in fa_df.iterrows():
 				last_odor = _normalize_odor_name(row.get("last_odor"))
 				if last_odor not in odor_whitelist:
@@ -1034,11 +1076,52 @@ def fa_analysis(
 					continue
 
 				rt_val = float(rt_ms)
-				resp_groups.setdefault(last_odor, {"A": [], "B": []})[port_label].append(rt_val)
 				trial_idx = int(row["_trial_idx"])
-				session_resp[port_label].setdefault(last_odor, []).append((trial_idx, rt_val))
+				session_resp_raw.append((trial_idx, last_odor, port_label, rt_val))
 
 			poke_session_records.append({"n_trials": n_trials, "groups": session_poke})
+			resp_raw_per_session.append(session_resp_raw)
+
+		# Compute per-(odor, port) FA-response-time mean across all sessions and filter
+		# any sample > 10 × group mean. Report exclusions.
+		group_values = {}
+		for sess_records in resp_raw_per_session:
+			for _, odor, port_label, v in sess_records:
+				group_values.setdefault((odor, port_label), []).append(v)
+		thresholds = {
+			key: 10.0 * float(np.mean(vs)) for key, vs in group_values.items() if vs
+		}
+
+		excluded_log = []
+		for sess_idx, sess_records in enumerate(resp_raw_per_session):
+			date_tag = date_vals[sess_idx] if sess_idx < len(date_vals) else "?"
+			filtered = []
+			for rec in sess_records:
+				_, odor, port_label, v = rec
+				if v > thresholds.get((odor, port_label), np.inf):
+					excluded_log.append((odor, port_label, date_tag, v))
+					continue
+				filtered.append(rec)
+			resp_raw_per_session[sess_idx] = filtered
+
+		if excluded_log:
+			print(
+				f"[fa_analysis] Subjid {subjid}: excluded {len(excluded_log)} FA "
+				f"response-time sample(s) > 10x group mean:"
+			)
+			for odor, port_label, date_tag, v in excluded_log:
+				print(f"  {odor}→{port_label}: 1 sample ({v:.1f} ms) from {date_tag}")
+
+		# Rebuild resp_groups (pooled per-odor, per-port lists) and resp_session_records
+		# (per-session per-port per-odor (trial_idx, value) lists) from filtered records.
+		resp_groups = {}
+		resp_session_records = {"A": [], "B": []}
+		for sess_idx, sess_records in enumerate(resp_raw_per_session):
+			n_trials = session_n_trials[sess_idx]
+			session_resp = {"A": {}, "B": {}}
+			for trial_idx, odor, port_label, v in sess_records:
+				resp_groups.setdefault(odor, {"A": [], "B": []})[port_label].append(v)
+				session_resp[port_label].setdefault(odor, []).append((trial_idx, v))
 			resp_session_records["A"].append({"n_trials": n_trials, "groups": session_resp["A"]})
 			resp_session_records["B"].append({"n_trials": n_trials, "groups": session_resp["B"]})
 
