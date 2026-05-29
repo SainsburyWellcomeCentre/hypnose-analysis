@@ -163,6 +163,32 @@ False Alarm Information
     - fa_latency_ms (float): Time between leaving odor cue port and poking either supply port in aborted trials
     - fa_port (int): In false alarm trials, port ID (1 for A, 2 for B) of first supply port poke
 
+Single-Reward Protocol / False Response Information
+
+    These columns are only populated for sessions using the new "single-reward" protocol, where
+    NOT all candidate sequences are rewarded at their final position (e.g. `singrew-task-stage1`,
+    where only specific full sequences such as OdorC-OdorF-OdorA and OdorG-OdorE-OdorB are
+    rewarded, or single-odor go/no-go `FreeRun_StageN` stages). The protocol is detected from the
+    Schema: a sequence is "rewarded" iff the chosen item at its final position has rewarded=True;
+    the session is flagged single-reward iff at least one candidate sequence is not. For the
+    default protocol (every sequence rewarded at the end) none of these columns are added and all
+    other behaviour/output is unchanged.
+
+    - sequence_rewarded (boolean): Whether THIS trial's full presented odor sequence exactly matches one of the schema's rewarded sequences. Rewarded-type sequences are classified exactly as in the default protocol (rewarded / unrewarded / timeout, or false alarm if aborted). Non-rewarded ("no-go") sequences get the false_response columns below.
+    - false_response (boolean): For COMPLETED non-rewarded sequences only. True if the animal went to a reward port before the next trial initiation (analogous to a false alarm, but for a completed no-go sequence); False if it correctly withheld.
+    - fr_label (string): False-response classification, mirroring fa_label: "FR_time_in" (reward poke within the response time window), "FR_time_out" (up to 3x the response time window), "FR_late" (later than that, before the next trial), or "nFR" (no reward poke, i.e. correct withholding). NOTE: when the schema's responseTime is effectively unlimited (e.g. 99999 s) every reward poke falls into FR_time_in; the timing buckets are only informative with a finite responseTime.
+    - fr_time (timestamp ISO 8601): In false_response trials, when the false response happened (first reward port poke).
+    - fr_latency_ms (float): In false_response trials, time between sequence completion (await_reward) and the first reward port poke.
+    - fr_port (int): In false_response trials, port ID (1 for A, 2 for B) of the first reward port poke.
+    - fr_odor_identity (string): In false_response trials, identity of the first reward port poked (A or B).
+    - fr_window_end (timestamp ISO 8601): End of the search window for a false response (first cue-port poke after the next trial initiation).
+
+    For single-reward sessions, response_time_category (and response_time_ms) are left empty for
+    non-rewarded-type completions, so existing decision/choice-accuracy metrics that rely on
+    response_time_category remain meaningful (rewarded/unrewarded/timeout) for rewarded-type
+    sequences only. Completed non-rewarded sequences are also collected in the
+    `completed_sequence_false_response` table.
+
 
 2. Behavioral Metric Calculation
 

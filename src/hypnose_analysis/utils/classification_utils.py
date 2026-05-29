@@ -178,6 +178,40 @@ def _resolve_hidden_rule_from_stage(stage) -> tuple[list[int], str | None]:
     return indices, sequence_name
 
 
+def _get_single_reward_info(root) -> tuple[bool, frozenset]:
+    """Determine whether a session uses the single-reward protocol and list its rewarded sequences.
+
+    The single-reward protocol is the new task variant where NOT all candidate sequences are
+    rewarded at their final position (e.g. ``singrew-task-stage1``: only ``OdorC-OdorF-OdorA``
+    and ``OdorG-OdorE-OdorB`` are rewarded out of 8 candidate triples). It also covers older
+    single-odor go/no-go stages (``FreeRun_StageN``). Detection is purely schema-based.
+
+    Returns
+    -------
+    (is_single_reward, rewarded_sequences)
+        is_single_reward : bool
+            True iff at least one candidate sequence is NOT rewarded at its final position.
+            For the default protocol (every sequence rewarded at the end) this is False and the
+            false-response logic is never entered, so behaviour/output stay byte-for-byte unchanged.
+        rewarded_sequences : frozenset[tuple[str, ...]]
+            Concrete odor-name sequences whose final position is rewarded. A completed trial is
+            "rewarded-type" iff ``tuple(its odor_sequence)`` is in this set; otherwise it is a
+            non-rewarded ("no-go") sequence and gets false-response handling.
+    """
+    try:
+        _, schema_settings = detect_settings.detect_settings(Path(root))
+    except Exception:
+        return False, frozenset()
+    if not schema_settings.get('isSingleRewardProtocol'):
+        return False, frozenset()
+    rewarded = schema_settings.get('rewardedSequences') or []
+    rewarded_set = frozenset(tuple(seq) for seq in rewarded if seq)
+    # If parsing produced no rewarded sequences, fall back to default behaviour (do nothing new).
+    if not rewarded_set:
+        return False, frozenset()
+    return True, rewarded_set
+
+
 def load_json(reader: SessionData, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(root.name)}_*.{reader.extension}"
@@ -1416,7 +1450,7 @@ def get_experiment_parameters(root):
 
     return sample_offset_time, minimumSamplingTime_by_odor, response_time
 
-def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=True):# Classify trials and get valve/poke times. Part of wrapper function
+def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=True, single_reward_info=None):# Classify trials and get valve/poke times. Part of wrapper function
     """
     Same classification as classify_trial_outcomes_extensive, plus:
       - position_valve_times and position_poke_times per trial
@@ -1602,8 +1636,17 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     completed_hr_missed_unrewarded = []
     completed_hr_missed_timeout = []
     non_initiated_odor1_attempts = []
+    # Single-reward protocol: completed sequences whose final position is NOT rewarded.
+    # Empty (and never appended to) for the default protocol, so legacy output is unchanged.
+    completed_false_response = []
     initiated_trials = trial_counts['initiated_sequences'].copy()
     initiated_trials_list = []
+
+    # Single-reward (new) protocol info: (is_single_reward, frozenset of rewarded odor-name tuples).
+    if single_reward_info is None:
+        single_reward_info = _get_single_reward_info(root)
+    is_single_reward, rewarded_sequences = single_reward_info
+    response_time_ms_window = float(response_time_sec) * 1000.0 if response_time_sec is not None else None
 
     # Aggregators for summary prints (completed trials only)
     agg_position_poke_times = {pos: [] for pos in range(1, max_positions + 1)}
@@ -2013,6 +2056,14 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         trial_dict['odor_sequence'] = final_odor_sequence
         trial_dict['num_odors'] = len(final_odor_sequence)
         trial_dict['last_odor'] = final_odor_sequence[-1] if final_odor_sequence else None
+        # Single-reward protocol: is THIS trial's full presented sequence one of the rewarded
+        # ones (exact match against the schema)? Only set in single-reward mode so the default
+        # protocol's output columns are untouched. Rewarded-type sequences keep the existing
+        # rewarded/unrewarded/timeout handling; non-rewarded-type completions get false_response.
+        sequence_rewarded = None
+        if is_single_reward:
+            sequence_rewarded = tuple(final_odor_sequence) in rewarded_sequences
+            trial_dict['sequence_rewarded'] = sequence_rewarded
         trial_dict['hidden_rule_location'] = hidden_rule_location
         trial_dict['hidden_rule_locations'] = list(hidden_rule_indices)
         trial_dict['hidden_rule_positions'] = list(hidden_rule_positions)
@@ -2240,72 +2291,146 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
             else:
                 hr_category = 'completed_normal'
 
-            supply1_after_await = [t for t in supply_port1_times if await_reward_time <= t <= trial_end]
-            supply2_after_await = [t for t in supply_port2_times if await_reward_time <= t <= trial_end]
+            if is_single_reward and sequence_rewarded is False:
+                # NON-REWARDED ("no-go") sequence completed to the end. There is no reward to
+                # collect, so going to a reward port anyway is a FALSE RESPONSE. This mirrors the
+                # abort-trial false-alarm logic, but for completed sequences: anchor at
+                # await_reward_time (the completion moment) and bound the search by the next
+                # trial's engagement, exactly like the false-alarm window.
+                next_init_fr = None
+                if not initiation_starts_sorted.empty:
+                    _ni = initiation_starts_sorted.searchsorted(trial_end, side='right')
+                    if _ni < len(initiation_starts_sorted):
+                        next_init_fr = initiation_starts_sorted.iloc[_ni]
+                fr_window_end = None
+                if next_init_fr is not None and not cue_poke_starts_sorted.empty:
+                    _cues_after = cue_poke_starts_sorted[cue_poke_starts_sorted > next_init_fr]
+                    if not _cues_after.empty:
+                        fr_window_end = _cues_after.iloc[0]
+                if fr_window_end is None:
+                    _end_cands = [trial_end]
+                    if not port1_pokes.empty:
+                        _end_cands.append(port1_pokes.index.max())
+                    if not port2_pokes.empty:
+                        _end_cands.append(port2_pokes.index.max())
+                    _end_cands = [c for c in _end_cands if c is not None and not pd.isna(c)]
+                    fr_window_end = max(_end_cands) if _end_cands else trial_end
+                if fr_window_end < await_reward_time:
+                    fr_window_end = await_reward_time
 
-            if supply1_after_await or supply2_after_await:
-                all_supply_times = []
-                if supply1_after_await:
-                    all_supply_times.extend([(t, 1, 'A') for t in supply1_after_await])
-                if supply2_after_await:
-                    all_supply_times.extend([(t, 2, 'B') for t in supply2_after_await])
-                all_supply_times.sort(key=lambda x: x[0])
-                first_supply_time, first_supply_port, first_supply_odor = all_supply_times[0]
-
-                trial_dict['first_supply_time'] = first_supply_time
-                trial_dict['first_supply_port'] = first_supply_port
-                trial_dict['first_supply_odor_identity'] = first_supply_odor
-                trial_dict['supply1_count'] = len(supply1_after_await)
-                trial_dict['supply2_count'] = len(supply2_after_await)
-                trial_dict['total_supply_count'] = len(supply1_after_await) + len(supply2_after_await)
-
-                completed_rewarded.append(trial_dict.copy())
-                if hr_category == 'completed_hr':
-                    completed_hr_rewarded.append(trial_dict.copy())
-                elif hr_category == 'completed_hr_missed':
-                    completed_hr_missed_rewarded.append(trial_dict.copy())
-            else:
-                poke_window_end = await_reward_time + pd.Timedelta(seconds=response_time_sec)
-                port1_pokes_in_window = []
-                port2_pokes_in_window = []
-
+                fr_port1_pokes = []
+                fr_port2_pokes = []
                 if not port1_pokes.empty:
-                    port1_window = port1_pokes[await_reward_time:poke_window_end]
-                    port1_starts = port1_window & ~port1_window.shift(1, fill_value=False)
-                    port1_pokes_in_window = port1_starts[port1_starts == True].index.tolist()
+                    _w1 = port1_pokes[await_reward_time:fr_window_end]
+                    _s1 = _w1 & ~_w1.shift(1, fill_value=False)
+                    fr_port1_pokes = _s1[_s1 == True].index.tolist()
                 if not port2_pokes.empty:
-                    port2_window = port2_pokes[await_reward_time:poke_window_end]
-                    port2_starts = port2_window & ~port2_window.shift(1, fill_value=False)
-                    port2_pokes_in_window = port2_starts[port2_starts == True].index.tolist()
+                    _w2 = port2_pokes[await_reward_time:fr_window_end]
+                    _s2 = _w2 & ~_w2.shift(1, fill_value=False)
+                    fr_port2_pokes = _s2[_s2 == True].index.tolist()
 
-                all_reward_pokes = []
-                if port1_pokes_in_window:
-                    all_reward_pokes.extend([(t, 1, 'A') for t in port1_pokes_in_window])
-                if port2_pokes_in_window:
-                    all_reward_pokes.extend([(t, 2, 'B') for t in port2_pokes_in_window])
-                all_reward_pokes.sort(key=lambda x: x[0])
+                fr_pokes = [(t, 1, 'A') for t in fr_port1_pokes] + [(t, 2, 'B') for t in fr_port2_pokes]
+                fr_pokes.sort(key=lambda x: x[0])
 
-                trial_dict['poke_window_end'] = poke_window_end
-                trial_dict['port1_pokes_count'] = len(port1_pokes_in_window)
-                trial_dict['port2_pokes_count'] = len(port2_pokes_in_window)
-                trial_dict['total_reward_pokes'] = len(all_reward_pokes)
+                trial_dict['fr_window_end'] = fr_window_end
+                trial_dict['port1_pokes_count'] = len(fr_port1_pokes)
+                trial_dict['port2_pokes_count'] = len(fr_port2_pokes)
+                trial_dict['total_reward_pokes'] = len(fr_pokes)
 
-                if all_reward_pokes:
-                    first_poke_time, first_poke_port, first_poke_odor = all_reward_pokes[0]
-                    trial_dict['first_reward_poke_time'] = first_poke_time
-                    trial_dict['first_reward_poke_port'] = first_poke_port
-                    trial_dict['first_reward_poke_odor_identity'] = first_poke_odor
-                    completed_unrewarded.append(trial_dict.copy())
-                    if hr_category == 'completed_hr':
-                        completed_hr_unrewarded.append(trial_dict.copy())
-                    elif hr_category == 'completed_hr_missed':
-                        completed_hr_missed_unrewarded.append(trial_dict.copy())
+                if fr_pokes:
+                    fr_time, fr_port, fr_odor = fr_pokes[0]
+                    fr_latency_ms = (fr_time - await_reward_time).total_seconds() * 1000.0
+                    trial_dict['false_response'] = True
+                    trial_dict['fr_time'] = fr_time
+                    trial_dict['fr_port'] = fr_port
+                    trial_dict['fr_odor_identity'] = fr_odor
+                    trial_dict['fr_latency_ms'] = float(fr_latency_ms)
+                    # Parity with unrewarded rows so downstream poke-based logic stays consistent.
+                    trial_dict['first_reward_poke_time'] = fr_time
+                    trial_dict['first_reward_poke_port'] = fr_port
+                    trial_dict['first_reward_poke_odor_identity'] = fr_odor
+                    if response_time_ms_window is not None and fr_latency_ms <= response_time_ms_window:
+                        trial_dict['fr_label'] = 'FR_time_in'
+                    elif response_time_ms_window is not None and fr_latency_ms <= 3.0 * response_time_ms_window:
+                        trial_dict['fr_label'] = 'FR_time_out'
+                    else:
+                        trial_dict['fr_label'] = 'FR_late'
                 else:
-                    completed_timeout.append(trial_dict.copy())
+                    trial_dict['false_response'] = False
+                    trial_dict['fr_label'] = 'nFR'
+                    trial_dict['fr_time'] = pd.NaT
+                    trial_dict['fr_port'] = None
+                    trial_dict['fr_odor_identity'] = None
+                    trial_dict['fr_latency_ms'] = np.nan
+
+                completed_false_response.append(trial_dict.copy())
+            else:
+                supply1_after_await = [t for t in supply_port1_times if await_reward_time <= t <= trial_end]
+                supply2_after_await = [t for t in supply_port2_times if await_reward_time <= t <= trial_end]
+
+                if supply1_after_await or supply2_after_await:
+                    all_supply_times = []
+                    if supply1_after_await:
+                        all_supply_times.extend([(t, 1, 'A') for t in supply1_after_await])
+                    if supply2_after_await:
+                        all_supply_times.extend([(t, 2, 'B') for t in supply2_after_await])
+                    all_supply_times.sort(key=lambda x: x[0])
+                    first_supply_time, first_supply_port, first_supply_odor = all_supply_times[0]
+
+                    trial_dict['first_supply_time'] = first_supply_time
+                    trial_dict['first_supply_port'] = first_supply_port
+                    trial_dict['first_supply_odor_identity'] = first_supply_odor
+                    trial_dict['supply1_count'] = len(supply1_after_await)
+                    trial_dict['supply2_count'] = len(supply2_after_await)
+                    trial_dict['total_supply_count'] = len(supply1_after_await) + len(supply2_after_await)
+
+                    completed_rewarded.append(trial_dict.copy())
                     if hr_category == 'completed_hr':
-                        completed_hr_timeout.append(trial_dict.copy())
+                        completed_hr_rewarded.append(trial_dict.copy())
                     elif hr_category == 'completed_hr_missed':
-                        completed_hr_missed_timeout.append(trial_dict.copy())
+                        completed_hr_missed_rewarded.append(trial_dict.copy())
+                else:
+                    poke_window_end = await_reward_time + pd.Timedelta(seconds=response_time_sec)
+                    port1_pokes_in_window = []
+                    port2_pokes_in_window = []
+
+                    if not port1_pokes.empty:
+                        port1_window = port1_pokes[await_reward_time:poke_window_end]
+                        port1_starts = port1_window & ~port1_window.shift(1, fill_value=False)
+                        port1_pokes_in_window = port1_starts[port1_starts == True].index.tolist()
+                    if not port2_pokes.empty:
+                        port2_window = port2_pokes[await_reward_time:poke_window_end]
+                        port2_starts = port2_window & ~port2_window.shift(1, fill_value=False)
+                        port2_pokes_in_window = port2_starts[port2_starts == True].index.tolist()
+
+                    all_reward_pokes = []
+                    if port1_pokes_in_window:
+                        all_reward_pokes.extend([(t, 1, 'A') for t in port1_pokes_in_window])
+                    if port2_pokes_in_window:
+                        all_reward_pokes.extend([(t, 2, 'B') for t in port2_pokes_in_window])
+                    all_reward_pokes.sort(key=lambda x: x[0])
+
+                    trial_dict['poke_window_end'] = poke_window_end
+                    trial_dict['port1_pokes_count'] = len(port1_pokes_in_window)
+                    trial_dict['port2_pokes_count'] = len(port2_pokes_in_window)
+                    trial_dict['total_reward_pokes'] = len(all_reward_pokes)
+
+                    if all_reward_pokes:
+                        first_poke_time, first_poke_port, first_poke_odor = all_reward_pokes[0]
+                        trial_dict['first_reward_poke_time'] = first_poke_time
+                        trial_dict['first_reward_poke_port'] = first_poke_port
+                        trial_dict['first_reward_poke_odor_identity'] = first_poke_odor
+                        completed_unrewarded.append(trial_dict.copy())
+                        if hr_category == 'completed_hr':
+                            completed_hr_unrewarded.append(trial_dict.copy())
+                        elif hr_category == 'completed_hr_missed':
+                            completed_hr_missed_unrewarded.append(trial_dict.copy())
+                    else:
+                        completed_timeout.append(trial_dict.copy())
+                        if hr_category == 'completed_hr':
+                            completed_hr_timeout.append(trial_dict.copy())
+                        elif hr_category == 'completed_hr_missed':
+                            completed_hr_missed_timeout.append(trial_dict.copy())
             completed_sequences.append(trial_dict.copy())
 
         else:
@@ -2372,6 +2497,9 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         'completed_sequence_rewarded': pd.DataFrame(completed_rewarded),
         'completed_sequence_unrewarded': pd.DataFrame(completed_unrewarded),
         'completed_sequence_reward_timeout': pd.DataFrame(completed_timeout),
+
+        # Single-reward protocol only: completed non-rewarded ("no-go") sequences. Empty otherwise.
+        'completed_sequence_false_response': pd.DataFrame(completed_false_response),
 
         'completed_sequence_HR_rewarded': pd.DataFrame(completed_hr_rewarded),
         'completed_sequence_HR_unrewarded': pd.DataFrame(completed_hr_unrewarded),
@@ -2530,7 +2658,7 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
 
     return result
 
-def analyze_response_times(data, trial_counts, events, odor_map, stage, root, verbose=True):
+def analyze_response_times(data, trial_counts, events, odor_map, stage, root, verbose=True, single_reward_info=None):
     """
     Analyze response times for all completed trials (clean version).
     Behavior and prints match analyze_response_times_all_trials_fixed.
@@ -2565,6 +2693,14 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
     response_time_sec = response_time
     if response_time_sec is None:
         raise ValueError("Response time parameter cannot be extracted from Schema file. Check detect_settings function.")
+
+    # Single-reward (new) protocol: keep response_time_category meaningful for rewarded-type
+    # sequences only. Non-rewarded ("no-go") completions are handled as false_response in
+    # classify_trials; here we simply leave their response_time_category empty so existing
+    # decision/choice-accuracy metrics are not polluted. Disabled for the default protocol.
+    if single_reward_info is None:
+        single_reward_info = _get_single_reward_info(root)
+    is_single_reward, rewarded_sequences = single_reward_info
 
     if verbose:
         print("=" * 80)
@@ -2774,6 +2910,17 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
             for pos in ordered_positions_rt
             if position_locations_rt.get(pos) is not None
         ]
+
+        # Single-reward protocol: non-rewarded ("no-go") completions are scored as false_response
+        # in classify_trials, not here. Leave their response_time_category empty so existing
+        # rewarded/unrewarded/timeout-based metrics stay clean. No-op for the default protocol.
+        if is_single_reward and tuple(effective_odor_sequence) not in rewarded_sequences:
+            per_trial_rows.append({
+                'trial_id': trial_id,
+                'response_time_ms': np.nan,
+                'response_time_category': None,
+            })
+            continue
 
         _, hit_hidden_rule, hr_hit_indices = check_hidden_rule(
             effective_odor_sequence, hidden_rule_indices, hr_odor_set
@@ -3936,6 +4083,9 @@ def build_classification_index(classification: dict) -> dict: # Classification f
     c['unrewarded_ids'] = ids_from('completed_sequence_unrewarded')
     c['timeout_ids'] = ids_from('completed_sequence_reward_timeout')
 
+    # Single-reward protocol: completed non-rewarded ("no-go") sequences. Empty for default protocol.
+    c['false_response_ids'] = ids_from('completed_sequence_false_response')
+
     c['hr_rewarded_ids'] = ids_from('completed_sequence_HR_rewarded')
     c['hr_unrewarded_ids'] = ids_from('completed_sequence_HR_unrewarded')
     c['hr_timeout_ids'] = ids_from('completed_sequence_HR_reward_timeout')
@@ -4015,14 +4165,24 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
     }
 
 
+    # 0) Detect single-reward protocol once and share with both classifiers (schema-based).
+    #    When this is the default protocol (all sequences rewarded), single_reward_info disables
+    #    every new code path so behaviour/output are identical to before.
+    single_reward_info = _get_single_reward_info(root)
+    if verbose and single_reward_info[0]:
+        print(f"Single-reward protocol detected: {len(single_reward_info[1])} rewarded sequence(s); "
+              f"non-rewarded completions will be classified as false_response.")
+
     # 1) Run the stable classifier (valve/poke timing included)
     classification = classify_trials(
-        data, events, trial_counts, odor_map, stage, root, verbose=verbose
+        data, events, trial_counts, odor_map, stage, root, verbose=verbose,
+        single_reward_info=single_reward_info
     )
 
     # 2) Run the response-time summary analyzer (prints/aggregates like the notebook)
     rt_summary = analyze_response_times(
-        data, trial_counts, events, odor_map, stage, root, verbose=verbose
+        data, trial_counts, events, odor_map, stage, root, verbose=verbose,
+        single_reward_info=single_reward_info
     )
 
     # 3) Aborted trial details
@@ -4309,6 +4469,14 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
                 return False
 
         def _derive_outcome(row):
+            # Single-reward protocol: a completed NON-rewarded ("no-go") sequence is neither
+            # rewarded/unrewarded/timeout in the reward sense — its outcome is carried by
+            # false_response / fr_label. Leave response_time_category empty for these so existing
+            # metrics stay clean. (Bool-safe: pandas may store sequence_rewarded as numpy.bool_.)
+            seq_rew = row.get("sequence_rewarded")
+            if pd.notna(seq_rew) and not bool(seq_rew):
+                return None
+
             supply = pd.to_numeric(row.get("total_supply_count"), errors="coerce")
             reward_pokes = pd.to_numeric(row.get("total_reward_pokes"), errors="coerce")
             await_ts = row.get("await_reward_time")
@@ -4328,6 +4496,18 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         for col in extra_abort_cols + extra_rt_cols:
             if col not in trial_df.columns:
                 trial_df[col] = np.nan
+
+        # Single-reward protocol only: ensure the false-response columns appear together (they are
+        # produced upstream only for single-reward sessions, so nothing is added for the default
+        # protocol and legacy output is unchanged).
+        fr_cols = [
+            "sequence_rewarded", "false_response", "fr_label",
+            "fr_latency_ms", "fr_time", "fr_port", "fr_odor_identity", "fr_window_end",
+        ]
+        if any(col in trial_df.columns for col in fr_cols):
+            for col in fr_cols:
+                if col not in trial_df.columns:
+                    trial_df[col] = np.nan
 
         # Convenience flag: mark aborted trials (any abortion info present)
         trial_df["is_aborted"] = trial_df[["abortion_type", "abortion_time"]].notna().any(axis=1)
@@ -4688,6 +4868,7 @@ def merge_classifications(run_results: list[dict], verbose: bool = True) -> dict
         'completed_sequence_rewarded',
         'completed_sequence_unrewarded',
         'completed_sequence_reward_timeout',
+        'completed_sequence_false_response',
         'completed_sequences_HR',
         'completed_sequence_HR_rewarded',
         'completed_sequence_HR_unrewarded',
@@ -4970,6 +5151,7 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
         comp_rew = get_df("completed_sequence_rewarded")
         comp_unr = get_df("completed_sequence_unrewarded")
         comp_tmo = get_df("completed_sequence_reward_timeout")
+        comp_fr = get_df("completed_sequence_false_response")  # single-reward protocol only
 
         comp_hr = get_df("completed_sequences_HR")
         comp_hr_missed = get_df("completed_sequences_HR_missed")
@@ -5061,6 +5243,36 @@ def print_merged_session_summary(merged_classification: dict, subjid=None, date=
         print(f"-- Rewarded: {int(len(comp_rew))} ({pct(len(comp_rew), comp_n):.1f}%)")
         print(f"-- Unrewarded: {int(len(comp_unr))} ({pct(len(comp_unr), comp_n):.1f}%)")
         print(f"-- Reward Timeout: {int(len(comp_tmo))} ({pct(len(comp_tmo), comp_n):.1f}%)\n")
+
+        # Single-reward protocol only: completed NON-rewarded ("no-go") sequences. The block is
+        # skipped entirely for the default protocol so legacy summaries are unchanged.
+        comp_fr_n = _count_unique_trials(comp_fr)
+        if comp_fr_n:
+            if "false_response" in comp_fr.columns:
+                fr_true = int(comp_fr["false_response"].fillna(False).astype(bool).sum())
+            else:
+                fr_true = 0
+            fr_false = comp_fr_n - fr_true
+            print(f"NON-REWARDED SEQUENCE BREAKDOWN (completed no-go sequences):")
+            print(f"-- Completed non-rewarded sequences: {comp_fr_n} ({pct(comp_fr_n, comp_n):.1f}%)")
+            print(f"-- False Response (went to reward port): {fr_true} ({pct(fr_true, comp_fr_n):.1f}%)")
+            print(f"-- Correct Withholding (nFR): {fr_false} ({pct(fr_false, comp_fr_n):.1f}%)")
+            if "fr_label" in comp_fr.columns:
+                fr_counts = comp_fr["fr_label"].value_counts()
+                fr_in = int(fr_counts.get("FR_time_in", 0))
+                fr_out = int(fr_counts.get("FR_time_out", 0))
+                fr_late = int(fr_counts.get("FR_late", 0))
+                rt_win = float(response_time_window_sec) if response_time_window_sec is not None else None
+                rt_lbl = f"{rt_win:.0f} s" if rt_win is not None else "response window"
+                rt_lbl3 = f"{rt_win * 3:.0f} s" if rt_win is not None else "3x response window"
+                print(f"   -- FR Time In (within {rt_lbl}): {fr_in} ({pct(fr_in, fr_true):.1f}%)")
+                print(f"   -- FR Time Out (up to {rt_lbl3}): {fr_out} ({pct(fr_out, fr_true):.1f}%)")
+                print(f"   -- FR Late (after 3x, before next trial): {fr_late} ({pct(fr_late, fr_true):.1f}%)")
+                if "fr_latency_ms" in comp_fr.columns:
+                    s_fr = pd.to_numeric(comp_fr.loc[comp_fr["false_response"] == True, "fr_latency_ms"], errors="coerce").dropna()
+                    if len(s_fr):
+                        print(f"   -- FR latency: median {fmt_ms(s_fr.median())} ms, mean {fmt_ms(s_fr.mean())} ms")
+            print()
 
         # Aggregate poke/valve time stats from completed trials (use comp, which has nested columns)
         def collect_pos_stats(df: pd.DataFrame):
@@ -5709,6 +5921,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
         "completed_sequence_rewarded": cls.get("completed_sequence_rewarded", pd.DataFrame()),
         "completed_sequence_unrewarded": cls.get("completed_sequence_unrewarded", pd.DataFrame()),
         "completed_sequence_reward_timeout": cls.get("completed_sequence_reward_timeout", pd.DataFrame()),
+        "completed_sequence_false_response": cls.get("completed_sequence_false_response", pd.DataFrame()),
         "aborted_sequences": cls.get("aborted_sequences", pd.DataFrame()),
     }
 

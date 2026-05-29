@@ -11,6 +11,7 @@ import harp
 import yaml
 from functools import reduce
 from collections import defaultdict
+from itertools import product
 
 def detect_settings(root):
     """
@@ -243,7 +244,55 @@ def detect_settings(root):
     schema_settings['hiddenRuleIndicesInferred'] = hidden_rule_indices_inferred
     schema_settings['hiddenRuleIndexInferred'] = hidden_rule_indices_inferred[0] if hidden_rule_indices_inferred else None
     schema_settings['hiddenRuleOdorsInferred'] = hidden_rule_odors_inferred
-     
+
+    # --- Enumerate concrete candidate sequences and their final-position reward status ---
+    # A concrete sequence is the ordered tuple of odor commands across positions. It is
+    # "rewarded" iff the chosen item at its FINAL position has rewarded=True. The protocol is
+    # flagged "single-reward" iff at least one candidate sequence is NOT rewarded at the final
+    # position (i.e. not all sequences are rewarded). For the default protocol (every sequence
+    # rewarded at the end) this stays False and all downstream behaviour is unchanged.
+    rewarded_sequences = []
+    all_sequences = []
+    try:
+        seen_all = set()
+        seen_rew = set()
+        for definition in _iter_definitions(sequences_obj):
+            if not isinstance(definition, list) or not definition:
+                continue
+            # Per-position list of (command, rewarded) choices
+            per_pos_choices = []
+            ok = True
+            for pos in definition:
+                items = _flatten_list(pos) if isinstance(pos, list) else [pos]
+                choices = []
+                for it in items:
+                    name = _command_name(it)
+                    if name:
+                        choices.append((name, _is_rewarded(it)))
+                if not choices:
+                    ok = False
+                    break
+                per_pos_choices.append(choices)
+            if not ok or not per_pos_choices:
+                continue
+            # Cartesian product over positions -> concrete sequences (handles multi-choice positions)
+            for combo in product(*per_pos_choices):
+                seq = tuple(cmd for (cmd, _rew) in combo)
+                final_rewarded = bool(combo[-1][1])
+                if seq not in seen_all:
+                    seen_all.add(seq)
+                    all_sequences.append(list(seq))
+                if final_rewarded and seq not in seen_rew:
+                    seen_rew.add(seq)
+                    rewarded_sequences.append(list(seq))
+    except Exception:
+        rewarded_sequences = []
+        all_sequences = []
+
+    schema_settings['rewardedSequences'] = rewarded_sequences
+    schema_settings['allSequences'] = all_sequences
+    schema_settings['isSingleRewardProtocol'] = bool(all_sequences) and (len(rewarded_sequences) < len(all_sequences))
+
     return session_settings, schema_settings
 
 if __name__ == "__main__":
