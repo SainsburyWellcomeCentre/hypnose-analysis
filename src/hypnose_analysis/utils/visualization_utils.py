@@ -2352,20 +2352,27 @@ def plot_cumulative_rewards(
     *,
     save=False,
     verbose=True,
+    show_gap_shading=True,
+    show_session_boundaries=True,
 ):
     """
     Plot cumulative rewards with inter-session gap collapsing.
-    
+
     OPTIMIZATION: Skip load_session_results() for 15+ DataFrames.
     Load ONLY: completed_sequence_rewarded CSV + manifest.json
     This gives ~10-15x speedup while keeping all visual features.
-    
+
     Parameters:
     -----------
     subjids : int or list
         Subject ID(s)
-    dates : list, tuple, or None
-        Dates to include
+    dates : list, tuple, dict, or None
+        Dates to include. If a dict, must map subjid → date range (each value
+        is itself a list/tuple/None passed through to ``_filter_session_dirs``
+        for that subject). This allows each subject to be filtered to its own
+        date window — useful for comparing animals across matched training
+        conditions when they are offset in calendar time. Subjids not present
+        as keys are skipped with a warning.
     split_days : bool, optional
         If True, reset cumulative count per day (default: False)
     figsize : tuple, optional
@@ -2376,19 +2383,51 @@ def plot_cumulative_rewards(
         If True, save figure via save_figure (default: False).
     verbose : bool, optional
         If True, print save status messages (default: True).
+    show_gap_shading : bool, optional
+        If True, shade within-session gaps (time mouse could not perform the
+        task) in grey (default: True).
+    show_session_boundaries : bool, optional
+        If True, draw thin grey vertical lines at session boundaries
+        (default: True).
     
     Returns:
     --------
     fig, ax : matplotlib figure and axes
     """
     # Ensure subjids is a list
-    if not isinstance(subjids, (list, tuple)):
+    if isinstance(subjids, dict):
+        # Convenience: allow passing one dict for both ({subjid: date_range}).
+        dates = subjids if not isinstance(dates, dict) or dates is None else dates
+        subjids = list(subjids.keys())
+    elif isinstance(subjids, set):
+        subjids = sorted(subjids)
+    elif not isinstance(subjids, (list, tuple)):
         subjids = [subjids]
+
+    def _dates_for(subjid):
+        if not isinstance(dates, dict):
+            return dates
+        if subjid in dates:
+            return dates[subjid]
+        try:
+            int_key = int(subjid)
+            if int_key in dates:
+                return dates[int_key]
+        except (TypeError, ValueError):
+            pass
+        str_key = str(subjid)
+        if str_key in dates:
+            return dates[str_key]
+        return None
 
     fig, ax = plt.subplots(figsize=figsize)
     colors = plt.cm.tab10(range(len(subjids)))
 
     for subj_idx, subjid in enumerate(subjids):
+        subj_dates = _dates_for(subjid)
+        if isinstance(dates, dict) and subj_dates is None:
+            print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
+            continue
         all_rewarded = []
         session_info = []
 
@@ -2404,7 +2443,7 @@ def plot_cumulative_rewards(
         subj_dir = subj_dirs[0]
 
         # Use _filter_session_dirs to get session directories
-        ses_dirs = _filter_session_dirs(subj_dir, dates)
+        ses_dirs = _filter_session_dirs(subj_dir, subj_dates)
         for ses in ses_dirs:
             date_str = ses.name.split("_date-")[-1]
             results_dir = ses / "saved_analysis_results"
@@ -2519,12 +2558,14 @@ def plot_cumulative_rewards(
             combined['time_seconds'] = (combined['sequence_start'] - global_start_time).dt.total_seconds()
         
         # Add grey shading for gaps between runs (subject-specific)
-        for gap_start, gap_end in subj_gaps:
-            ax.axvspan(gap_start, gap_end, alpha=0.2, color='gray', zorder=0)
-        
-        # Add vertical dashed lines at session boundaries (subject-specific, colored)
-        for boundary in subj_session_starts:
-            ax.axvline(x=boundary, color=colors[subj_idx], linestyle='--', linewidth=1, alpha=0.7)
+        if show_gap_shading:
+            for gap_start, gap_end in subj_gaps:
+                ax.axvspan(gap_start, gap_end, alpha=0.2, color='gray', zorder=0)
+
+        # Add thin grey vertical lines at session boundaries
+        if show_session_boundaries:
+            for boundary in subj_session_starts:
+                ax.axvline(x=boundary, color='gray', linestyle='-', linewidth=0.8, alpha=0.6, zorder=3)
         
         if split_days:
             # Reset count for each day
@@ -2550,9 +2591,19 @@ def plot_cumulative_rewards(
                    markersize=3,
                    label=f'Subject {subjid}')
     
-    ax.set_xlabel('Time (seconds from session start)')
+    ax.set_xlabel('Time (s)')
     ax.set_ylabel('Cumulative Rewards')
     ax.set_title(title if title else 'Accumulated Rewards Over Time')
+    data_xmax = max(
+        (line.get_xdata().max() for line in ax.get_lines() if len(line.get_xdata())),
+        default=ax.get_xlim()[1],
+    )
+    data_ymax = max(
+        (line.get_ydata().max() for line in ax.get_lines() if len(line.get_ydata())),
+        default=ax.get_ylim()[1],
+    )
+    ax.set_xlim(left=0, right=data_xmax * 1.01)
+    ax.set_ylim(bottom=-data_ymax * 0.01, top=data_ymax * 1.02)
     ax.legend()
     
     plt.tight_layout()
@@ -2560,11 +2611,20 @@ def plot_cumulative_rewards(
     if save:
         try:
             suffix = "split_days" if split_days else "continuous"
+            if isinstance(dates, dict):
+                save_dates = []
+                for v in dates.values():
+                    if isinstance(v, (list, tuple)):
+                        save_dates.extend(v)
+                    elif v is not None:
+                        save_dates.append(v)
+            else:
+                save_dates = dates
             out_path = save_figure(
                 fig,
                 f"cumulative_rewards_{suffix}",
                 subjids=list(subjids) if isinstance(subjids, (list, tuple)) else [subjids],
-                dates=dates,
+                dates=save_dates,
             )
             if verbose:
                 print(f"[plot_cumulative_rewards] Saved figure to {out_path}")

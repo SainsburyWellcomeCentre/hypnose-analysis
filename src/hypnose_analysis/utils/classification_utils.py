@@ -4169,9 +4169,6 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
     #    When this is the default protocol (all sequences rewarded), single_reward_info disables
     #    every new code path so behaviour/output are identical to before.
     single_reward_info = _get_single_reward_info(root)
-    if verbose and single_reward_info[0]:
-        print(f"Single-reward protocol detected: {len(single_reward_info[1])} rewarded sequence(s); "
-              f"non-rewarded completions will be classified as false_response.")
 
     # 1) Run the stable classifier (valve/poke timing included)
     classification = classify_trials(
@@ -4227,6 +4224,13 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
     else:
         seq_label = sequence_name or str(stage)
         print(f"No Hidden Rule Location found in sequence name: {seq_label}. Proceeding without Hidden Rule analysis.")
+
+    # Single-reward protocol status (always printed, like the hidden-rule message above)
+    if single_reward_info[0]:
+        print(f"Single-reward protocol detected: {len(single_reward_info[1])} rewarded sequence(s); "
+              f"non-rewarded completions classified as false_response.")
+    else:
+        print("Single-reward protocol: not detected (all sequences rewarded at final position; standard analysis).")
 
 # 5) Attach params and RT summary to classification
     classification['hidden_rule_location'] = hidden_rule_location
@@ -5779,6 +5783,20 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
                 stage = detect_stage_module.detect_stage(root)
             except Exception:
                 stage = {'stage_name': str(root)}
+
+            # Single-reward protocol status — always printed, alongside the stage/hidden-rule
+            # info above, so it shows even in non-verbose runs. When verbose, the per-run wrapper
+            # prints this instead (this guard avoids a duplicate line).
+            if not verbose:
+                try:
+                    _sri = _get_single_reward_info(root)
+                    if _sri[0]:
+                        print(f"Single-reward protocol detected: {len(_sri[1])} rewarded sequence(s); "
+                              f"non-rewarded completions classified as false_response.")
+                    else:
+                        print("Single-reward protocol: not detected (all sequences rewarded at final position; standard analysis).")
+                except Exception:
+                    pass
 
             # Run pipeline
             data = _maybe_silent(load_all_streams, root, verbose=verbose)
