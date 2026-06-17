@@ -11,7 +11,7 @@ def get_repo_root() -> Path:
     assuming standard src/ layout.
     """
     return Path(__file__).resolve().parents[2]
-    # paths.py → hypnose_analysis → src → hypnose-analysis
+    # paths.py → hypnose → src → hypnose-analysis
 
 def _env_path(var_name: str) -> Path | None:
     val = os.getenv(var_name)

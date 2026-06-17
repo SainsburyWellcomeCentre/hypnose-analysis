@@ -35,9 +35,9 @@ import pandas as pd
 # --- single import surface -------------------------------------------------
 # Update ONLY these lines as modules move during the restructuring. The md5
 # fingerprints they produce must remain identical at every step.
-import hypnose_analysis.paths as _paths
-from hypnose_analysis.utils.classification_utils import analyze_session_multi_run_by_id_date
-from hypnose_analysis.utils.metrics_utils import load_session_results, run_all_metrics
+import hypnose.paths as _paths
+from hypnose.utils.classification_utils import analyze_session_multi_run_by_id_date
+from hypnose.utils.metrics_utils import load_session_results, run_all_metrics
 # ---------------------------------------------------------------------------
 
 

@@ -4,7 +4,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
-from hypnose_analysis.paths import get_derivatives_root
+from hypnose.paths import get_derivatives_root
 
 CACHE = OrderedDict()
 CACHE_MAX_ITEMS = 40

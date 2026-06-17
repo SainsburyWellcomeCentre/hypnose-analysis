@@ -9,26 +9,26 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
-from hypnose_analysis.utils.metrics_utils import (
+from hypnose.utils.metrics_utils import (
     load_session_results,
     run_all_metrics,
     parse_json_column,
 )
 from datetime import timedelta, datetime
-from hypnose_analysis.utils.classification_utils import load_all_streams, load_experiment
-from hypnose_analysis.paths import (
+from hypnose.utils.classification_utils import load_all_streams, load_experiment
+from hypnose.paths import (
     get_data_root,
     get_rawdata_root,
     get_derivatives_root,
     get_server_root,
 )
-from hypnose_analysis.helpers import (
+from hypnose.helpers import (
     _filter_session_dirs,
     _get_from_cache,
     _iter_subject_dirs,
     _update_cache,
 )
-from hypnose_analysis.utils.visualization_utils import (
+from hypnose.utils.visualization_utils import (
     _clean_graph,
     _load_table_with_trial_data,
     _load_trial_views,
@@ -37,7 +37,7 @@ from hypnose_analysis.utils.visualization_utils import (
     _ensure_metrics_json,
     load_tracking_with_behavior,
 )
-from hypnose_analysis.utils.save_utils import save_figure
+from hypnose.utils.save_utils import save_figure
 import re
 import numpy as np
 import json
@@ -2715,10 +2715,10 @@ def plot_traces_with_speed_threshold(
     try:
         binned_speed_fn = _binned_speed
     except NameError:
-        import hypnose_analysis.utils.movement_analysis_utils as _mau
+        import hypnose.utils.movement_analysis_utils as _mau
         binned_speed_fn = getattr(_mau, "_binned_speed", None)
     if binned_speed_fn is None:
-        raise RuntimeError("_binned_speed helper not available; reload hypnose_analysis.utils.movement_analysis_utils")
+        raise RuntimeError("_binned_speed helper not available; reload hypnose.utils.movement_analysis_utils")
 
     # Color palette consistent with plot_trial_traces_by_mode
     port_colors = {1: "#FF6B6B", 2: "#4ECDC4"}
