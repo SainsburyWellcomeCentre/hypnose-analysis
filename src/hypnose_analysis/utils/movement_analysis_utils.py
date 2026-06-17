@@ -898,6 +898,8 @@ def plot_trial_traces_by_mode(
     save=False,
     verbose=True,
     return_paths=False,
+    show_title=True,
+    show_legend=True,
 ):
     """
     Plot centroid traces (SLEAP) for trials filtered by mode, collapsing multiple dates into one plane.
@@ -1652,9 +1654,10 @@ def plot_trial_traces_by_mode(
         if invert_y:
             ax.invert_yaxis()
         ax.set_aspect('equal', adjustable='box')
-        handles, labels = ax.get_legend_handles_labels()
-        if handles:
-            ax.legend()
+        if show_legend:
+            handles, labels = ax.get_legend_handles_labels()
+            if handles:
+                ax.legend()
 
     figs = []
     axes_out = []
@@ -1680,7 +1683,7 @@ def plot_trial_traces_by_mode(
     def _make_fig(axis_key, title=None):
         fig, ax = plt.subplots(1, 1, figsize=figsize)
         _plot_axis(ax, axis_key)
-        if title:
+        if title and show_title:
             ax.set_title(title)
         plt.tight_layout()
         figs.append(fig)
