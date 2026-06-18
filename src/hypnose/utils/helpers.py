@@ -10,6 +10,12 @@ CACHE = OrderedDict()
 CACHE_MAX_ITEMS = 40
 
 
+def vprint(verbose: bool, *args, **kwargs):
+    """print(...) only when verbose is True."""
+    if verbose:
+        print(*args, **kwargs)
+
+
 def _update_cache(subjid, dates, data, kind):
     """Update cache entries for a subject/date set and kind."""
     global CACHE
