@@ -29,10 +29,10 @@ Run in the pinned conda env recorded in `fixtures/env.json`.
 
 ```bash
 # (baseline only, already done on main) write the ground-truth fixtures:
-python tests/regression/regression.py --generate
+python src/hypnose/qc/regression.py --generate
 
 # after EVERY restructuring step:
-python tests/regression/regression.py        # exit 0 = GREEN, 1 = RED
+python src/hypnose/qc/regression.py        # exit 0 = GREEN, 1 = RED
 ```
 
 A RED result means a "move" changed output and was not pure — revert/fix before

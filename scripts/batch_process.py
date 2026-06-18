@@ -18,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from hypnose.trial_classification.run import batch_analyze_sessions
 from hypnose.metric_analysis.metrics_utils import batch_run_all_metrics_with_merge
-from hypnose.io.validate import validate_subject
+from hypnose.qc.validate import validate_subject
 
 
 def _resolve_dates(args):

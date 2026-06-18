@@ -8,10 +8,10 @@ sessions (``sessions.yml``) and compares against stored fixtures.
 Usage
 -----
   # write fixtures from the current (baseline) code -- do this ONCE on main:
-  python tests/regression/regression.py --generate
+  python src/hypnose/qc/regression.py --generate
 
   # check the current code against the fixtures -- after every restructuring step:
-  python tests/regression/regression.py
+  python src/hypnose/qc/regression.py
 
 Exit code 0 == GREEN (all match); 1 == RED (mismatch / failure).
 
@@ -29,7 +29,7 @@ import yaml
 
 HERE = Path(__file__).resolve().parent
 FIXTURES = HERE / "fixtures"
-REPO = HERE.parents[1]
+REPO = HERE.parents[2]
 
 # Make both the harness module and the src package importable without install.
 sys.path.insert(0, str(HERE))

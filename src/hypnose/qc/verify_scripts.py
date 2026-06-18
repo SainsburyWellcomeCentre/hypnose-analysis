@@ -12,8 +12,8 @@ int-vs-str dates bug hid), which the function-level regression does not touch.
   batch_process.py             -> both, on one session (verifies the chained composition)
 
 Usage:
-  python tests/regression/verify_scripts.py            # all fixture sessions
-  python tests/regression/verify_scripts.py 053:20260520 053:20260429   # subset
+  python src/hypnose/qc/verify_scripts.py            # all fixture sessions
+  python src/hypnose/qc/verify_scripts.py 053:20260520 053:20260429   # subset
 
 Exit 0 = GREEN; 1 = mismatch / script failure. Run in the pinned conda env.
 """
@@ -30,7 +30,7 @@ from pathlib import Path
 import yaml
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
+REPO = HERE.parents[2]
 SCRIPTS = REPO / "scripts"
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO / "src"))

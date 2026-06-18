@@ -15,13 +15,13 @@ unchanged -- that's what the value regression (regression.py) is for.
 Usage
 -----
   # one or more dotted module names:
-  python tests/regression/check_imports.py hypnose.trial_classification.run
+  python src/hypnose/qc/check_imports.py hypnose.trial_classification.run
 
   # or file paths (anything under src/):
-  python tests/regression/check_imports.py src/hypnose/trial_classification/run.py
+  python src/hypnose/qc/check_imports.py src/hypnose/trial_classification/run.py
 
   # default (no args): check every .py module under src/hypnose:
-  python tests/regression/check_imports.py
+  python src/hypnose/qc/check_imports.py
 
 Exit code 0 = all globals resolve; 1 = missing name(s) found / import failed.
 """
@@ -36,7 +36,7 @@ import importlib
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-REPO = HERE.parents[1]
+REPO = HERE.parents[2]
 SRC = REPO / "src"
 sys.path.insert(0, str(SRC))
 
@@ -85,10 +85,14 @@ def check_module(modname: str) -> list[tuple[str, str]]:
 
 def _default_targets() -> list[str]:
     pkg = SRC / "hypnose"
+    # The qc runnable tools (this checker, the regression/verify scripts and their
+    # _common helper) are executed, not imported as library modules, so skip them
+    # in the default scan. validate.py is library code and is still checked.
+    skip = {"regression", "verify_scripts", "check_imports", "_common"}
     return [
         ".".join(p.relative_to(SRC).with_suffix("").parts)
         for p in sorted(pkg.rglob("*.py"))
-        if p.name != "__init__.py"
+        if p.name != "__init__.py" and not (p.parent.name == "qc" and p.stem in skip)
     ]
 
 

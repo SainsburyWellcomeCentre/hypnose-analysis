@@ -8,6 +8,25 @@ This repository is utilised for processing and visualising data acquired from Hy
 
 - Analysing and visualising behavioral metrics
 
+## Repository structure
+
+```
+configs/                 user-facing setup configs (rig/olfactometer .yml)
+data/rawdata             symlink to the read-only data on the server; all output -> derivatives
+notebooks/               analysis/visualisation notebooks (import from src; no definitions)
+scripts/                 terminal entry points (thin CLI wrappers; no analysis logic)
+src/hypnose/
+    io/                  data loading, saving, paths (readers, loaders, save, save_results, paths)
+    trial_classification/ trial detection + classification (classification_utils, detect_trials/stage/settings, merge, summary, run)
+    metric_analysis/     behavioural metric calculation (metrics_utils)
+    visualization/       figure-making (valve/poke, metrics, pred-seq, movement)
+    utils/               small shared helpers
+    qc/                  quality control: data validation + golden-master regression tools (see below)
+    resources/device_schemas/  harp schemas (behavior.yml, olfactometer.yml), loaded as package data
+```
+
+The importable package is `hypnose` (e.g. `from hypnose.trial_classification.run import batch_analyze_sessions`).
+
 ## How to Use
 
 1. Clone the repository
@@ -62,7 +81,17 @@ Check log file for files that failed transfer.
 
 ## Running Analysis: 
 
-The analysis consists of two parts: **trial classification** and **behavioral metric calculation**
+The analysis consists of two parts: **trial classification** and **behavioral metric calculation**. Both can be run either from the notebooks or from the terminal scripts.
+
+### From the terminal (scripts/)
+
+```
+python scripts/run_trial_classification.py --subjids 53 --dates 20260528
+python scripts/run_metrics_analysis.py     --subjids 53 --dates 20260528
+python scripts/batch_process.py            --subjids 53 --date-range 20260501 20260531
+```
+
+`--subjids` and `--dates` are optional (omit to run all); use `--date-range START END` for an inclusive range. Run trial classification before metric analysis (metrics read the saved classification results). The scripts validate that data exists first (`hypnose.io.validate.validate_subject`) and are thin wrappers over `hypnose.trial_classification.run.batch_analyze_sessions` and `hypnose.metric_analysis.metrics_utils.batch_run_all_metrics_with_merge`.
 
 1. Trial Classification
 
@@ -201,3 +230,28 @@ batch_run_all_metrics_with_merge can run on any combination of dates and subjids
 Results are saved per session and merged for all sessions analyzed, either within the subject directory, or in the merged directory at the subject directory level for multi-subject runs.
 
 Results are saved as a json and csv file combination with a summary txt file. 
+
+## Quality control (`src/hypnose/qc/`)
+
+The `qc` package holds tools to run **after major changes** to confirm the analysis output is unaffected (or to mark what changed, if intended). Run them in the project conda environment.
+
+- **`validate.py`** — `validate_subject()`: pre-flight check that rawdata exists for a subject/date; flags missing dates in a range without aborting. Used by the terminal scripts.
+
+- **`regression.py`** — golden-master value regression. For a fixed set of coverage sessions (`sessions.yml`) it fingerprints `trial_data` (canonical CSV) and the metrics dict and md5-compares against stored baselines in `fixtures/`. It reads the read-only rawdata and writes only to a temp dir (never the server).
+  ```
+  python src/hypnose/qc/regression.py            # compare against fixtures (exit 0 = GREEN)
+  python src/hypnose/qc/regression.py --generate # regenerate baselines (only when a change is intended)
+  ```
+
+- **`verify_scripts.py`** — runs the actual terminal scripts via subprocess and md5-checks their `trial_data` + metrics against the same fixtures (covers the CLI arg wiring, which the function-level regression does not).
+  ```
+  python src/hypnose/qc/verify_scripts.py
+  ```
+
+- **`check_imports.py`** — static checker: disassembles every function and flags any referenced global that isn't imported (catches missing-import NameErrors that only surface at call time). Run on the whole package or a single module/file.
+  ```
+  python src/hypnose/qc/check_imports.py                                   # whole package
+  python src/hypnose/qc/check_imports.py hypnose.trial_classification.run  # one module
+  ```
+
+A RED regression means output changed — revert/fix, or, if the change was intended, regenerate the fixtures in a separate reviewed commit. Fixtures are only valid in the pinned environment recorded in `fixtures/env.json`.
