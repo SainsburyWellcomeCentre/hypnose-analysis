@@ -6,7 +6,7 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 import zoneinfo
-import hypnose.session_utils as utils
+import hypnose.io.readers as utils
 import harp
 import yaml
 from functools import reduce

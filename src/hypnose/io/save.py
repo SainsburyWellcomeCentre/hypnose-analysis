@@ -3,7 +3,7 @@ from pathlib import Path
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from cycler import cycler
-from hypnose.paths import get_derivatives_root
+from hypnose.io.paths import get_derivatives_root
 
 
 

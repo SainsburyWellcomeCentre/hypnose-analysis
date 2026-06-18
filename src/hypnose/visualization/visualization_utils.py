@@ -9,20 +9,20 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
-from hypnose.utils.metrics_utils import (
+from hypnose.metric_analysis.metrics_utils import (
     load_session_results,
     run_all_metrics,
     parse_json_column,
 )
 from datetime import timedelta, datetime
-from hypnose.utils.classification_utils import load_all_streams, load_experiment
-from hypnose.helpers import (
+from hypnose.trial_classification.classification_utils import load_all_streams, load_experiment
+from hypnose.utils.helpers import (
     _filter_session_dirs,
     _get_from_cache,
     _iter_subject_dirs,
     _update_cache,
 )
-from hypnose.paths import (
+from hypnose.io.paths import (
     get_data_root,
     get_rawdata_root,
     get_derivatives_root,
@@ -31,7 +31,7 @@ from hypnose.paths import (
 import re
 import numpy as np
 import json
-from hypnose.utils.save_utils import save_figure
+from hypnose.io.save import save_figure
 
 
 def _clean_graph(ax, *, xlabel: Optional[str] = None, ylabel: Optional[str] = None):

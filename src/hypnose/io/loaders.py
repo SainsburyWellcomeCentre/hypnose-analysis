@@ -21,7 +21,7 @@ from dotmap import DotMap
 from aeon.io.reader import Reader, Csv
 import aeon.io.api as api
 
-import hypnose.processing.detect_settings as detect_settings
+import hypnose.trial_classification.detect_settings as detect_settings
 from hypnose.io.paths import get_rawdata_root, get_derivatives_root, get_server_root
 from hypnose.utils.helpers import vprint
 

@@ -117,7 +117,7 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
 
             # Detect stage for THIS run
             try:
-                import hypnose.processing.detect_stage as detect_stage_module
+                import hypnose.trial_classification.detect_stage as detect_stage_module
                 stage = detect_stage_module.detect_stage(root)
             except Exception:
                 stage = {'stage_name': str(root)}

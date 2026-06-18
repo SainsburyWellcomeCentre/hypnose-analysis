@@ -9,7 +9,7 @@ BEHAVIOR_SCHEMA_PATH = SCHEMA_DIR / "behavior.yml"
 OLFACTOMETER_SCHEMA_PATH = SCHEMA_DIR / "olfactometer.yml"
 
 
-from hypnose.paths import get_rawdata_root, get_derivatives_root, get_server_root
+from hypnose.io.paths import get_rawdata_root, get_derivatives_root, get_server_root
 import json
 from dotmap import DotMap
 import pandas as pd
@@ -24,8 +24,8 @@ import harp
 import datetime
 from datetime import timezone
 import zoneinfo
-import hypnose.processing.detect_settings as detect_settings
-import hypnose.processing.detect_stage as detect_stage_module
+import hypnose.trial_classification.detect_settings as detect_settings
+import hypnose.trial_classification.detect_stage as detect_stage_module
 from datetime import datetime, timezone, date
 from collections import defaultdict
 from bisect import bisect_left, bisect_right
