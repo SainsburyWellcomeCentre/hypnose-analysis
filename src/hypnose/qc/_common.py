@@ -45,16 +45,54 @@ def _md5(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()
 
 
+def _canonical_trial_data_df(csv_path: Path) -> "pd.DataFrame":
+    """Read trial_data with columns sorted and index reset (order-independent)."""
+    df = pd.read_csv(csv_path)
+    return df.reindex(sorted(df.columns), axis=1).reset_index(drop=True)
+
+
 def _canonical_trial_data(csv_path: Path) -> str:
     """Column-order- and index-independent CSV serialization of trial_data."""
-    df = pd.read_csv(csv_path)
-    df = df.reindex(sorted(df.columns), axis=1).reset_index(drop=True)
-    return df.to_csv(index=False)
+    return _canonical_trial_data_df(csv_path).to_csv(index=False)
 
 
 def _canonical_metrics(metrics: dict) -> str:
     """Deterministic, timestamp-free serialization of the metric values."""
     return json.dumps(metrics, sort_keys=True, default=str)
+
+
+def _trial_data_fingerprint(csv_path: Path) -> tuple[str, dict]:
+    """Return (overall md5, {column_name: md5 of that column's values})."""
+    df = _canonical_trial_data_df(csv_path)
+    overall = _md5(df.to_csv(index=False))
+    per_col = {str(c): _md5(df[c].to_csv(index=False, header=False)) for c in df.columns}
+    return overall, per_col
+
+
+def _metrics_fingerprint(metrics: dict) -> tuple[str, dict]:
+    """Return (overall md5, {top_level_metric_key: md5 of its value})."""
+    overall = _md5(_canonical_metrics(metrics))
+    per_key = {str(k): _md5(json.dumps(v, sort_keys=True, default=str)) for k, v in metrics.items()}
+    return overall, per_key
+
+
+def diff_report(label: str, fixture_parts: dict, current_parts: dict, indent: str = "      ") -> list[str]:
+    """Human-readable added/removed/changed lines between two {name: md5} maps."""
+    fset, cset = set(fixture_parts), set(current_parts)
+    added = sorted(cset - fset)
+    removed = sorted(fset - cset)
+    changed = sorted(k for k in (fset & cset) if fixture_parts[k] != current_parts[k])
+    lines = []
+    if added:
+        lines.append(f"{indent}+ added {label}: {', '.join(added)}")
+    if removed:
+        lines.append(f"{indent}- removed {label}: {', '.join(removed)}")
+    if changed:
+        lines.append(f"{indent}~ changed {label}: {', '.join(changed)}")
+    if not lines:
+        lines.append(f"{indent}(overall md5 differs but every {label} md5 matches "
+                     f"-- likely row order / dtype / a column not captured here)")
+    return lines
 
 
 def _redirect_derivatives(tmp: Path) -> None:
@@ -67,10 +105,15 @@ def _redirect_derivatives(tmp: Path) -> None:
 
 
 def fingerprint_session(subjid, date) -> dict:
-    """Run classification + metrics for one session in an isolated temp
-    derivatives dir and return ``{'trial_data': md5, 'metrics': md5}``.
+    """Run classification + metrics for one session in an isolated temp derivatives
+    dir and return its fingerprint:
 
-    Raises on any failure so a broken session is never silently fingerprinted.
+        {'trial_data': md5, 'trial_data_columns': {col: md5},
+         'metrics': md5,    'metrics_keys': {key: md5}}
+
+    The overall md5s are the pass/fail signal; the per-column / per-key md5s let a
+    mismatch report exactly *what* changed. Raises on any failure so a broken
+    session is never silently fingerprinted.
     """
     subjid = str(subjid)
     date = str(date)
@@ -89,14 +132,19 @@ def fingerprint_session(subjid, date) -> dict:
             raise FileNotFoundError(
                 f"trial_data.csv not found for subj={subjid} date={date} under {tmp}"
             )
-        trial_data_md5 = _md5(_canonical_trial_data(matches[0]))
+        trial_data_md5, trial_data_columns = _trial_data_fingerprint(matches[0])
 
         with contextlib.redirect_stdout(sink):
             results = load_session_results(subjid, date)
             metrics = run_all_metrics(results, save_txt=False, save_json=False)
-        metrics_md5 = _md5(_canonical_metrics(metrics))
+        metrics_md5, metrics_keys = _metrics_fingerprint(metrics)
 
-    return {"trial_data": trial_data_md5, "metrics": metrics_md5}
+    return {
+        "trial_data": trial_data_md5,
+        "trial_data_columns": trial_data_columns,
+        "metrics": metrics_md5,
+        "metrics_keys": metrics_keys,
+    }
 
 
 def env_fingerprint() -> dict:
