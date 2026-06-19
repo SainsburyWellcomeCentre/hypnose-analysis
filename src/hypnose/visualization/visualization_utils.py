@@ -17,6 +17,7 @@ from hypnose.metric_analysis.metrics_utils import (
 from datetime import timedelta, datetime
 from hypnose.trial_classification.classification_utils import load_all_streams, load_experiment
 from hypnose.utils.helpers import (
+    CACHE,
     _filter_session_dirs,
     _get_from_cache,
     _iter_subject_dirs,
