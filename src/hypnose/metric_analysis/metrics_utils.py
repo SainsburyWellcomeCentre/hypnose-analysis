@@ -16,8 +16,8 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib import cm
 from typing import Iterable, Optional, Union
-from hypnose_analysis.helpers import _filter_session_dirs
-from hypnose_analysis.paths import get_derivatives_root
+from hypnose.utils.helpers import _filter_session_dirs
+from hypnose.io.paths import get_derivatives_root
 # ================== Loading, Wrapper, and Helper Functions ==================
 
 def load_session_results(subjid, date):

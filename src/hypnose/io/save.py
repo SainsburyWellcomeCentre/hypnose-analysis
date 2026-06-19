@@ -3,7 +3,7 @@ from pathlib import Path
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from cycler import cycler
-from hypnose_analysis.paths import get_derivatives_root
+from hypnose.io.paths import get_derivatives_root
 
 
 
@@ -78,8 +78,98 @@ def nature_style() -> dict:
     }
 
 
-# Apply the style globally so display and saved figures match
-mpl.rcParams.update(nature_style())
+def poster_style() -> dict:
+    """
+    Return rcParams dict for poster figures.
+
+    Same typographic family and color cycle as nature_style(), but with:
+    - titles hidden (axes.titlesize = 0)
+    - larger fonts for axis labels, ticks, legend
+    - thicker spines, ticks, and lines for visibility at viewing distance
+    - 600 dpi for both display and save
+    """
+    return {
+        # Font
+        "font.family": "sans-serif",
+        "font.sans-serif": ["Arial", "Helvetica", "DejaVu Sans"],
+        "font.size": 22,
+        "font.weight": "bold",       # bold tick labels (no per-tick weight rcParam exists)
+        "mathtext.fontset": "dejavusans",
+        "mathtext.default": "regular",
+
+        # Axes
+        "axes.linewidth": 3.5,
+        "axes.labelsize": 36,
+        "axes.labelweight": "bold",
+        "axes.titlesize": 0,         # no per-axes titles on posters
+        "axes.titleweight": "bold",
+        "axes.titlepad": 0,
+        "axes.labelpad": 6,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.grid": False,
+        "axes.facecolor": "white",
+        "axes.formatter.useoffset": False,
+
+        # Figure-level title (suptitle) — also suppressed for posters
+        "figure.titlesize": 0,
+        "figure.titleweight": "bold",
+
+        # Lines
+        #"lines.linewidth": 2.5,
+        #"lines.markersize": 8,
+        #"lines.markeredgewidth": 1.5,
+
+        "lines.linewidth": 1.0,
+        "lines.markersize": 4,
+        "lines.markeredgewidth": 0.8,
+
+        # Ticks
+        "xtick.direction": "out",
+        "ytick.direction": "out",
+        "xtick.major.width": 2.0,
+        "ytick.major.width": 2.0,
+        "xtick.major.size": 12,
+        "ytick.major.size": 12,
+        "xtick.minor.visible": False,
+        "ytick.minor.visible": False,
+        "xtick.labelsize": 28,
+        "ytick.labelsize": 28,
+
+        # Legend — off by default. Auto-added legends (e.g. from seaborn) become
+        # invisible via fontsize=0; add legends manually with an explicit fontsize
+        # kwarg, e.g. ax.legend(fontsize=18, frameon=False), when you want one.
+        "legend.frameon": False,
+        "legend.fontsize": 10,
+
+        # Color cycle (matches nature_style for consistency across figure sets)
+        "axes.prop_cycle": cycler(color=[
+            "#E64B35", "#4DBBD5", "#00A087",
+            "#3C5488", "#F39B7F", "#8491B4",
+            "#91D1C2", "#DC0000", "#7E6148"
+        ]),
+
+        # Figure
+        "figure.dpi": 110,
+        "savefig.dpi": 600,
+        "figure.facecolor": "white",
+
+        # PDF/SVG
+        "pdf.fonttype": 42,
+        "ps.fonttype": 42,
+        "svg.fonttype": "none",
+
+        "image.composite_image": False,
+    }
+
+
+# Apply the default (nature) style globally so display and saved figures match.
+# To switch to poster style for a notebook, call:
+#     mpl.rcParams.update(poster_style())
+mpl.rcParams.update(poster_style())
+
+mpl.rcParams["pdf.fonttype"] = 42
+mpl.rcParams["ps.fonttype"] = 42
 
 # --------------------------------------
 # Size Presets
@@ -184,6 +274,28 @@ def resolve_figure_dir(subjids, dates=None) -> Path:
     return fig_dir
 
 
+def strip_legends(fig_or_ax) -> int:
+    """Remove every legend on the figure (or a single axes).
+
+    Use this when you want a guaranteed legend-free figure regardless of what
+    upstream plotting calls (seaborn, pandas .plot, etc.) auto-added.
+    Call this just before saving or showing. Returns the number of legends removed.
+    """
+    if isinstance(fig_or_ax, mpl.figure.Figure):
+        axes_iter = list(fig_or_ax.axes)
+    elif isinstance(fig_or_ax, mpl.axes.Axes):
+        axes_iter = [fig_or_ax]
+    else:
+        raise TypeError(f"Expected Figure or Axes, got {type(fig_or_ax).__name__}")
+    removed = 0
+    for ax in axes_iter:
+        leg = ax.get_legend()
+        if leg is not None:
+            leg.remove()
+            removed += 1
+    return removed
+
+
 def save_figure(
     fig: mpl.figure.Figure,
     save_name: str,
@@ -193,6 +305,7 @@ def save_figure(
     subdir: str | Path | None = None,
     dpi: int = 600,
     bbox_inches=None,
+    clear_legends: bool = False,
 ):
     """Save a matplotlib figure as PDF into a location derived from subject/session scope.
 
@@ -235,6 +348,9 @@ def save_figure(
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     out_path = fig_dir / filename
+
+    if clear_legends:
+        strip_legends(fig)
 
     bbox = bbox_inches if bbox_inches is not None else "tight"
     fig.savefig(out_path, bbox_inches=bbox, dpi=dpi)

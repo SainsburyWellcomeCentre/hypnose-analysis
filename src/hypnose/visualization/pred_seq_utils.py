@@ -11,9 +11,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from hypnose_analysis.helpers import _filter_session_dirs, _iter_subject_dirs
-from hypnose_analysis.paths import get_derivatives_root
-from hypnose_analysis.utils.save_utils import save_figure
+from hypnose.utils.helpers import _filter_session_dirs, _iter_subject_dirs
+from hypnose.io.paths import get_derivatives_root
+from hypnose.io.save import save_figure
 from matplotlib.patches import Patch
 
 

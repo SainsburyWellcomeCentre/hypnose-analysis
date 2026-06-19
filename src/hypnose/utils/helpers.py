@@ -4,10 +4,16 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
-from hypnose_analysis.paths import get_derivatives_root
+from hypnose.io.paths import get_derivatives_root
 
 CACHE = OrderedDict()
 CACHE_MAX_ITEMS = 40
+
+
+def vprint(verbose: bool, *args, **kwargs):
+    """print(...) only when verbose is True."""
+    if verbose:
+        print(*args, **kwargs)
 
 
 def _update_cache(subjid, dates, data, kind):

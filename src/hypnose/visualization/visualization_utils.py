@@ -9,20 +9,21 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
-from hypnose_analysis.utils.metrics_utils import (
+from hypnose.metric_analysis.metrics_utils import (
     load_session_results,
     run_all_metrics,
     parse_json_column,
 )
 from datetime import timedelta, datetime
-from hypnose_analysis.utils.classification_utils import load_all_streams, load_experiment
-from hypnose_analysis.helpers import (
+from hypnose.trial_classification.classification_utils import load_all_streams, load_experiment
+from hypnose.utils.helpers import (
+    CACHE,
     _filter_session_dirs,
     _get_from_cache,
     _iter_subject_dirs,
     _update_cache,
 )
-from hypnose_analysis.paths import (
+from hypnose.io.paths import (
     get_data_root,
     get_rawdata_root,
     get_derivatives_root,
@@ -31,7 +32,7 @@ from hypnose_analysis.paths import (
 import re
 import numpy as np
 import json
-from hypnose_analysis.utils.save_utils import save_figure
+from hypnose.io.save import save_figure
 
 
 def _clean_graph(ax, *, xlabel: Optional[str] = None, ylabel: Optional[str] = None):
@@ -356,7 +357,11 @@ def plot_behavior_metrics(
     black_white: bool = False,
     y_range: Optional[Tuple[float, float]] = None,
     plot_HR_separately: bool = False,
-    clean_graph: bool = False,
+    show_title: bool = True,
+    show_legend: bool = True,
+    y_title: Optional[str] = None,
+    lw_scale: float = 1.0,
+    marker_scale: float = 1.0,
     save: bool = False,
     return_paths: bool = False,
 ):
@@ -372,14 +377,26 @@ def plot_behavior_metrics(
 
     Parameters:
     - subjids: List of subject IDs to include, or None to include all subjects with matching dates.
-    - dates: List of specific dates (e.g., [20250101, 20250102]) or a date range (e.g., (20250101, 20250202)).
+        May also be a dict ``{subjid: date_range}`` as a shorthand — in that case
+        the dict is used as ``dates`` and the subjids are its keys.
+    - dates: List of specific dates (e.g., [20250101, 20250102]) or a date range
+        (e.g., (20250101, 20250202)). Can also be a dict ``{subjid: date_range}``
+        to give each subject its own date window (useful when subjects' training
+        windows don't overlap). Subjids missing from the dict are skipped with a warning.
     - variables: List of metric names or dot-paths to plot.
     - protocol_filter: Optional substring to filter sessions by protocol.
     - compute_if_missing: If True, compute metrics if missing.
     - verbose: If True, print progress and warnings.
     - y_range: Optional tuple (ymin, ymax); if provided, sets y-limits for each plot.
     - plot_HR_separately: If True and plotting hidden_rule_detection_rate, also plot per-HR-odor detection alongside total.
-    - clean_graph: If True, hide title/labels/tick labels/legend while printing labels & tick values.
+    - show_title: If False, no plot title is rendered (useful for poster-style figures).
+    - show_legend: If False, the subject / protocol / series legends are skipped.
+    - y_title: If provided, overrides the default y-axis label (derived from the
+        variable name); if None, the variable name is used as before.
+    - lw_scale: Multiplier applied to every line width (per-series values keep
+        their relative ratios). Default 1.0; use e.g. 3.0 for poster figures.
+    - marker_scale: Multiplier applied to scatter point size and legend marker
+        size. Default 1.0.
     - save: If True, save each figure as PDF via save_figure using subjids/dates to resolve the folder.
     - return_paths: If True and save=True, return (figs, paths); otherwise return figs.
 
@@ -389,13 +406,60 @@ def plot_behavior_metrics(
     if not variables:
         raise ValueError("Please provide `variables` (list of metric names or dot-paths).")
 
+    # Resolve subjids + per-subject dates (mirrors plot_cumulative_rewards)
+    if isinstance(subjids, dict):
+        dates = subjids if not isinstance(dates, dict) or dates is None else dates
+        subjids = list(subjids.keys())
+    elif isinstance(dates, dict) and subjids is None:
+        subjids = list(dates.keys())
+    elif isinstance(subjids, set):
+        subjids = sorted(subjids)
+    elif subjids is not None and not isinstance(subjids, (list, tuple)):
+        subjids = [subjids]
+
+    def _dates_for(subjid):
+        if not isinstance(dates, dict):
+            return dates
+        if subjid in dates:
+            return dates[subjid]
+        try:
+            int_key = int(subjid)
+            if int_key in dates:
+                return dates[int_key]
+        except (TypeError, ValueError):
+            pass
+        str_key = str(subjid)
+        if str_key in dates:
+            return dates[str_key]
+        return None
+
     rows = []
     base_path = get_rawdata_root()
     server_root = get_server_root()
     derivatives_dir = get_derivatives_root()
+
+    # Build (sid, subj_dir, subj_dates) list — supports per-subject windows
+    if subjids is None:
+        subject_iter = [(sid, sd, dates) for sid, sd in _iter_subject_dirs(derivatives_dir, None)]
+    else:
+        subject_iter = []
+        for subjid in subjids:
+            subj_dates = _dates_for(subjid)
+            if isinstance(dates, dict) and subj_dates is None:
+                if verbose:
+                    print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
+                continue
+            subj_str = f"sub-{str(subjid).zfill(3)}"
+            subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+            if not subj_dirs:
+                if verbose:
+                    print(f"Warning: No subject directory found for {subj_str}")
+                continue
+            subject_iter.append((int(subjid), subj_dirs[0], subj_dates))
+
     # Gather sessions
-    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, subjids):
-        ses_dirs = _filter_session_dirs(subj_dir, dates)
+    for sid, subj_dir, subj_dates in subject_iter:
+        ses_dirs = _filter_session_dirs(subj_dir, subj_dates)
         for session_num, ses in enumerate(ses_dirs, start=1):
             date_str = ses.name.split("_date-")[-1]
             results_dir = ses / "saved_analysis_results"
@@ -510,6 +574,15 @@ def plot_behavior_metrics(
 
         hr_series_mode = (plot_HR_separately and var == "hidden_rule_detection_rate")
 
+        # When not in HR-series mode and not black_white, color encodes SUBJECT
+        # (tab10), and all markers collapse to a uniform dot.
+        subject_colored_mode = (not hr_series_mode) and (not black_white)
+        if subject_colored_mode:
+            subj_cmap = cm.get_cmap("tab10")
+            subj_to_color = {sid: subj_cmap(i % 10) for i, sid in enumerate(unique_subj)}
+        else:
+            subj_to_color = {}
+
         if hr_series_mode:
             # Always use colored series with solid lines; Total is thick black
             series_to_color = {s: (_map_series_color(s) or "black") for s in series_values}
@@ -536,18 +609,22 @@ def plot_behavior_metrics(
                 dsub = df_series[df_series["subjid"] == sid].sort_values("session_num")
                 if dsub.empty:
                     continue
-                color = series_to_color.get(series, "black")
+                if subject_colored_mode:
+                    color = subj_to_color[sid]
+                    marker = 'o'
+                else:
+                    color = series_to_color.get(series, "black")
+                    marker = subj_to_marker[sid]
                 ls = series_to_ls.get(series, "-")
                 lw = series_to_lw.get(series, 1.0)
-                ax.plot(dsub["session_num"], dsub["value"], color=color, linestyle=ls, linewidth=lw, alpha=0.8, zorder=1)
-                # Scatter with subject marker; color by series to distinguish odors
+                ax.plot(dsub["session_num"], dsub["value"], color=color, linestyle=ls, linewidth=lw * lw_scale, alpha=0.8, zorder=1)
                 ax.scatter(
                     dsub["session_num"], dsub["value"],
                     c=[color] * len(dsub),
-                    marker=subj_to_marker[sid],
+                    marker=marker,
                     edgecolors="black",
                     linewidths=0.5,
-                    s=40,
+                    s=40 * marker_scale,
                     zorder=2,
                 )
 
@@ -581,11 +658,12 @@ def plot_behavior_metrics(
         title_formatted = " ".join(word.capitalize() for word in var.split(".")[0].split("_")) + (f" ({var.split('.')[1].capitalize()})" if '.' in var else "")
 
         
-        if not clean_graph:
-            ax.set_xlabel("Days")
-            ax.set_ylabel(var.replace("_", " ").title())
+        # Axis labels always set; size/visibility is controlled by the active style.
+        ax.set_xlabel("Days")
+        ax.set_ylabel(y_title if y_title is not None else var.replace("_", " ").title())
+        if show_title:
             ax.set_title(title_formatted)
-        
+
         # Remove upper and right spines
         ax.spines['top'].set_visible(False)
         ax.spines['right'].set_visible(False)
@@ -594,16 +672,29 @@ def plot_behavior_metrics(
         ax.grid(False)
 
         # Build legends: subjects (markers) and either protocols or series (colors)
-        subject_handles = [
-            Line2D([0], [0],
-                   marker=subj_to_marker[sid],
-                   color="black", linestyle="",
-                   markerfacecolor="white",
-                   markeredgecolor="black",
-                   markersize=7,
-                   label=f"sub-{sid:03d}")
-            for sid in unique_subj
-        ]
+        if subject_colored_mode:
+            # Color encodes subject; uniform dot marker.
+            subject_handles = [
+                Line2D([0], [0],
+                       marker='o',
+                       color="black", linestyle="",
+                       markerfacecolor=subj_to_color[sid],
+                       markeredgecolor="black",
+                       markersize=7 * marker_scale,
+                       label=f"sub-{sid:03d}")
+                for sid in unique_subj
+            ]
+        else:
+            subject_handles = [
+                Line2D([0], [0],
+                       marker=subj_to_marker[sid],
+                       color="black", linestyle="",
+                       markerfacecolor="white",
+                       markeredgecolor="black",
+                       markersize=7 * marker_scale,
+                       label=f"sub-{sid:03d}")
+                for sid in unique_subj
+            ]
 
         series_handles = []
         if len(series_values) > 1:
@@ -617,29 +708,30 @@ def plot_behavior_metrics(
                         marker='o',
                         color=color,
                         linestyle=ls,
-                        linewidth=lw,
+                        linewidth=lw * lw_scale,
                         markerfacecolor='white' if black_white else color,
                         markeredgecolor="black",
-                        markersize=7,
+                        markersize=7 * marker_scale,
                         label=s,
                     )
                 )
 
         protocol_handles = []
-        if not series_handles and not black_white:
+        # Skip protocol coloring when subject_colored_mode (colors encode subjects, not protocols).
+        if not series_handles and not black_white and not subject_colored_mode:
             protocol_handles = [
                 Line2D([0], [0],
                        marker='o',
                        color='none', linestyle="",
                        markerfacecolor=prot_to_color.get(p, (0, 0, 0, 1)),
                        markeredgecolor="black",
-                       markersize=7,
+                       markersize=7 * marker_scale,
                        label=p)
                 for p in unique_protocols
             ]
 
         # Place legends
-        if not clean_graph:
+        if show_legend:
             if subject_handles:
                 leg1 = ax.legend(handles=subject_handles, title="Subjects", loc="upper left", bbox_to_anchor=(1.02, 1.0))
                 ax.add_artist(leg1)
@@ -648,16 +740,23 @@ def plot_behavior_metrics(
             elif protocol_handles:
                 ax.legend(handles=protocol_handles, title="Protocols", loc="lower left", bbox_to_anchor=(1.02, 0.0))
 
-        if clean_graph:
-            _clean_graph(ax, xlabel="Days", ylabel=var.replace("_", " ").title())
-
         plt.tight_layout()
         figs.append(fig)
 
         if save:
             try:
+                if isinstance(dates, dict):
+                    save_dates = []
+                    for v in dates.values():
+                        if isinstance(v, (list, tuple)):
+                            save_dates.extend(v)
+                        elif v is not None:
+                            save_dates.append(v)
+                else:
+                    save_dates = dates
+                save_subjids = list(subjids) if subjids is not None else None
                 save_name = f"{var}"
-                out_path = save_figure(fig, save_name, subjids=subjids, dates=dates)
+                out_path = save_figure(fig, save_name, subjids=save_subjids, dates=save_dates)
                 saved_paths.append(out_path)
                 if verbose:
                     print(f"[plot_behavior_metrics] Saved figure to {out_path}")
@@ -668,6 +767,357 @@ def plot_behavior_metrics(
     if return_paths and save:
         return figs, saved_paths
     return figs
+
+
+def hidden_rule_and_false_alarm(
+    subjids=None,
+    dates=None,
+    odors=("C", "D", "E", "F", "G"),
+    fa_label=None,
+    figsize=(12, 9),
+    title=None,
+    *,
+    compute_if_missing: bool = False,
+    save: bool = False,
+    verbose: bool = True,
+    show_title: bool = True,
+    show_legend: bool = True,
+    lw_scale: float = 1.0,
+    marker_scale: float = 1.0,
+):
+    """Plot hidden-rule detection rate alongside per-odor false-alarm rate.
+
+    For each (subject, session) we produce:
+    - The metric ``hidden_rule_detection_rate`` (from ``metrics_*.json``) — plotted in black.
+    - One false-alarm rate per odor in ``odors``:
+
+          fa_rate(odor) = #(aborted, fa_label-match, last_odor_name == odor)
+                        --------------------------------------------------------------
+                          #(aborted, fa_label-match, last_odor_name == odor)
+                        + #(non-aborted, odor appears in odor_sequence)
+
+      Each odor gets its own color (from the active style's prop_cycle).
+
+    Across subjects, each subject is encoded by its marker shape (same convention
+    as ``plot_behavior_metrics``).
+
+    Parameters
+    ----------
+    subjids : int | list[int] | dict | None
+        Subject id(s). May also be a dict ``{subjid: date_range}`` shorthand.
+    dates : list | tuple | dict | None
+        Date filter. As a dict, gives each subject its own window. Subjids
+        missing from the dict are skipped with a warning.
+    odors : iterable[str]
+        Odor labels to include on the x-axis (case-insensitive).
+    fa_label : list[str] | None
+        Which aborted trials qualify as false alarms. None = all aborts except
+        ``nFA`` (case-insensitive). Otherwise an explicit list, e.g.
+        ``["FA_time_in", "FA_time_out"]``.
+    show_title, show_legend : bool
+        Toggle the title and legend (useful for poster figures).
+    lw_scale, marker_scale : float
+        Multipliers on line widths and marker sizes (poster scaling).
+    save : bool
+        Save via ``save_figure``; dict ``dates`` are flattened to a date span.
+    compute_if_missing : bool
+        Forwarded to ``_ensure_metrics_json``.
+
+    Returns
+    -------
+    fig, ax
+    """
+    # Subject/date resolution (same pattern as plot_behavior_metrics / plot_cumulative_rewards)
+    if isinstance(subjids, dict):
+        dates = subjids if not isinstance(dates, dict) or dates is None else dates
+        subjids = list(subjids.keys())
+    elif isinstance(dates, dict) and subjids is None:
+        subjids = list(dates.keys())
+    elif isinstance(subjids, set):
+        subjids = sorted(subjids)
+    elif subjids is not None and not isinstance(subjids, (list, tuple)):
+        subjids = [subjids]
+
+    def _dates_for(subjid):
+        if not isinstance(dates, dict):
+            return dates
+        if subjid in dates:
+            return dates[subjid]
+        try:
+            int_key = int(subjid)
+            if int_key in dates:
+                return dates[int_key]
+        except (TypeError, ValueError):
+            pass
+        str_key = str(subjid)
+        if str_key in dates:
+            return dates[str_key]
+        return None
+
+    derivatives_dir = get_derivatives_root()
+
+    def _odor_letter(value) -> str:
+        """Normalize stored odor tokens to a bare letter ('OdorC' / '"OdorC"' / '["OdorC' /
+        'odor c' / 'C' → 'C'). odor_sequence is sometimes stored as a JSON-encoded
+        string like '["OdorE", "OdorG", ...]', so we strip surrounding [, ], ', "
+        characters before the 'Odor' prefix check.
+        """
+        s = str(value).strip().strip('[]"\'').strip()
+        low = s.lower()
+        if low.startswith("odor"):
+            s = s[4:].strip()
+        return s.upper()
+
+    odors_list = [_odor_letter(o) for o in odors]
+    fa_set = None if fa_label is None else {str(s).strip().lower() for s in fa_label}
+
+    if subjids is None:
+        subject_iter = [(sid, sd, dates) for sid, sd in _iter_subject_dirs(derivatives_dir, None)]
+    else:
+        subject_iter = []
+        for subjid in subjids:
+            subj_dates = _dates_for(subjid)
+            if isinstance(dates, dict) and subj_dates is None:
+                if verbose:
+                    print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
+                continue
+            subj_str = f"sub-{str(subjid).zfill(3)}"
+            subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+            if not subj_dirs:
+                if verbose:
+                    print(f"Warning: No subject directory found for {subj_str}")
+                continue
+            subject_iter.append((int(subjid), subj_dirs[0], subj_dates))
+
+    rows = []
+    for sid, subj_dir, subj_dates in subject_iter:
+        ses_dirs = _filter_session_dirs(subj_dir, subj_dates)
+        for session_num, ses in enumerate(ses_dirs, start=1):
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+
+            # Hidden rule detection rate from the cached metrics json
+            metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing)
+            hr_val = None
+            if metrics is not None:
+                v = _extract_metric_value(metrics, "hidden_rule_detection_rate")
+                if isinstance(v, (int, float)) and not np.isnan(v):
+                    hr_val = float(v)
+
+            # Trial data for false-alarm counts
+            views = _load_trial_views(results_dir)
+            td = views["trial_data"]
+            completed_counts = {o: 0 for o in odors_list}
+            fa_counts = {o: 0 for o in odors_list}
+
+            if not td.empty:
+                completed = views["completed"]
+                aborted = views["aborted"]
+
+                # Aborted-FA filter
+                if "fa_label" in aborted.columns:
+                    fa_labels_lc = aborted["fa_label"].astype(str).str.lower()
+                    if fa_set is None:
+                        ab_mask = fa_labels_lc.ne("nfa") & aborted["fa_label"].notna()
+                    else:
+                        ab_mask = fa_labels_lc.isin(fa_set)
+                    ab_fa = aborted[ab_mask]
+                else:
+                    ab_fa = aborted.iloc[0:0]
+
+                # Count odor occurrences in non-aborted trials' odor_sequence.
+                # Stored values look like "OdorC"/"OdorF"; _odor_letter normalises to "C"/"F".
+                # parquet-backed list columns load back as numpy arrays — handle them too.
+                if "odor_sequence" in completed.columns:
+                    for seq in completed["odor_sequence"]:
+                        if seq is None:
+                            continue
+                        if isinstance(seq, float) and np.isnan(seq):
+                            continue
+                        if isinstance(seq, str):
+                            if not seq.strip():
+                                continue
+                            tokens = (
+                                re.split(r"[\s,;|]+", seq)
+                                if any(c in seq for c in ",; |")
+                                else [seq]
+                            )
+                        else:
+                            try:
+                                tokens = list(seq)  # list / tuple / numpy.ndarray / any iterable
+                            except TypeError:
+                                continue
+                        for tok in tokens:
+                            if tok is None:
+                                continue
+                            if isinstance(tok, float) and np.isnan(tok):
+                                continue
+                            letter = _odor_letter(tok)
+                            if letter in completed_counts:
+                                completed_counts[letter] += 1
+
+                # Count last_odor_name occurrences in fa-filtered aborts
+                if "last_odor_name" in ab_fa.columns:
+                    for last in ab_fa["last_odor_name"]:
+                        if last is None:
+                            continue
+                        if isinstance(last, float) and np.isnan(last):
+                            continue
+                        letter = _odor_letter(last)
+                        if letter in fa_counts:
+                            fa_counts[letter] += 1
+
+            # Per-odor false alarm rate (skip odors with zero denominator)
+            for o in odors_list:
+                denom = completed_counts[o] + fa_counts[o]
+                if denom == 0:
+                    continue
+                rate = fa_counts[o] / denom
+                rows.append({
+                    "subjid": int(sid),
+                    "session_num": session_num,
+                    "date_str": str(date_str),
+                    "series": o,
+                    "value": float(rate),
+                })
+
+            # Hidden rule rate; the value is stored in its native scale (typically 0-1).
+            if hr_val is not None:
+                rows.append({
+                    "subjid": int(sid),
+                    "session_num": session_num,
+                    "date_str": str(date_str),
+                    "series": "HR",
+                    "value": hr_val if hr_val <= 1.0 else hr_val / 100.0,
+                })
+
+    if not rows:
+        if verbose:
+            print("[hidden_rule_and_false_alarm] No data found for selected subjects/dates.")
+        return None
+
+    df = pd.DataFrame(rows)
+    unique_subj = sorted(df["subjid"].unique())
+    markers_cycle = ['o', '^', 's', 'X', 'D', 'P', 'v', '>', '<', '*', 'h', 'H', '8', 'p', 'x']
+    subj_to_marker = {sid: markers_cycle[i % len(markers_cycle)] for i, sid in enumerate(unique_subj)}
+
+    # Colors: odors from active style's prop_cycle, HR forced to black.
+    cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    series_order = list(odors_list) + ["HR"]
+    series_color = {o: cycle_colors[i % len(cycle_colors)] for i, o in enumerate(odors_list)}
+    series_color["HR"] = "black"
+    series_lw = {s: (3.0 if s == "HR" else 1.8) for s in series_order}
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    for series in series_order:
+        df_s = df[df["series"] == series]
+        if df_s.empty:
+            continue
+        color = series_color[series]
+        base_lw = series_lw[series]
+        for sid in unique_subj:
+            d = df_s[df_s["subjid"] == sid].sort_values("session_num")
+            if d.empty:
+                continue
+            ax.plot(
+                d["session_num"], d["value"],
+                color=color, linestyle="-",
+                linewidth=base_lw * lw_scale,
+                alpha=0.85, zorder=1,
+            )
+            ax.scatter(
+                d["session_num"], d["value"],
+                c=[color] * len(d),
+                marker=subj_to_marker[sid],
+                edgecolors="black",
+                linewidths=0.5,
+                s=40 * marker_scale,
+                zorder=2,
+            )
+
+    # X-axis tick spacing (sparse)
+    session_nums = sorted(df["session_num"].unique())
+    n_sessions = len(session_nums)
+    if n_sessions:
+        if n_sessions <= 10:
+            tick_step = 2
+        elif n_sessions <= 30:
+            tick_step = 5
+        else:
+            tick_step = max(5, n_sessions // 10)
+        ticks = [s for s in session_nums if (s - session_nums[0]) % tick_step == 0]
+        ax.set_xticks(ticks)
+        ax.set_xticklabels([str(t) for t in ticks])
+
+    ax.set_xlabel("Days")
+    ax.set_ylabel(
+        "Hidden Rule Performance /\nFalse-Alarm Rate",
+        multialignment="center"
+    )
+    ax.set_ylim(0, 1.05)
+
+    if show_title:
+        ax.set_title(title if title else "Hidden-rule detection & per-odor false-alarm rate")
+
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.grid(False)
+
+    if show_legend:
+        series_handles = [
+            Line2D([0], [0],
+                marker='o',
+                color=series_color[s],
+                linestyle="-",
+                linewidth=series_lw[s] * lw_scale,
+                markerfacecolor=series_color[s],
+                markeredgecolor="black",
+                markersize=7 * marker_scale,
+                label=("Hidden Rule" if s == "HR" else f"Odor {s}"))
+            for s in series_order
+        ]
+
+        legend = ax.legend(
+            handles=series_handles,
+            title="Legend",
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1.0),
+            alignment="left",   
+            borderaxespad=-1
+        )
+
+        legend.get_title().set_ha("left") 
+
+    plt.tight_layout()
+
+    if save:
+        try:
+            if isinstance(dates, dict):
+                save_dates = []
+                for v in dates.values():
+                    if isinstance(v, (list, tuple)):
+                        save_dates.extend(v)
+                    elif v is not None:
+                        save_dates.append(v)
+            else:
+                save_dates = dates
+            save_subjids = list(subjids) if subjids is not None else None
+            out_path = save_figure(
+                fig, "hidden_rule_and_false_alarm",
+                subjids=save_subjids, dates=save_dates,
+            )
+            if verbose:
+                print(f"[hidden_rule_and_false_alarm] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[hidden_rule_and_false_alarm] Failed to save figure: {exc}")
+
+    plt.show()
+    return fig, ax
+
 
 def plot_decision_accuracy_by_odor(
     subjid,
@@ -2347,13 +2797,15 @@ def plot_cumulative_rewards(
     subjids,
     dates,
     split_days=False,
-    figsize=(12, 6),
+    figsize=(12, 6.5),
     title=None,
     *,
     save=False,
     verbose=True,
     show_gap_shading=True,
     show_session_boundaries=True,
+    show_title=True,
+    show_legend=True,
 ):
     """
     Plot cumulative rewards with inter-session gap collapsing.
@@ -2593,7 +3045,8 @@ def plot_cumulative_rewards(
     
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Cumulative Rewards')
-    ax.set_title(title if title else 'Accumulated Rewards Over Time')
+    if show_title:
+        ax.set_title(title if title else 'Accumulated Rewards Over Time')
     data_xmax = max(
         (line.get_xdata().max() for line in ax.get_lines() if len(line.get_xdata())),
         default=ax.get_xlim()[1],
@@ -2604,7 +3057,8 @@ def plot_cumulative_rewards(
     )
     ax.set_xlim(left=0, right=data_xmax * 1.01)
     ax.set_ylim(bottom=-data_ymax * 0.01, top=data_ymax * 1.02)
-    ax.legend()
+    if show_legend:
+        ax.legend()
     
     plt.tight_layout()
     
@@ -2645,6 +3099,9 @@ def plot_choice_history(
     *,
     save=False,
     verbose=True,
+    show_legend=True,
+    lw_scale: float = 1.0,
+    marker_scale: float = 1.0,
 ):
     """
     Plot choice history over time for one or more sessions.
@@ -2881,18 +3338,18 @@ def plot_choice_history(
         # Determine line style and marker based on reward status
         if trial_type == 'rewarded' or trial_type == 'hr_rewarded':
             linestyle = '-'
-            linewidth = 2
+            linewidth = 2 * lw_scale
             alpha = 0.85
             has_marker = True
         elif trial_type in ['unrewarded', 'timeout', 'hr_unrewarded', 'hr_timeout', 'hr_missed']:
             linestyle = ':'
-            linewidth = 2
+            linewidth = 2 * lw_scale
             alpha = 0.5
             has_marker = False
         else:
             # aborted or hr_aborted
             linestyle = '-'
-            linewidth = 1.5
+            linewidth = 1.5 * lw_scale
             alpha = 0.6
             has_marker = False
         
@@ -2918,12 +3375,12 @@ def plot_choice_history(
                     pass
 
             ax.plot([x, x], [0, y_end], color='#888888', linewidth=linewidth, alpha=alpha, zorder=1)
-            ax.scatter([x], [y_end], color='#888888', s=15, marker=tri_marker, alpha=alpha, zorder=2)
+            ax.scatter([x], [y_end], color='#888888', s=15 * marker_scale, marker=tri_marker, alpha=alpha, zorder=2)
 
             # Blue marker indicates this aborted trial matched the requested FA labels.
             if fa_match:
-                ax.scatter([x], [y_end], color='#1f77b4', s=24, marker='o',
-                           edgecolors='white', linewidth=0.8, zorder=3)
+                ax.scatter([x], [y_end], color='#1f77b4', s=24 * marker_scale, marker='o',
+                           edgecolors='white', linewidth=0.8 * lw_scale, zorder=3)
         
         elif trial_type == 'hr_aborted':
             # HR aborted: if matching requested FA labels, use fa_port direction and blue end-dot.
@@ -2943,11 +3400,11 @@ def plot_choice_history(
             ax.plot([x, x], [0, y_end], color=color, linewidth=linewidth, alpha=alpha, zorder=1, linestyle=linestyle)
 
             if fa_match:
-                ax.scatter([x], [y_end], color='#1f77b4', s=24, marker='o',
-                           edgecolors='white', linewidth=0.8, zorder=3)
+                ax.scatter([x], [y_end], color='#1f77b4', s=24 * marker_scale, marker='o',
+                           edgecolors='white', linewidth=0.8 * lw_scale, zorder=3)
             else:
                 tri_marker = '^' if y_end >= 0 else 'v'
-                ax.scatter([x], [y_end], color=color, s=15, marker=tri_marker, alpha=alpha, zorder=2)
+                ax.scatter([x], [y_end], color=color, s=15 * marker_scale, marker=tri_marker, alpha=alpha, zorder=2)
         
         else:
             # Completed trials (regular or HR)
@@ -2961,15 +3418,15 @@ def plot_choice_history(
                    linestyle=linestyle, alpha=alpha, zorder=line_zorder)
             
             if has_marker:
-                ax.scatter([x], [y_end], color=color, s=40, marker='o', 
-                          edgecolors='black', linewidth=0.8, zorder=marker_zorder)
+                ax.scatter([x], [y_end], color=color, s=40 * marker_scale, marker='o',
+                          edgecolors='black', linewidth=0.8 * lw_scale, zorder=marker_zorder)
     
     # Draw session boundaries
     for boundary_time, session_idx in session_boundaries:
-        ax.axvline(x=boundary_time, color='grey', linestyle=':', linewidth=1.5, alpha=0.7, zorder=0)
-    
+        ax.axvline(x=boundary_time, color='grey', linestyle=':', linewidth=1.5 * lw_scale, alpha=0.7, zorder=0)
+
     # Format axes
-    ax.axhline(y=0, color='black', linewidth=2, alpha=0.8)
+    ax.axhline(y=0, color='black', linewidth=2 * lw_scale, alpha=0.8)
     ax.set_ylim([-1.5, 1.5])
     
     x_min = trials_df['time_in_plot'].min()
@@ -2987,18 +3444,19 @@ def plot_choice_history(
         title = f"Choice History - Subject {str(subjid).zfill(3)}"
     ax.set_title(title)
     
-    # Create custom legend
-    from matplotlib.lines import Line2D
-    legend_elements = [
-        Line2D([0], [0], color='#E53935', lw=2.5, linestyle='-', label='Odor A (regular)'),
-        Line2D([0], [0], color='#00796B', lw=2.5, linestyle='-', label='Odor B (regular)'),
-        Line2D([0], [0], color='#FFD700', lw=2.5, linestyle='-', label='Hidden Rule (HR)'),
-        Line2D([0], [0], color='black', lw=2, linestyle='-', label='Rewarded (solid)'),
-        Line2D([0], [0], color='black', lw=2, linestyle=':', label='Unrewarded/Missed (dotted)'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='black', 
-               markersize=5, markeredgecolor='black', label='Rewarded marker', linestyle='none'),
-    ]
-    ax.legend(handles=legend_elements, loc='upper left', ncol=2)
+    # Create custom legend (skip when show_legend=False, e.g. for poster figures)
+    if show_legend:
+        from matplotlib.lines import Line2D
+        legend_elements = [
+            Line2D([0], [0], color='#E53935', lw=2.5, linestyle='-', label='Odor A (regular)'),
+            Line2D([0], [0], color='#00796B', lw=2.5, linestyle='-', label='Odor B (regular)'),
+            Line2D([0], [0], color='#FFD700', lw=2.5, linestyle='-', label='Hidden Rule (HR)'),
+            Line2D([0], [0], color='black', lw=2, linestyle='-', label='Rewarded (solid)'),
+            Line2D([0], [0], color='black', lw=2, linestyle=':', label='Unrewarded/Missed (dotted)'),
+            Line2D([0], [0], marker='o', color='w', markerfacecolor='black',
+                   markersize=5, markeredgecolor='black', label='Rewarded marker', linestyle='none'),
+        ]
+        ax.legend(handles=legend_elements, loc='upper left', ncol=2)
     
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
@@ -3024,6 +3482,206 @@ def plot_choice_history(
     
     return fig, ax
 
+
+
+def plot_position_completion_rate(
+    subjids,
+    dates=None,
+    positions=(1, 2, 3, 4),
+    figsize=(8, 6.8),
+    title=None,
+    *,
+    save=False,
+    verbose=True,
+    show_title=True,
+):
+    """Per-position completion rate across sessions (dot plot with mean ± SD).
+
+    For each session:
+    - `max_pos = max(num_odors)` over all trials in the session.
+    - Each completed trial (`is_aborted == False`) contributes one completed-count
+      to every position 1..max_pos.
+    - Each aborted trial (`is_aborted == True`) contributes one completed-count
+      to positions 1..last_odor_position − 1 and one aborted-count at
+      last_odor_position.
+    - Completion rate at position p =
+          completed[p] / (completed[p] + aborted[p]) * 100
+
+    Each session yields one rate per requested position; rates are plotted as
+    blue dots horizontally jittered around each x-tick, with a black mean line
+    and SD error bars.
+
+    Parameters
+    ----------
+    subjids : int | list[int] | dict
+        Subject id(s). May also be a dict ``{subjid: date_range}`` as a convenience
+        shorthand — in that case the dict is used as ``dates`` and the subjids are
+        its keys.
+    dates : list | tuple | dict | None
+        Specific dates [YYYYMMDD, ...] or inclusive range (start, end). If a dict,
+        must map ``subjid → date_range`` (each value itself a list/tuple/None
+        passed through to ``_filter_session_dirs``); this lets each subject use
+        its own date window — useful when animals are offset in calendar time.
+        Subjids not present as keys are skipped with a warning. ``None`` = all
+        sessions for every subject.
+    positions : iterable[int]
+        Positions to display on the x-axis (e.g. [1, 2, 3, 4]).
+    figsize : tuple
+    title : str | None
+    save : bool
+    verbose : bool
+    show_title : bool
+        If False, no title is rendered (useful for poster-style figures).
+
+    Returns
+    -------
+    fig, ax
+    """
+    # Mirror plot_cumulative_rewards's input flexibility.
+    if isinstance(subjids, dict):
+        dates = subjids if not isinstance(dates, dict) or dates is None else dates
+        subjids = list(subjids.keys())
+    elif isinstance(subjids, set):
+        subjids = sorted(subjids)
+    elif not isinstance(subjids, (list, tuple)):
+        subjids = [subjids]
+
+    def _dates_for(subjid):
+        if not isinstance(dates, dict):
+            return dates
+        if subjid in dates:
+            return dates[subjid]
+        try:
+            int_key = int(subjid)
+            if int_key in dates:
+                return dates[int_key]
+        except (TypeError, ValueError):
+            pass
+        str_key = str(subjid)
+        if str_key in dates:
+            return dates[str_key]
+        return None
+
+    derivatives_dir = get_derivatives_root()
+    positions = list(positions)
+    rates_per_position: dict[int, list[float]] = {p: [] for p in positions}
+
+    for subjid in subjids:
+        subj_dates = _dates_for(subjid)
+        if isinstance(dates, dict) and subj_dates is None:
+            print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
+            continue
+
+        subj_str = f"sub-{str(subjid).zfill(3)}"
+        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+        if not subj_dirs:
+            if verbose:
+                print(f"Warning: No subject directory found for {subj_str}")
+            continue
+        subj_dir = subj_dirs[0]
+
+        ses_dirs = _filter_session_dirs(subj_dir, subj_dates)
+        for ses_dir in ses_dirs:
+            results_dir = ses_dir / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            views = _load_trial_views(results_dir)
+            td = views["trial_data"]
+            if td.empty or "num_odors" not in td.columns:
+                continue
+
+            num_odors = pd.to_numeric(td["num_odors"], errors="coerce").dropna().astype(int)
+            if num_odors.empty:
+                continue
+            max_pos = int(num_odors.max())
+            if max_pos < 1:
+                continue
+
+            completed = views["completed"]
+            aborted = views["aborted"]
+
+            # 1-indexed position arrays (index 0 unused).
+            completed_counts = np.zeros(max_pos + 1, dtype=int)
+            aborted_counts = np.zeros(max_pos + 1, dtype=int)
+
+            # Completed trials contribute one completed-count at every position 1..max_pos.
+            completed_counts[1:max_pos + 1] += int(len(completed))
+
+            if not aborted.empty and "last_odor_position" in aborted.columns:
+                lp = pd.to_numeric(aborted["last_odor_position"], errors="coerce").dropna().astype(int)
+                lp = lp[(lp >= 1) & (lp <= max_pos)]
+                for pos in lp:
+                    aborted_counts[pos] += 1
+                    if pos > 1:
+                        completed_counts[1:pos] += 1
+
+            for p in positions:
+                if p < 1 or p > max_pos:
+                    continue
+                denom = completed_counts[p] + aborted_counts[p]
+                if denom == 0:
+                    continue
+                rates_per_position[p].append(completed_counts[p] / denom)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    rng = np.random.default_rng(0)
+    x_idx_array = np.arange(len(positions))
+    halfwidth = 0.25  # horizontal extent of both mean line and dot jitter
+
+    for x_idx, p in enumerate(positions):
+        rates = np.array(rates_per_position[p], dtype=float)
+        if rates.size == 0:
+            continue
+        jitter = rng.uniform(-halfwidth, halfwidth, size=rates.size)
+        ax.scatter(
+            np.full_like(jitter, x_idx) + jitter, rates,
+            color="tab:blue", alpha=0.55, s=40, edgecolors="none", zorder=2,
+        )
+        mean = float(rates.mean())
+        sd = float(rates.std(ddof=1)) if rates.size > 1 else 0.0
+        ax.hlines(mean, x_idx - halfwidth, x_idx + halfwidth,
+                  colors="black", linewidth=2.0, zorder=3)
+        ax.errorbar(x_idx, mean, yerr=sd, color="black", linewidth=1.5,
+                    capsize=6, capthick=1.5, fmt="none", zorder=3)
+
+    ax.set_xticks(x_idx_array)
+    ax.set_xticklabels([str(p) for p in positions])
+    ax.set_xlabel("Position in Sequence")
+    ax.set_ylabel("Completion Rate")
+    ax.set_xlim(-0.5, len(positions) - 0.5)
+    ax.set_ylim(0, 1.05)
+
+    if show_title:
+        ax.set_title(title if title else "Position Completion Rate by Session")
+
+    # Extra pad so the (often long, bold) y-axis label doesn't clip in the
+    # notebook display. Saved figures use bbox_inches='tight' so they're
+    # already safe, but the live preview honors the figsize bbox.
+    fig.tight_layout(pad=1.5)
+
+    if save:
+        try:
+            if isinstance(dates, dict):
+                save_dates = []
+                for v in dates.values():
+                    if isinstance(v, (list, tuple)):
+                        save_dates.extend(v)
+                    elif v is not None:
+                        save_dates.append(v)
+            else:
+                save_dates = dates
+            out_path = save_figure(
+                fig, "position_completion_rate",
+                subjids=list(subjids), dates=save_dates,
+            )
+            if verbose:
+                print(f"[plot_position_completion_rate] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_position_completion_rate] Failed to save figure: {exc}")
+
+    plt.show()
+    return fig, ax
 
 
 # ================================= Debugging / Testing ================================= #

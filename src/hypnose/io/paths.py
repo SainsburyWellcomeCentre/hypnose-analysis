@@ -10,8 +10,8 @@ def get_repo_root() -> Path:
     Returns the root of the hypnose-analysis repository,
     assuming standard src/ layout.
     """
-    return Path(__file__).resolve().parents[2]
-    # paths.py → hypnose_analysis → src → hypnose-analysis
+    return Path(__file__).resolve().parents[3]
+    # paths.py → io → hypnose → src → hypnose-analysis
 
 def _env_path(var_name: str) -> Path | None:
     val = os.getenv(var_name)
