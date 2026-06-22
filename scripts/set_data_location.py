@@ -16,12 +16,40 @@ Note: a running kernel caches the paths — after switching, restart the kernel 
 `hypnose.io.paths.reload()`. Terminal runs pick up the new choice automatically.
 Any HYPNOSE_* env var still overrides this (that's how the QC sandbox / CI work).
 """
+import os
 import sys
 import argparse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from hypnose.io import paths
+
+# These override the active profile (RAWDATA/DERIVATIVES/SERVER) or change the fallback (DATA_ROOT).
+_ENV_VARS = ["HYPNOSE_RAWDATA_ROOT", "HYPNOSE_DERIVATIVES_ROOT", "HYPNOSE_SERVER_ROOT", "HYPNOSE_DATA_ROOT"]
+
+
+def _report_env_overrides() -> None:
+    """If any HYPNOSE_* env var is set, flag it and print the OS-correct removal commands.
+    (A script can't unset the parent shell's env, so we tell you exactly what to run.)"""
+    set_vars = {v: os.environ[v] for v in _ENV_VARS if os.environ.get(v)}
+    if not set_vars:
+        return
+    print("\n  ⚠ HYPNOSE_* environment variable(s) are set and take precedence over the active profile:")
+    for v, val in set_vars.items():
+        print(f"      {v} = {val}")
+    print("  Remove them so the profile drives the paths (a script can't unset your shell's env):")
+    if sys.platform.startswith("win"):
+        print("    # this session:")
+        for v in set_vars:
+            print(f"      Remove-Item Env:{v} -ErrorAction SilentlyContinue")
+        print("    # permanently (User scope) — then restart the shell / fully restart VS Code:")
+        for v in set_vars:
+            print(f'      [Environment]::SetEnvironmentVariable("{v}", $null, "User")')
+    else:
+        print("    # this session:")
+        print("      unset " + " ".join(set_vars))
+        print("    # permanently: delete the matching 'export ...' lines from ~/.zshrc / ~/.bashrc")
+    print("    (then re-run --show to confirm)")
 
 
 def _print_resolved() -> None:
@@ -34,6 +62,9 @@ def _print_resolved() -> None:
     print(f"  derivatives    : {paths.get_derivatives_root()}")
     if not raw.exists():
         print("  ⚠ rawdata path does not exist — wrong profile for this machine, or the drive/mount is not available.")
+    if active and any(os.environ.get(v) for v in ("HYPNOSE_RAWDATA_ROOT", "HYPNOSE_DERIVATIVES_ROOT", "HYPNOSE_SERVER_ROOT")):
+        print("  ⚠ an env var is overriding your selected profile (see below).")
+    _report_env_overrides()
 
 
 def main() -> int:

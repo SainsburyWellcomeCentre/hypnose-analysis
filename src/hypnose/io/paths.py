@@ -54,10 +54,25 @@ def _local_path() -> Path:
 def _read_yaml(path: Path) -> dict:
     if not path.exists():
         return {}
+    # The file exists, so the user intends to use it -- if we can't read it, WARN rather than
+    # silently falling back (a silent fallback to the legacy symlink is exactly the surprise this
+    # system is meant to prevent).
     try:
         import yaml  # lazy: keep paths.py importable even if yaml is unavailable
-        return yaml.safe_load(path.read_text()) or {}
     except Exception:
+        import warnings
+        warnings.warn(
+            f"pyyaml is unavailable, so the data-location config '{path.name}' is being IGNORED "
+            f"(falling back to the legacy symlink). Are you in the project conda env? "
+            f"`conda activate hypnose-env`.",
+            stacklevel=2,
+        )
+        return {}
+    try:
+        return yaml.safe_load(path.read_text()) or {}
+    except Exception as e:
+        import warnings
+        warnings.warn(f"could not read data-location config '{path}': {e}", stacklevel=2)
         return {}
 
 
