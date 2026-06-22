@@ -1,0 +1,25 @@
+# Data-location profiles (committed, shared across machines).
+#
+# Pick which one is active PER MACHINE with:
+#     python scripts/set_data_location.py <name>      # e.g. server-mac | server-windows | local_1
+# That writes configs/data_locations.local.yml (git-ignored), so your choice is never committed.
+#
+# hypnose.io.paths resolves the data roots in this order:
+#     HYPNOSE_* env vars  >  active profile (below)  >  legacy data/rawdata symlink
+#
+# Each profile needs `rawdata`; `derivatives` defaults to the sibling of `rawdata` if omitted.
+
+default_active: null    # optional fallback profile when no local override is set
+
+profiles:
+  server-mac:
+    rawdata: /Volumes/harris/hypnose/rawdata
+    derivatives: /Volumes/harris/hypnose/derivatives
+
+  server-windows:
+    rawdata: '\\ceph-gw02.hpc.swc.ucl.ac.uk\harris\hypnose\rawdata'
+    derivatives: '\\ceph-gw02.hpc.swc.ucl.ac.uk\harris\hypnose\derivatives'
+
+  local_1:
+    rawdata: 'E:\rawdata'
+    derivatives: 'E:\derivatives'
