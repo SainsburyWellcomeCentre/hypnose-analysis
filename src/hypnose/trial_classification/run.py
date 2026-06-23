@@ -224,12 +224,21 @@ def analyze_session_multi_run_by_id_date(subject_id: str, date_str: str, *, verb
     save_err: Exception | None = None
     if save:
         first_root = roots[0] if roots and roots[0] is not None else None
-        
+
+        # Reliable single-reward flag from the schema (sequence reward info), not a name
+        # match. True iff at least one candidate sequence is not rewarded at its final
+        # position. Persisted to manifest/summary so downstream code can gate on it.
+        try:
+            is_singrew = bool(_get_single_reward_info(first_root)[0]) if first_root is not None else False
+        except Exception:
+            is_singrew = False
+
         # ============ NEW: Build session metadata with per-run stage info ============
         session_meta = {
             'multi_run': True,
             'subject_id': subject_id,
             'date': date_str,
+            'is_singrew': is_singrew,
             'runs': [
                 {
                     'run_id': ridx + 1,
