@@ -140,8 +140,8 @@ def _resolve_hidden_rule_from_stage(stage) -> tuple[list[int], str | None]:
     return indices, sequence_name
 
 
-def _get_single_reward_info(root) -> tuple[bool, frozenset]:
-    """Determine whether a session uses the single-reward protocol and list its rewarded sequences.
+def _get_single_reward_info(root) -> tuple[bool, frozenset, frozenset]:
+    """Determine whether a session uses the single-reward protocol and list its sequences.
 
     The single-reward protocol is the new task variant where NOT all candidate sequences are
     rewarded at their final position (e.g. ``singrew-task-stage1``: only ``OdorC-OdorF-OdorA``
@@ -150,7 +150,7 @@ def _get_single_reward_info(root) -> tuple[bool, frozenset]:
 
     Returns
     -------
-    (is_single_reward, rewarded_sequences)
+    (is_single_reward, rewarded_sequences, all_sequences)
         is_single_reward : bool
             True iff at least one candidate sequence is NOT rewarded at its final position.
             For the default protocol (every sequence rewarded at the end) this is False and the
@@ -159,19 +159,94 @@ def _get_single_reward_info(root) -> tuple[bool, frozenset]:
             Concrete odor-name sequences whose final position is rewarded. A completed trial is
             "rewarded-type" iff ``tuple(its odor_sequence)`` is in this set; otherwise it is a
             non-rewarded ("no-go") sequence and gets false-response handling.
+        all_sequences : frozenset[tuple[str, ...]]
+            All concrete candidate sequences for the protocol (rewarded and non-rewarded).
+            Used to compute reward determinacy from a presented (possibly partial) sequence:
+            see ``_classify_reward_determinacy``.
     """
     try:
         _, schema_settings = detect_settings.detect_settings(Path(root))
     except Exception:
-        return False, frozenset()
+        return False, frozenset(), frozenset()
     if not schema_settings.get('isSingleRewardProtocol'):
-        return False, frozenset()
+        return False, frozenset(), frozenset()
     rewarded = schema_settings.get('rewardedSequences') or []
     rewarded_set = frozenset(tuple(seq) for seq in rewarded if seq)
+    all_seqs = schema_settings.get('allSequences') or []
+    all_set = frozenset(tuple(seq) for seq in all_seqs if seq)
     # If parsing produced no rewarded sequences, fall back to default behaviour (do nothing new).
     if not rewarded_set:
-        return False, frozenset()
-    return True, rewarded_set
+        return False, frozenset(), frozenset()
+    return True, rewarded_set, all_set
+
+
+def _classify_reward_determinacy(odor_sequence, all_sequences, rewarded_sequences):
+    """Classify a presented (possibly partial) odor sequence by whether its reward outcome
+    is already determined, using the protocol's full candidate set.
+
+    Looks at every candidate in ``all_sequences`` that starts with the presented prefix
+    ``odor_sequence`` (so it works for both completed sequences and partial/aborted ones):
+
+    - all matching candidates rewarded            -> ``"rewarded"``
+    - all matching candidates non-rewarded         -> ``"nonrewarded"``
+    - matching candidates of both kinds            -> ``"ambiguous"``
+    - no candidate starts with this prefix         -> ``"off_protocol"``
+
+    Because it is driven entirely by the schema's candidate set, it adapts to any protocol.
+    A completed full sequence is always determined (``rewarded`` / ``nonrewarded``); an
+    aborted prefix may still be ``ambiguous``.
+
+    Returns
+    -------
+    (label, determinacy_position, determined_final_odor)
+        label : str | None
+            One of the four labels above; ``None`` if the candidate set is empty.
+        determinacy_position : int | None
+            The 1-based position at which the outcome first became determined while reading
+            the presented odors left to right (i.e. the earliest prefix length whose matching
+            candidates are all the same reward type). ``None`` when never determined within the
+            presented odors (``ambiguous``) or ``off_protocol``.
+        determined_final_odor : str | None
+            The final (last-position) odor of the matching candidates, but only when ALL of
+            them share the same last odor -- i.e. the eventual reward port is already
+            guaranteed by the presented prefix (e.g. "the sequence is bound to end in OdorA").
+            ``None`` when the final odor is not yet pinned down or ``off_protocol``. This is
+            strictly finer than ``label``: a sequence can be reward-determined yet have an
+            ambiguous final odor (e.g. both candidates non-rewarded but ending A vs B).
+    """
+    if not all_sequences:
+        return None, None, None
+    prefix = tuple(odor_sequence) if odor_sequence else tuple()
+
+    def _matches(prefix_t):
+        return [s for s in all_sequences if len(s) >= len(prefix_t) and s[:len(prefix_t)] == prefix_t]
+
+    matches = _matches(prefix)
+    if not matches:
+        return "off_protocol", None, None
+
+    flags = {s in rewarded_sequences for s in matches}
+    if len(flags) == 1:
+        label = "rewarded" if flags.pop() else "nonrewarded"
+    else:
+        label = "ambiguous"
+
+    # Earliest position at which the outcome became determined while reading the prefix.
+    determinacy_position = None
+    for k in range(1, len(prefix) + 1):
+        k_matches = _matches(prefix[:k])
+        if not k_matches:
+            break
+        k_flags = {s in rewarded_sequences for s in k_matches}
+        if len(k_flags) == 1:
+            determinacy_position = k
+            break
+
+    # Final odor only if every matching candidate ends with the same odor.
+    final_odors = {s[-1] for s in matches if s}
+    determined_final_odor = final_odors.pop() if len(final_odors) == 1 else None
+
+    return label, determinacy_position, determined_final_odor
 
 
 # ================= Functions for Trial Analysis and Classification ========================
@@ -903,10 +978,10 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     initiated_trials = trial_counts['initiated_sequences'].copy()
     initiated_trials_list = []
 
-    # Single-reward (new) protocol info: (is_single_reward, frozenset of rewarded odor-name tuples).
+    # Single-reward (new) protocol info: (is_single_reward, rewarded sequences, all candidate sequences).
     if single_reward_info is None:
         single_reward_info = _get_single_reward_info(root)
-    is_single_reward, rewarded_sequences = single_reward_info
+    is_single_reward, rewarded_sequences, all_sequences = single_reward_info
     response_time_ms_window = float(response_time_sec) * 1000.0 if response_time_sec is not None else None
 
     # Aggregators for summary prints (completed trials only)
@@ -1325,6 +1400,18 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
         if is_single_reward:
             sequence_rewarded = tuple(final_odor_sequence) in rewarded_sequences
             trial_dict['sequence_rewarded'] = sequence_rewarded
+            # Reward determinacy from the presented (possibly partial) odor_sequence: is the
+            # outcome already decided by what the animal has seen? Works for completed AND
+            # aborted trials. determinacy_position = earliest position the outcome became
+            # determined while reading the odors left to right.
+            reward_determinacy, determinacy_position, determined_final_odor = _classify_reward_determinacy(
+                final_odor_sequence, all_sequences, rewarded_sequences
+            )
+            trial_dict['reward_determinacy'] = reward_determinacy
+            trial_dict['determinacy_position'] = determinacy_position
+            # Guaranteed final/reward odor when already pinned by the prefix (else blank); lets
+            # an early leave be scored against the port the sequence was bound to end at.
+            trial_dict['determined_final_odor'] = determined_final_odor
         trial_dict['hidden_rule_location'] = hidden_rule_location
         trial_dict['hidden_rule_locations'] = list(hidden_rule_indices)
         trial_dict['hidden_rule_positions'] = list(hidden_rule_positions)
@@ -1961,7 +2048,7 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
     # decision/choice-accuracy metrics are not polluted. Disabled for the default protocol.
     if single_reward_info is None:
         single_reward_info = _get_single_reward_info(root)
-    is_single_reward, rewarded_sequences = single_reward_info
+    is_single_reward, rewarded_sequences, _all_sequences = single_reward_info
 
     if verbose:
         print("=" * 80)
