@@ -20,6 +20,7 @@ from hypnose.utils.helpers import _filter_session_dirs
 from hypnose.io.paths import get_derivatives_root
 from hypnose.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_metrics,
+    compute_sing_rew_rates,
     is_singrew_session,
 )
 # ================== Loading, Wrapper, and Helper Functions ==================
@@ -316,6 +317,8 @@ def run_all_metrics(results, save_txt=True, save_json=True):
             print("\n--- Single-Reward Outcome Categories ---")
             sing_rew = compute_sing_rew_metrics(results)
             metrics['sing_rew_categories'] = sing_rew
+            sing_rew_rates = compute_sing_rew_rates(sing_rew)
+            metrics['sing_rew_metrics'] = sing_rew_rates
             print(f"Total trials: {sing_rew.get('total_trials', 0)}")
             for cat in ("hit", "miss", "false_alarm", "correct_rejection",
                         "premature_port_entry", "premature_abort", "uncategorized"):
@@ -337,6 +340,16 @@ def run_all_metrics(results, save_txt=True, save_json=True):
             if val.get("n_trials_missing_global_trial_id", 0):
                 print(f"  [FLAG] {val['n_trials_missing_global_trial_id']} trial(s) "
                       f"missing global_trial_id")
+            print("\n--- Single-Reward Metrics ---")
+            counts = sing_rew_rates.get("counts", {})
+            print(f"n_go={counts.get('n_go', 0)} n_nogo={counts.get('n_nogo', 0)} "
+                  f"n_amb={counts.get('n_amb', 0)} n_det={counts.get('n_det', 0)} "
+                  f"n_tot={counts.get('n_tot', 0)}")
+            for key in ("hit_rate", "fa_rate", "H_prime", "F_prime", "headline_sensitivity",
+                        "criterion", "balanced_accuracy", "earned_reward_rate", "port_accuracy",
+                        "efficient_rejection_rate", "early_rejection_index", "anticipatory_rate",
+                        "forfeit_rate", "omission_rate", "impulsivity_rate", "impatience_rate"):
+                print(f"    {key}: {sing_rew_rates.get(key)}")
 
     # Print to screen
     print(buffer.getvalue())

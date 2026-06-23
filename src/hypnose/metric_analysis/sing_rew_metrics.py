@@ -46,7 +46,9 @@ category, so the partition can be audited.
 
 from __future__ import annotations
 
+import math
 from collections import defaultdict
+from statistics import NormalDist
 
 import pandas as pd
 
@@ -156,13 +158,13 @@ def _classify_trial(row):
         return "miss", "forfeit_miss"
 
     # --- FALSE ALARM ---
-    if fr is True:
+    if (not is_aborted) and rd == "nonrewarded" and fr is True:
         return "false_alarm", "completed_fa"
     if is_aborted and rd == "nonrewarded" and fa_is_fa:
         return "false_alarm", "aborted_fa"
 
     # --- CORRECT REJECTION ---
-    if fr is False:
+    if (not is_aborted) and rd == "nonrewarded" and fr is False:
         return "correct_rejection", "passive_cr"
     if is_aborted and rd == "nonrewarded" and fa_is_nfa:
         return "correct_rejection", "active_cr"
@@ -291,3 +293,148 @@ def compute_sing_rew_metrics(results) -> dict:
         "n_trials_missing_global_trial_id": n_missing_gid,
     }
     return out
+
+
+# =========================================================================
+# Signal-detection rates / metrics derived from the sorted categories
+# =========================================================================
+#
+# Built from the category counts produced by ``compute_sing_rew_metrics``.
+#
+# Counts
+#   n_go    (reward-determined)      = hit + miss
+#   n_nogo  (nonrewarded-determined) = false_alarm + correct_rejection
+#   n_amb   (ambiguous)              = premature_port_entry + premature_abort
+#   n_det                            = n_go + n_nogo
+#   n_tot                            = n_det + n_amb
+#
+# On determined trials:
+#   hit_rate            h   = hit / n_go
+#   fa_rate             f   = fa  / n_nogo
+#   H', F' (log-linear)     = (hit+0.5)/(n_go+1), (fa+0.5)/(n_nogo+1)
+#   headline_sensitivity d' = Phi^-1(H') - Phi^-1(F')
+#   criterion            c  = -0.5 * (Phi^-1(H') + Phi^-1(F'))
+#   balanced_accuracy       = 0.5 * (H + (1 - F))
+#   earned_reward_rate      = rewarded_hit / n_go
+#   port_accuracy           = rewarded_hit / (rewarded_hit + port_error_hit)
+#   efficient_rejection_rate= active_cr / n_nogo
+#   early_rejection_index   = active_cr / CR
+#   anticipatory_rate       = (anticipatory_hit + anticipatory_port_error) / n_go
+#   forfeit_rate            = forfeit_miss / n_go
+#   omission_rate           = omission_miss / n_go
+#   impulsivity_rate        = premature_port_entry / n_tot
+#   impatience_rate         = premature_abort / n_tot
+#
+# Every empty denominator yields NaN (never 0). Note the log-linear correction
+# keeps d'/criterion finite when hit/fa is 0 or maxed out, but it does NOT cover
+# an empty go/no-go side: (hit+0.5)/(n_go+1) is a valid 0.5 even when n_go==0, so
+# H'/F' (and thus d'/criterion) are guarded to NaN on n_go==0 / n_nogo==0
+# separately. H' and F' are persisted alongside d'/criterion.
+
+NAN = float("nan")
+
+
+def _ratio(num, den):
+    """num/den, or NaN when the denominator is 0 (never a misleading 0)."""
+    return (num / den) if den else NAN
+
+
+def _phi_inv(p):
+    """Inverse standard-normal CDF (Phi^-1); NaN for NaN or out-of-(0,1) input."""
+    if p is None:
+        return NAN
+    try:
+        if math.isnan(p):
+            return NAN
+    except (TypeError, ValueError):
+        return NAN
+    if not (0.0 < p < 1.0):
+        return NAN
+    return NormalDist().inv_cdf(p)
+
+
+def compute_sing_rew_rates(categories: dict) -> dict:
+    """Signal-detection rates/metrics from a ``compute_sing_rew_metrics`` result.
+
+    Returns a flat dict of the counts (under ``counts``) and every scalar metric.
+    Empty denominators are NaN. See the section comment above for definitions.
+    """
+    def cat_n(cat):
+        return int(categories.get(cat, {}).get("n", 0))
+
+    def sub_n(cat, sub):
+        return int(categories.get(cat, {}).get("subcategories", {}).get(sub, {}).get("n", 0))
+
+    hit = cat_n("hit")
+    miss = cat_n("miss")
+    fa = cat_n("false_alarm")
+    cr = cat_n("correct_rejection")
+    ppe = cat_n("premature_port_entry")
+    pa = cat_n("premature_abort")
+
+    rewarded_hit = sub_n("hit", "rewarded_hit")
+    port_error_hit = sub_n("hit", "port_error_hit")
+    anticipatory_hit = sub_n("hit", "anticipatory_hit")
+    anticipatory_port_error = sub_n("hit", "anticipatory_port_error")
+    forfeit_miss = sub_n("miss", "forfeit_miss")
+    omission_miss = sub_n("miss", "omission_miss")
+    active_cr = sub_n("correct_rejection", "active_cr")
+
+    n_go = hit + miss
+    n_nogo = fa + cr
+    n_amb = ppe + pa
+    n_det = n_go + n_nogo
+    n_tot = n_det + n_amb
+
+    # Raw rates (NaN on empty side)
+    hit_rate = _ratio(hit, n_go)
+    fa_rate = _ratio(fa, n_nogo)
+
+    # Log-linear corrected rates, guarded to NaN when the side is empty (the
+    # correction alone would otherwise yield a meaningful 0.5 at n==0).
+    h_prime = ((hit + 0.5) / (n_go + 1)) if n_go > 0 else NAN
+    f_prime = ((fa + 0.5) / (n_nogo + 1)) if n_nogo > 0 else NAN
+    z_h = _phi_inv(h_prime)
+    z_f = _phi_inv(f_prime)
+    headline_sensitivity = z_h - z_f          # NaN if either side empty
+    criterion = -0.5 * (z_h + z_f)            # NaN if either side empty
+    balanced_accuracy = 0.5 * (hit_rate + (1.0 - fa_rate))  # NaN if either rate NaN
+
+    return {
+        "counts": {
+            "n_go": n_go,
+            "n_nogo": n_nogo,
+            "n_amb": n_amb,
+            "n_det": n_det,
+            "n_tot": n_tot,
+            "hit": hit,
+            "miss": miss,
+            "false_alarm": fa,
+            "correct_rejection": cr,
+            "premature_port_entry": ppe,
+            "premature_abort": pa,
+            "rewarded_hit": rewarded_hit,
+            "port_error_hit": port_error_hit,
+            "anticipatory_hit": anticipatory_hit,
+            "anticipatory_port_error": anticipatory_port_error,
+            "forfeit_miss": forfeit_miss,
+            "omission_miss": omission_miss,
+            "active_cr": active_cr,
+        },
+        "hit_rate": hit_rate,
+        "fa_rate": fa_rate,
+        "H_prime": h_prime,
+        "F_prime": f_prime,
+        "headline_sensitivity": headline_sensitivity,
+        "criterion": criterion,
+        "balanced_accuracy": balanced_accuracy,
+        "earned_reward_rate": _ratio(rewarded_hit, n_go),
+        "port_accuracy": _ratio(rewarded_hit, rewarded_hit + port_error_hit),
+        "efficient_rejection_rate": _ratio(active_cr, n_nogo),
+        "early_rejection_index": _ratio(active_cr, cr),
+        "anticipatory_rate": _ratio(anticipatory_hit + anticipatory_port_error, n_go),
+        "forfeit_rate": _ratio(forfeit_miss, n_go),
+        "omission_rate": _ratio(omission_miss, n_go),
+        "impulsivity_rate": _ratio(ppe, n_tot),
+        "impatience_rate": _ratio(pa, n_tot),
+    }
