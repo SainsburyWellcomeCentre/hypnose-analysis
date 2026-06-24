@@ -12,16 +12,21 @@ session collection) are imported from ``pred_seq_utils`` and reused here.
 
 from __future__ import annotations
 
+import math
 from typing import Iterable, Optional, Union
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
-
+from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 
 from hypnose.io.save import save_figure
+from hypnose.metric_analysis.sing_rew_metrics import (
+    compute_sing_rew_metrics,
+    compute_sing_rew_rates,
+)
 from hypnose.visualization.pred_seq_utils import (
     _collect_sessions,
     _load_sorted_session,
@@ -31,6 +36,7 @@ from hypnose.visualization.pred_seq_utils import (
     _plot_summary_rolling,
     _count_to_marker_size,
     _add_size_legend,
+    _nice_round,
     _summary_save_suffix,
 )
 
@@ -524,3 +530,331 @@ def FR_latency(
             "Nothing to plot."
         )
     return figs
+
+
+# =========================================================================
+# Single-reward metric curves over sessions
+# =========================================================================
+#
+# A single general plotter (`_plot_sing_rew_metrics`) draws one or more
+# singrew metrics as session curves, with thin wrappers below for the
+# pre-determined metric combinations.
+#
+# Conventions (shared by all wrappers):
+#   - Input is a dict {subjid: dates}, so each subject can use its own date
+#     range. Sessions are numbered per subject from 1 (the subject's first
+#     session that contains trial data); the X axis is "Sessions", never
+#     calendar dates.
+#   - Metrics are distinguished by COLOR, subjects by MARKER.
+#   - NaN within a subject's learning curve is meaningful: it is rendered as a
+#     discontinuity (gap, no marker, no interpolation). A genuine 0 is plotted
+#     as a dot at 0. Mid-run sessions with no data at all also become gaps.
+#   - Y range is always explicit; the Y label defaults to the metric name with
+#     "metric_name" -> "Metric Name".
+
+# Subjects -> marker; metrics -> color.
+_SUBJECT_MARKERS = ["o", "s", "^", "D", "v", "P", "X", "*", "h", "<", ">", "p"]
+_METRIC_PALETTE = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e", "#17becf", "#8c564b"]
+
+# Nicer display labels than a plain title-case of the key.
+_METRIC_PRETTY = {
+    "fa_rate": "FA Rate",
+    "headline_sensitivity": "d'",
+    "ambiguous_rate": "Ambiguous Rate",
+}
+
+
+def _pretty_metric(name):
+    return _METRIC_PRETTY.get(name, str(name).replace("_", " ").title())
+
+
+def _isnan(v):
+    try:
+        return math.isnan(v)
+    except (TypeError, ValueError):
+        return False
+
+
+def _metric_value(rates, key):
+    """Resolve a metric value from a `compute_sing_rew_rates` result.
+
+    Handles top-level rate keys, raw counts (under ``counts``), and the derived
+    ``ambiguous_rate`` = n_amb / n_tot (not stored). Missing -> NaN.
+    """
+    if rates is None:
+        return float("nan")
+    if key == "ambiguous_rate":
+        counts = rates.get("counts", {})
+        n_tot = counts.get("n_tot", 0)
+        return (counts["n_amb"] / n_tot) if n_tot else float("nan")
+    if key in rates and key != "counts":
+        return rates[key]
+    counts = rates.get("counts", {})
+    if key in counts:
+        return float(counts[key])
+    return float("nan")
+
+
+def _singrew_session_records(data):
+    """For each subject in ``data`` ({subjid: dates}), build the per-session
+    rates in chronological order with leading no-data sessions trimmed.
+
+    Returns ``{subjid: {"rates": [rates_or_None, ...], "dates": [date, ...]}}``;
+    each list element corresponds to session 1, 2, ... for that subject (None =
+    a session with no trial data, kept only when it falls mid-run).
+    """
+    records = {}
+    for subjid, dates in data.items():
+        sessions = []  # (date_val, df_or_None) chronological
+        for _sid, date_vals, results_dirs in _collect_sessions([subjid], dates):
+            pairs = sorted(zip(date_vals, results_dirs), key=lambda p: str(p[0]))
+            for date_val, results_dir in pairs:
+                df = _load_sorted_session(results_dir)
+                sessions.append((date_val, df if (df is not None and not df.empty) else None))
+        first = next((i for i, (_d, df) in enumerate(sessions) if df is not None), None)
+        if first is None:
+            continue
+        sessions = sessions[first:]
+        rates_list, date_list = [], []
+        for date_val, df in sessions:
+            date_list.append(date_val)
+            if df is None:
+                rates_list.append(None)
+            else:
+                rates_list.append(compute_sing_rew_rates(compute_sing_rew_metrics({"trial_data": df})))
+        records[subjid] = {"rates": rates_list, "dates": date_list}
+    return records
+
+
+def _size_legend_handles(counts, *, title_key="n"):
+    counts = [c for c in counts if c and not _isnan(c) and c > 0]
+    if not counts:
+        return []
+    cmin, cmax = min(counts), max(counts)
+    raw = [cmin] if cmin == cmax else [cmin, (cmin + cmax) / 2.0, cmax]
+    vals = sorted({_nice_round(v) for v in raw if v > 0})
+    handles = []
+    for v in vals:
+        handles.append(
+            Line2D(
+                [], [], marker="o", linestyle="", color="#cccccc", markeredgecolor="#444444",
+                markersize=float(np.sqrt(_count_to_marker_size(v))), label=f"{title_key}={v}",
+            )
+        )
+    return handles
+
+
+def _plot_sing_rew_metrics(
+    data,
+    metrics,
+    *,
+    ylabel=None,
+    ylim=(0.0, 1.0),
+    size_metric=None,
+    ref_line=None,
+    ref_line_label=None,
+    emphasis_metrics=None,
+    annotate_above=None,
+    annotate_below=None,
+    save=False,
+    save_name=None,
+):
+    """Plot one or more singrew metrics as per-subject session curves.
+
+    See the section comment above for conventions (dict input, per-subject
+    session numbering, color=metric / marker=subject, NaN as discontinuity).
+
+    Parameters
+    ----------
+    data : dict {subjid: dates}
+    metrics : list[str]
+        Metric keys (rate keys, counts, or derived ``ambiguous_rate``).
+    ylabel : str, optional
+        Explicit Y label (use "\\n" for multi-row). Defaults to the metric
+        name(s) title-cased.
+    ylim : tuple
+        Explicit Y range.
+    size_metric : str, optional
+        Count key (e.g. "n_go") that scales marker area; adds a size legend.
+    ref_line : float, optional
+        Horizontal reference line (e.g. 0 for d' chance, criterion neutral).
+    emphasis_metrics : set[str], optional
+        Metrics drawn thicker and black (others thinner, colored).
+    annotate_above / annotate_below : str, optional
+        Text labels for the regions above / below ``ref_line``.
+    """
+    records = _singrew_session_records(data)
+    if not records:
+        print("[sing_rew] No single-reward session data found for the requested subjids/dates.")
+        return []
+
+    emphasis = set(emphasis_metrics or [])
+    subjids = list(records.keys())
+
+    colors = {}
+    palette_i = 0
+    for m in metrics:
+        if m in emphasis:
+            colors[m] = "black"
+        else:
+            colors[m] = _METRIC_PALETTE[palette_i % len(_METRIC_PALETTE)]
+            palette_i += 1
+    markers = {s: _SUBJECT_MARKERS[i % len(_SUBJECT_MARKERS)] for i, s in enumerate(subjids)}
+
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    max_len = 0
+    size_counts = []
+
+    for subjid in subjids:
+        recs = records[subjid]["rates"]
+        max_len = max(max_len, len(recs))
+        xs = list(range(1, len(recs) + 1))
+        for m in metrics:
+            # Coerce to a float ndarray so any None/missing becomes a true np.nan;
+            # this guarantees matplotlib breaks the line at gaps (no interpolation)
+            # rather than relying on list->array coercion.
+            ys = np.array([_metric_value(r, m) for r in recs], dtype=float)
+            color = colors[m]
+            lw = 2.6 if m in emphasis else 1.6
+            ax.plot(xs, ys, color=color, linewidth=lw, zorder=2)
+            valid = [(x, y, r) for x, y, r in zip(xs, ys, recs) if not _isnan(y)]
+            if not valid:
+                continue
+            vx = [v[0] for v in valid]
+            vy = [v[1] for v in valid]
+            if size_metric:
+                sizes = []
+                for v in valid:
+                    nval = _metric_value(v[2], size_metric)
+                    size_counts.append(nval)
+                    sizes.append(_count_to_marker_size(0 if _isnan(nval) else nval))
+            else:
+                sizes = 45
+            ax.scatter(
+                vx, vy, s=sizes, color=color, marker=markers[subjid],
+                edgecolor="black", linewidth=0.4, zorder=3,
+            )
+
+    if ref_line is not None:
+        ax.axhline(ref_line, color="gray", linestyle="--", linewidth=1.0, zorder=1)
+        if ref_line_label:
+            ax.text(0.6, ref_line, ref_line_label, color="gray", va="bottom", ha="left", fontsize=10)
+    if annotate_above is not None:
+        ax.text(0.99, 0.98, annotate_above, transform=ax.transAxes, ha="right", va="top",
+                color="gray", fontsize=11)
+    if annotate_below is not None:
+        ax.text(0.99, 0.02, annotate_below, transform=ax.transAxes, ha="right", va="bottom",
+                color="gray", fontsize=11)
+
+    if ylabel is None:
+        ylabel = " / ".join(_pretty_metric(m) for m in metrics)
+    ax.set_xlabel("Sessions")
+    ax.set_ylabel(ylabel)
+    ax.set_ylim(*ylim)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    if max_len <= 12:
+        ax.set_xticks(range(1, max_len + 1))
+    else:
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_xlim(0.5, max_len + 0.5)
+
+    # Legends: metric color (only when >1 metric), subject marker (only when >1
+    # subject), and dot-size (only when size_metric). Stack so they coexist.
+    legend_specs = []
+    if len(metrics) > 1:
+        legend_specs.append((
+            "Metric", "upper left",
+            [Line2D([], [], color=colors[m], lw=(2.6 if m in emphasis else 1.6),
+                    label=_pretty_metric(m)) for m in metrics],
+        ))
+    if len(subjids) > 1:
+        legend_specs.append((
+            "Subject", "upper right",
+            [Line2D([], [], color="gray", marker=markers[s], linestyle="",
+                    markeredgecolor="black", label=f"sub-{s}") for s in subjids],
+        ))
+    if size_metric:
+        size_handles = _size_legend_handles(size_counts, title_key=size_metric)
+        if size_handles:
+            legend_specs.append((size_metric, "lower right", size_handles))
+
+    created = []
+    for title, loc, handles in legend_specs:
+        created.append(ax.legend(handles=handles, loc=loc, title=title, framealpha=0.9))
+    for leg in created[:-1]:
+        ax.add_artist(leg)
+
+    fig.tight_layout()
+    figs = [fig]
+    if save:
+        save_figure(
+            fig,
+            save_name or "sing_rew_metric",
+            subjids=list(data.keys()),
+            dates=[d for rec in records.values() for d in rec["dates"]],
+        )
+    return figs
+
+
+# ---- thin wrappers: pre-determined metric combinations -------------------
+
+def dprime(data, save: bool = False):
+    """Headline sensitivity (d') over sessions; dot size = n_go, 0 = chance line."""
+    return _plot_sing_rew_metrics(
+        data, ["headline_sensitivity"], ylabel="d'", ylim=(-1.0, 4.0),
+        size_metric="n_go", ref_line=0.0, ref_line_label="chance",
+        save=save, save_name="sing_rew_dprime",
+    )
+
+
+def hit_fa_rate(data, show_balanced_accuracy: bool = False, save: bool = False):
+    """Hit rate and FA rate per subject; optionally overlay balanced_accuracy
+    (thicker black line)."""
+    metrics = ["hit_rate", "fa_rate"]
+    emphasis = set()
+    if show_balanced_accuracy:
+        metrics.append("balanced_accuracy")
+        emphasis.add("balanced_accuracy")
+    return _plot_sing_rew_metrics(
+        data, metrics, ylabel="Hit Rate /\nFalse Alarm Rate", ylim=(0.0, 1.0),
+        emphasis_metrics=emphasis, save=save, save_name="sing_rew_hit_fa_rate",
+    )
+
+
+def criterion(data, save: bool = False):
+    """Criterion (c) over sessions; neutral line at 0, conservative/liberal regions."""
+    return _plot_sing_rew_metrics(
+        data, ["criterion"], ylabel="Criterion (c)", ylim=(-2.0, 2.0),
+        ref_line=0.0, annotate_above="conservative (+)", annotate_below="liberal (-)",
+        save=save, save_name="sing_rew_criterion",
+    )
+
+
+def hit_earned_reward(data, show_port_accuracy: bool = False, save: bool = False):
+    """Hit rate and earned-reward rate per subject; optionally add port_accuracy."""
+    metrics = ["hit_rate", "earned_reward_rate"]
+    if show_port_accuracy:
+        metrics.append("port_accuracy")
+    return _plot_sing_rew_metrics(
+        data, metrics, ylim=(0.0, 1.0),
+        save=save, save_name="sing_rew_hit_earned_reward",
+    )
+
+
+def early_rejection_anticipatory(data, save: bool = False):
+    """Early rejection index and anticipatory rate per subject."""
+    return _plot_sing_rew_metrics(
+        data, ["early_rejection_index", "anticipatory_rate"],
+        ylabel="Early Rejection Index /\nAnticipatory Rate", ylim=(0.0, 1.0),
+        save=save, save_name="sing_rew_early_rejection_anticipatory",
+    )
+
+
+def premature_omission_rates(data, save: bool = False):
+    """Impulsivity, impatience, omission, and ambiguous (n_amb/n_tot) rates."""
+    return _plot_sing_rew_metrics(
+        data, ["impulsivity_rate", "impatience_rate", "omission_rate", "ambiguous_rate"],
+        ylabel="Rate", ylim=(0.0, 1.0),
+        save=save, save_name="sing_rew_premature_omission_rates",
+    )
