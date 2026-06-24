@@ -587,6 +587,10 @@ def _metric_value(rates, key):
         counts = rates.get("counts", {})
         n_tot = counts.get("n_tot", 0)
         return (counts["n_amb"] / n_tot) if n_tot else float("nan")
+    if key == "correct_rejection_rate":
+        counts = rates.get("counts", {})
+        n_nogo = counts.get("n_nogo", 0)
+        return (counts["correct_rejection"] / n_nogo) if n_nogo else float("nan")
     if key in rates and key != "counts":
         return rates[key]
     counts = rates.get("counts", {})
@@ -825,7 +829,7 @@ def hit_fa_rate(data, show_balanced_accuracy: bool = False, save: bool = False):
 def criterion(data, save: bool = False):
     """Criterion (c) over sessions; neutral line at 0, conservative/liberal regions."""
     return _plot_sing_rew_metrics(
-        data, ["criterion"], ylabel="Criterion (c)", ylim=(-2.0, 2.0),
+        data, ["criterion"], ylabel="Criterion (c)", ylim=(-3.0, 3.0),
         ref_line=0.0, annotate_above="conservative (+)", annotate_below="liberal (-)",
         save=save, save_name="sing_rew_criterion",
     )
@@ -858,3 +862,209 @@ def premature_omission_rates(data, save: bool = False):
         ylabel="Rate", ylim=(0.0, 1.0),
         save=save, save_name="sing_rew_premature_omission_rates",
     )
+
+
+def correct_rejection_rate(data, save: bool = False):
+    """Correct rejection rate (CR / n_nogo) over sessions; rises with learning."""
+    return _plot_sing_rew_metrics(
+        data, ["correct_rejection_rate"], ylabel="Correct Rejection Rate", ylim=(0.0, 1.0),
+        save=save, save_name="sing_rew_correct_rejection_rate",
+    )
+
+
+# =========================================================================
+# Outcome composition (stacked) over sessions
+# =========================================================================
+#
+# Separate from the thin metric plotters above: per subject, stacked
+# composition of the Go and No-Go partitions across sessions. For each
+# session a single stacked column shows how the partition splits into its
+# subcategories, stacked in partition order with the "best" outcome at the
+# bottom (so improvement reads as the bottom band rising). Each subject gets
+# four figures: Go normalized (fraction, 0-1), Go raw (counts), No-Go
+# normalized, No-Go raw. Uses the normal subjids/dates iterators; no grouping
+# across subjects.
+
+# Each entry: (subcategory_key, color, legend_label), ordered bottom -> top.
+# Colors: best = green, then lighter, worst = red.
+_GO_COMPOSITION = [
+    ("rewarded_hit", "#2ca02c", "Rewarded Hit"),
+    ("port_error_hit", "#98df8a", "Port-Error Hit"),
+    ("anticipatory_hit", "#1f77b4", "Anticipatory Hit"),
+    ("anticipatory_port_error", "#aec7e8", "Anticipatory Port-Error"),
+    ("forfeit_miss", "#ff9896", "Forfeit Miss"),
+    ("omission_miss", "#d62728", "Omission Miss"),
+]
+_NOGO_COMPOSITION = [
+    ("active_cr", "#2ca02c", "Active CR"),
+    ("passive_cr", "#98df8a", "Passive CR"),
+    ("completed_fa", "#ff9896", "Completed FA"),
+    ("aborted_fa", "#d62728", "Aborted FA"),
+]
+
+# subcategory key -> its parent category in the compute_sing_rew_metrics tree.
+_SUBCAT_CATEGORY = {
+    "rewarded_hit": "hit",
+    "port_error_hit": "hit",
+    "anticipatory_hit": "hit",
+    "anticipatory_port_error": "hit",
+    "forfeit_miss": "miss",
+    "omission_miss": "miss",
+    "active_cr": "correct_rejection",
+    "passive_cr": "correct_rejection",
+    "completed_fa": "false_alarm",
+    "aborted_fa": "false_alarm",
+}
+
+
+def _session_subcat_counts(cats, order_specs):
+    """Per-session subcategory counts for the given composition order."""
+    out = {}
+    for key, _color, _label in order_specs:
+        parent = _SUBCAT_CATEGORY[key]
+        out[key] = int(cats.get(parent, {}).get("subcategories", {}).get(key, {}).get("n", 0))
+    return out
+
+
+def _partition_total(cats, order_specs):
+    """Partition total the order's subcategories should sum to: the combined count
+    of their parent categories (n_go for Go, n_nogo for No-Go)."""
+    parents = {_SUBCAT_CATEGORY[key] for key, _c, _l in order_specs}
+    return sum(int(cats.get(parent, {}).get("n", 0)) for parent in parents)
+
+
+def _plot_outcome_composition(recs, order_specs, *, normalize, side, subjid):
+    """Stacked composition of one partition across sessions.
+
+    ``recs`` is a per-session list of ``{subcat: count}`` dicts (or None for a
+    no-data session). Bars are stacked bottom->top in ``order_specs``. Sessions
+    whose partition sum is 0 (or no data) are left as gaps. With ``normalize``
+    each column is divided by its partition sum so it fills 0-1; otherwise raw
+    counts are stacked.
+    """
+    n = len(recs)
+    if n == 0:
+        return None
+    fig, ax = plt.subplots(figsize=(11, 5.5))
+    any_bar = False
+    for x, rec in zip(range(1, n + 1), recs):
+        if rec is None:
+            continue
+        total = sum(rec[key] for key, _c, _l in order_specs)
+        if total == 0:
+            continue  # gap: no trials in this partition this session
+        denom = total if normalize else 1.0
+        bottom = 0.0
+        for key, color, _label in order_specs:
+            height = rec[key] / denom
+            if height <= 0:
+                continue
+            ax.bar(x, height, bottom=bottom, width=0.9, color=color,
+                   edgecolor="white", linewidth=0.3, zorder=2)
+            bottom += height
+        any_bar = True
+
+    if not any_bar:
+        plt.close(fig)
+        return None
+
+    handles = [Patch(facecolor=color, edgecolor="white", label=label)
+               for _key, color, label in order_specs]
+    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0),
+              title=f"{side} outcome")
+    ax.set_xlabel("Sessions")
+    if normalize:
+        ax.set_ylabel(f"{side} Composition (fraction)")
+        ax.set_ylim(0.0, 1.0)
+    else:
+        ax.set_ylabel(f"{side} Trials (count)")
+        ax.set_ylim(bottom=0.0)
+    ax.set_title(f"Subjid {subjid} {side} composition ({'normalized' if normalize else 'raw'})")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    if n <= 12:
+        ax.set_xticks(range(1, n + 1))
+    else:
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    ax.set_xlim(0.5, n + 0.5)
+    fig.tight_layout()
+    return fig
+
+
+def outcome_composition(
+    subjids: Optional[Iterable[int]] = None,
+    dates: Optional[Union[Iterable[Union[int, str]], tuple]] = None,
+    save: bool = False,
+    show_raw: bool = False,
+):
+    """Stacked outcome-composition plots over sessions, per subject.
+
+    Produces the Go and No-Go normalized figures per subject; with
+    ``show_raw=True`` the matching raw-count figures are also produced (and
+    saved). Each figure stacks the partition's subcategories per session (best
+    outcome at the bottom). Normalized columns are divided by the partition sum
+    (n_go / n_nogo) so they fill 0-1; raw columns show absolute counts (so a
+    2-trial session reads very differently from a 200-trial one).
+
+    Sessions are numbered per subject from 1 (leading no-data sessions trimmed);
+    mid-run sessions with no trials in the partition are left as gaps.
+
+    As a sanity check, the plotted subcategory sum is compared against the
+    partition total (n_go / n_nogo) for each session; any mismatch (a category
+    not fully covered by its subcategories) is flagged in the printed output.
+    """
+    figs = []
+    flags = []
+    normalize_modes = (True, False) if show_raw else (True,)
+    for subjid, date_vals, results_dirs in _collect_sessions(subjids, dates):
+        pairs = sorted(zip(date_vals, results_dirs), key=lambda p: str(p[0]))
+        loaded = []  # (date_val, df_or_None) chronological
+        for date_val, results_dir in pairs:
+            df = _load_sorted_session(results_dir)
+            loaded.append((date_val, df if (df is not None and not df.empty) else None))
+        first = next((i for i, (_d, df) in enumerate(loaded) if df is not None), None)
+        if first is None:
+            continue
+        loaded = loaded[first:]
+
+        side_recs = {"Go": [], "No-Go": []}
+        for sess_idx, (date_val, df) in enumerate(loaded, start=1):
+            if df is None:
+                side_recs["Go"].append(None)
+                side_recs["No-Go"].append(None)
+                continue
+            cats = compute_sing_rew_metrics({"trial_data": df})
+            for order_specs, side in ((_GO_COMPOSITION, "Go"), (_NOGO_COMPOSITION, "No-Go")):
+                rec = _session_subcat_counts(cats, order_specs)
+                plotted = sum(rec.values())
+                total = _partition_total(cats, order_specs)
+                if plotted != total:
+                    diff = plotted - total
+                    word = "over" if diff > 0 else "short"
+                    flags.append(
+                        f"  sub-{subjid} {side} session {sess_idx} (date {date_val}): "
+                        f"plotted subcategory sum {plotted} {word} vs partition total "
+                        f"{total} (by {abs(diff)})"
+                    )
+                side_recs[side].append(rec)
+
+        for order_specs, side, tag in (
+            (_GO_COMPOSITION, "Go", "go"),
+            (_NOGO_COMPOSITION, "No-Go", "nogo"),
+        ):
+            for normalize in normalize_modes:
+                fig = _plot_outcome_composition(side_recs[side], order_specs,
+                                                normalize=normalize, side=side, subjid=subjid)
+                if fig is None:
+                    continue
+                figs.append(fig)
+                if save:
+                    kind = "norm" if normalize else "raw"
+                    save_figure(fig, f"sing_rew_composition_{tag}_{kind}",
+                                subjids=[subjid], dates=date_vals)
+
+    if flags:
+        print("[outcome_composition] subcategory sum != partition total (N_go / N_nogo):")
+        for line in flags:
+            print(line)
+    return figs
