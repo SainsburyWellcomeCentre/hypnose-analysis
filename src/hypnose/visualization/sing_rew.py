@@ -855,6 +855,15 @@ def early_rejection_anticipatory(data, save: bool = False):
     )
 
 
+def efficient_early_rejection(data, save: bool = False):
+    """Efficient rejection rate and early rejection index per subject."""
+    return _plot_sing_rew_metrics(
+        data, ["efficient_rejection_rate", "early_rejection_index"],
+        ylabel="Efficient Rejection Rate /\nEarly Rejection Index", ylim=(0.0, 1.0),
+        save=save, save_name="sing_rew_efficient_early_rejection",
+    )
+
+
 def premature_omission_rates(data, save: bool = False):
     """Impulsivity, impatience, omission, and ambiguous (n_amb/n_tot) rates."""
     return _plot_sing_rew_metrics(
