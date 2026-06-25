@@ -3428,6 +3428,30 @@ def _rolling_median_iqr(x, y, window_size, step_size):
     return np.array(mx), np.array(med), np.array(q25), np.array(q75)
 
 
+def _style_log_yaxis(ax):
+    """Make a log Y axis clearly read as log: plain-number major labels at each
+    decade, plus minor ticks at 2-9 within every decade (the 2x and 5x labelled
+    smaller). Without this a range spanning <1 decade shows almost no ticks."""
+    from matplotlib.ticker import LogLocator, ScalarFormatter, FuncFormatter
+
+    ax.set_yscale("log")
+    ax.yaxis.set_major_locator(LogLocator(base=10.0))
+    major_fmt = ScalarFormatter()
+    major_fmt.set_scientific(False)
+    ax.yaxis.set_major_formatter(major_fmt)
+    ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=(2, 3, 4, 5, 6, 7, 8, 9)))
+
+    def _minor_fmt(value, _pos):
+        if value <= 0:
+            return ""
+        lead = value / (10 ** np.floor(np.log10(value)))
+        return f"{value:g}" if round(lead) in (2, 5) else ""
+
+    ax.yaxis.set_minor_formatter(FuncFormatter(_minor_fmt))
+    minor_labelsize = float(plt.rcParams.get("ytick.labelsize", 12)) * 0.6
+    ax.tick_params(axis="y", which="minor", left=True, labelleft=True, labelsize=minor_labelsize)
+
+
 def _plot_metric_over_sessions(
     subjids,
     dates,
@@ -3531,7 +3555,7 @@ def _plot_metric_over_sessions(
     rew_tag = " (rewarded only)" if rewarded_only else ""
     ax_time.set_xlabel("Time (s)")
     ax_time.set_ylabel(f"{metric_name} ({unit})")
-    ax_time.set_yscale("log")
+    _style_log_yaxis(ax_time)
     ax_time.set_xlim(left=0)
     ax_time.legend()
     fig_time.tight_layout()
