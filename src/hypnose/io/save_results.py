@@ -244,7 +244,9 @@ def save_session_analysis_results(classification: dict, root, session_metadata: 
         # produced upstream only for single-reward sessions, so nothing is added for the default
         # protocol and legacy output is unchanged).
         fr_cols = [
-            "sequence_rewarded", "false_response", "fr_label",
+            "sequence_rewarded", "reward_determinacy", "determinacy_position",
+            "determined_final_odor",
+            "false_response", "fr_label",
             "fr_latency_ms", "fr_time", "fr_port", "fr_odor_identity", "fr_window_end",
         ]
         if any(col in trial_df.columns for col in fr_cols):

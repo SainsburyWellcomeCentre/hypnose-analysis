@@ -3087,8 +3087,580 @@ def plot_cumulative_rewards(
                 print(f"[plot_cumulative_rewards] Failed to save figure: {exc}")
     
     plt.show()
-    
+
     return fig, ax
+
+
+def plot_cumulative_rewards_by_trial(
+    subjids,
+    dates=None,
+    figsize=(12, 6.5),
+    *,
+    save=False,
+    verbose=True,
+    show_gap_shading=True,
+    show_session_boundaries=True,
+):
+    """Cumulative rewards vs a continuous trial index (not calendar time).
+
+    Like ``plot_cumulative_rewards``, but the X axis is every trial in order
+    (``global_trial_id``), made continuous across sessions: session 1's last
+    trial is immediately followed by session 2's first trial. The cumulative
+    count increments by 1 on each rewarded trial (``response_time_category ==
+    "rewarded"``) and stays flat on anything else (unrewarded, timeout_delayed,
+    None/NaN, aborted). No per-day reset.
+
+    Parameters mirror ``plot_cumulative_rewards``. ``show_gap_shading``
+    (within-session inter-run gaps) and ``show_session_boundaries`` are only
+    honoured for a single subject; with more than one subject they are forced
+    off (the trial axis is not shared session-for-session across subjects).
+    Accepts the same subjids/dates forms, including a ``{subjid: date_range}``
+    dict (pass it as ``subjids`` with ``dates=None``).
+
+    Returns
+    -------
+    fig, ax : matplotlib figure and axes
+    """
+    if isinstance(subjids, dict):
+        dates = subjids if (dates is None or not isinstance(dates, dict)) else dates
+        subjids = list(subjids.keys())
+    elif isinstance(subjids, set):
+        subjids = sorted(subjids)
+    elif not isinstance(subjids, (list, tuple)):
+        subjids = [subjids]
+
+    def _dates_for(subjid):
+        if not isinstance(dates, dict):
+            return dates
+        if subjid in dates:
+            return dates[subjid]
+        try:
+            int_key = int(subjid)
+            if int_key in dates:
+                return dates[int_key]
+        except (TypeError, ValueError):
+            pass
+        str_key = str(subjid)
+        if str_key in dates:
+            return dates[str_key]
+        return None
+
+    single_subject = len(subjids) == 1
+    gap_on = show_gap_shading and single_subject
+    boundary_on = show_session_boundaries and single_subject
+
+    fig, ax = plt.subplots(figsize=figsize)
+    colors = plt.cm.tab10(range(len(subjids)))
+
+    for subj_idx, subjid in enumerate(subjids):
+        subj_dates = _dates_for(subjid)
+        if isinstance(dates, dict) and subj_dates is None:
+            print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
+            continue
+
+        derivatives_dir = get_derivatives_root()
+        subj_str = f"sub-{str(subjid).zfill(3)}"
+        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+        if not subj_dirs:
+            print(f"Warning: No subject directory found for {subj_str}")
+            continue
+        subj_dir = subj_dirs[0]
+
+        # Sessions in chronological (date) order.
+        sessions = []
+        for ses in _filter_session_dirs(subj_dir, subj_dates):
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if results_dir.exists():
+                sessions.append((date_str, results_dir))
+        sessions.sort(key=lambda t: t[0])
+
+        xs = []
+        rewarded_flags = []
+        running_offset = 0
+        session_boundaries = []
+        gaps = []
+        first_session_done = False
+
+        for date_str, results_dir in sessions:
+            df = _load_trial_views(results_dir).get("trial_data", pd.DataFrame())
+            if df.empty or "global_trial_id" not in df.columns:
+                continue
+            df = df.sort_values("global_trial_id").reset_index(drop=True)
+            n = len(df)
+
+            if boundary_on and first_session_done:
+                session_boundaries.append(running_offset + 0.5)
+
+            # Within-session gaps = boundaries between consecutive runs.
+            if gap_on and "run_id" in df.columns:
+                run_ids = df["run_id"].tolist()
+                for i in range(1, n):
+                    if run_ids[i] != run_ids[i - 1]:
+                        gaps.append((running_offset + i, running_offset + i + 1))
+
+            rtc = df.get("response_time_category")
+            rew = (rtc == "rewarded").tolist() if rtc is not None else [False] * n
+            xs.extend(range(running_offset + 1, running_offset + n + 1))
+            rewarded_flags.extend(rew)
+            running_offset += n
+            first_session_done = True
+
+        if not xs:
+            print(f"Warning: No trials found for subject {subjid}")
+            continue
+
+        cumulative = np.cumsum([1 if r else 0 for r in rewarded_flags])
+
+        if gap_on:
+            for gap_start, gap_end in gaps:
+                ax.axvspan(gap_start, gap_end, alpha=0.2, color="gray", zorder=0)
+        if boundary_on:
+            for boundary in session_boundaries:
+                ax.axvline(x=boundary, color="gray", linestyle="-", linewidth=0.8, alpha=0.6, zorder=3)
+
+        ax.plot(xs, cumulative, color=colors[subj_idx], marker="o", markersize=3,
+                label=f"Subject {subjid}")
+
+    ax.set_xlabel("Trial (continuous global_trial_id)")
+    ax.set_ylabel("Cumulative Rewards")
+    data_xmax = max(
+        (line.get_xdata().max() for line in ax.get_lines() if len(line.get_xdata())),
+        default=ax.get_xlim()[1],
+    )
+    data_ymax = max(
+        (line.get_ydata().max() for line in ax.get_lines() if len(line.get_ydata())),
+        default=ax.get_ylim()[1],
+    )
+    ax.set_xlim(left=0, right=data_xmax * 1.01)
+    ax.set_ylim(bottom=-data_ymax * 0.01, top=data_ymax * 1.02)
+    ax.legend()
+    plt.tight_layout()
+
+    if save:
+        try:
+            if isinstance(dates, dict):
+                save_dates = []
+                for v in dates.values():
+                    if isinstance(v, (list, tuple)):
+                        save_dates.extend(v)
+                    elif v is not None:
+                        save_dates.append(v)
+            else:
+                save_dates = dates
+            out_path = save_figure(
+                fig,
+                "cumulative_rewards_by_trial",
+                subjids=list(subjids) if isinstance(subjids, (list, tuple)) else [subjids],
+                dates=save_dates,
+            )
+            if verbose:
+                print(f"[plot_cumulative_rewards_by_trial] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_cumulative_rewards_by_trial] Failed to save figure: {exc}")
+
+    plt.show()
+
+    return fig, ax
+
+
+def _coerce_tz_naive(series):
+    """Return a datetime Series with any timezone dropped (subtraction-safe)."""
+    s = pd.to_datetime(series, errors="coerce")
+    try:
+        if s.dt.tz is not None:
+            s = s.dt.tz_localize(None)
+    except (AttributeError, TypeError):
+        pass
+    return s
+
+
+def _load_subject_trial_timeline(subjid, subj_dates):
+    """Build a per-trial timeline for one subject across sessions.
+
+    Returns a dict with the concatenated all-trial DataFrame (chronological,
+    with ``time_seconds`` collapsing inter-session gaps as in
+    ``plot_cumulative_rewards`` and a continuous ``trial_index`` as in
+    ``plot_cumulative_rewards_by_trial``), plus ``iti_seconds`` (within-session
+    inter-trial interval) and ``is_rewarded``. Also returns the time- and
+    trial-axis gap spans and session boundaries. ``None`` if no data.
+    """
+    derivatives_dir = get_derivatives_root()
+    subj_str = f"sub-{str(subjid).zfill(3)}"
+    subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+    if not subj_dirs:
+        print(f"Warning: No subject directory found for {subj_str}")
+        return None
+    subj_dir = subj_dirs[0]
+
+    sessions = []
+    for ses in _filter_session_dirs(subj_dir, subj_dates):
+        date_str = ses.name.split("_date-")[-1]
+        results_dir = ses / "saved_analysis_results"
+        if results_dir.exists():
+            sessions.append((date_str, results_dir))
+    sessions.sort(key=lambda t: t[0])
+
+    per_session = []
+    for date_str, results_dir in sessions:
+        df = _load_trial_views(results_dir).get("trial_data", pd.DataFrame())
+        if df.empty or "global_trial_id" not in df.columns:
+            continue
+        df = df.sort_values("global_trial_id").reset_index(drop=True)
+        df["date"] = date_str
+        for col in ("sequence_start", "sequence_end"):
+            if col in df.columns:
+                df[col] = _coerce_tz_naive(df[col])
+        # Within-session ITI: start[i+1] - end[i] (last trial -> NaN); never across sessions.
+        if "sequence_end" in df.columns and "sequence_start" in df.columns:
+            df["iti_seconds"] = (df["sequence_start"].shift(-1) - df["sequence_end"]).dt.total_seconds()
+        else:
+            df["iti_seconds"] = np.nan
+        rtc = df.get("response_time_category")
+        df["is_rewarded"] = (rtc == "rewarded") if rtc is not None else False
+        runs = []
+        summary_path = results_dir / "summary.json"
+        if summary_path.exists():
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    runs = json.load(f).get("session", {}).get("runs", [])
+            except Exception:
+                runs = []
+        per_session.append({"date": date_str, "df": df, "runs": runs})
+
+    if not per_session:
+        return None
+
+    # Continuous trial axis + trial-based gaps/boundaries.
+    running = 0
+    trial_boundaries = []
+    trial_gaps = []
+    for s_idx, sess in enumerate(per_session):
+        df = sess["df"]
+        n = len(df)
+        if s_idx > 0:
+            trial_boundaries.append(running + 0.5)
+        if "run_id" in df.columns:
+            run_ids = df["run_id"].tolist()
+            for k in range(1, n):
+                if run_ids[k] != run_ids[k - 1]:
+                    trial_gaps.append((running + k, running + k + 1))
+        df["trial_index"] = range(running + 1, running + n + 1)
+        running += n
+
+    combined = pd.concat([s["df"] for s in per_session], ignore_index=True)
+
+    # Time axis with collapsed inter-session gaps (mirrors plot_cumulative_rewards).
+    time_boundaries = []
+    time_gaps = []
+    session_info = [{"date": s["date"], "runs": s["runs"]} for s in per_session if s["runs"]]
+    if session_info:
+        time_offset = 0
+        session_offsets = {}
+        global_start_time = None
+        for sess_idx, sess in enumerate(session_info):
+            runs = sess["runs"]
+            sdate = sess["date"]
+            if sess_idx == 0:
+                global_start_time = _coerce_tz_naive(pd.Series([runs[0]["start_time"]])).iloc[0]
+                session_offsets[sdate] = 0
+            else:
+                prev = session_info[sess_idx - 1]
+                prev_end = _coerce_tz_naive(pd.Series([prev["runs"][-1]["end_time"]])).iloc[0]
+                curr_start = _coerce_tz_naive(pd.Series([runs[0]["start_time"]])).iloc[0]
+                time_offset += (curr_start - prev_end).total_seconds() - 1
+                session_offsets[sdate] = time_offset
+                boundary = (prev_end - global_start_time).total_seconds() - session_offsets[prev["date"]] + 1
+                time_boundaries.append(boundary)
+            for run in runs:
+                if run.get("gap_to_next_run"):
+                    try:
+                        parts = str(run["gap_to_next_run"]).split(":")
+                        if len(parts) == 3:
+                            gap_dur = int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+                        else:
+                            gap_dur = float(run["gap_to_next_run"])
+                        run_end = _coerce_tz_naive(pd.Series([run["end_time"]])).iloc[0]
+                        gap_start = (run_end - global_start_time).total_seconds() - session_offsets[sdate]
+                        time_gaps.append((gap_start, gap_start + gap_dur))
+                    except Exception:
+                        pass
+        combined["time_seconds"] = combined.apply(
+            lambda row: (row["sequence_start"] - global_start_time).total_seconds()
+            - session_offsets.get(row["date"], 0),
+            axis=1,
+        )
+    else:
+        global_start_time = combined["sequence_start"].iloc[0]
+        combined["time_seconds"] = (combined["sequence_start"] - global_start_time).dt.total_seconds()
+
+    return {
+        "combined": combined,
+        "time_gaps": time_gaps,
+        "time_boundaries": time_boundaries,
+        "trial_gaps": trial_gaps,
+        "trial_boundaries": trial_boundaries,
+    }
+
+
+def _rolling_median_iqr(x, y, window_size, step_size):
+    """Rolling median + 25th/75th percentiles over trial windows.
+
+    ``x``/``y`` are equal-length arrays already ordered by x. Returns
+    (mx, median, q25, q75); each window is anchored to the actual x value of its
+    center trial (not an interpolated midpoint between the first and last x).
+    """
+    n = len(y)
+    if n == 0:
+        return (np.array([]),) * 4
+    win = min(max(1, int(window_size)), n)
+    step = max(1, int(step_size))
+    mx, med, q25, q75 = [], [], [], []
+    for end in range(win, n + 1, step):
+        start = end - win
+        seg = y[start:end]
+        med.append(np.nanmedian(seg))
+        q25.append(np.nanpercentile(seg, 25))
+        q75.append(np.nanpercentile(seg, 75))
+        center = (start + end - 1) // 2  # index of the window's center trial
+        mx.append(x[center])
+    return np.array(mx), np.array(med), np.array(q25), np.array(q75)
+
+
+def _style_log_yaxis(ax):
+    """Make a log Y axis clearly read as log: plain-number major labels at each
+    decade, plus minor ticks at 2-9 within every decade (the 2x and 5x labelled
+    smaller). Without this a range spanning <1 decade shows almost no ticks."""
+    from matplotlib.ticker import LogLocator, ScalarFormatter, FuncFormatter
+
+    ax.set_yscale("log")
+    ax.yaxis.set_major_locator(LogLocator(base=10.0))
+    major_fmt = ScalarFormatter()
+    major_fmt.set_scientific(False)
+    ax.yaxis.set_major_formatter(major_fmt)
+    ax.yaxis.set_minor_locator(LogLocator(base=10.0, subs=(2, 3, 4, 5, 6, 7, 8, 9)))
+
+    def _minor_fmt(value, _pos):
+        if value <= 0:
+            return ""
+        lead = value / (10 ** np.floor(np.log10(value)))
+        return f"{value:g}" if round(lead) in (2, 5) else ""
+
+    ax.yaxis.set_minor_formatter(FuncFormatter(_minor_fmt))
+    minor_labelsize = float(plt.rcParams.get("ytick.labelsize", 12)) * 0.6
+    ax.tick_params(axis="y", which="minor", left=True, labelleft=True, labelsize=minor_labelsize)
+
+
+def _plot_metric_over_sessions(
+    subjids,
+    dates,
+    *,
+    value_col,
+    metric_name,
+    unit,
+    rewarded_only,
+    window_size,
+    step_size,
+    save,
+    save_key,
+    verbose,
+    show_gap_shading,
+    show_session_boundaries,
+    figsize,
+):
+    """Core for latency/ITI plots: a time-axis rolling median+IQR figure and a
+    trial-axis cumulative figure. See the public wrappers for the contract."""
+    if isinstance(subjids, dict):
+        dates = subjids if (dates is None or not isinstance(dates, dict)) else dates
+        subjids = list(subjids.keys())
+    elif isinstance(subjids, set):
+        subjids = sorted(subjids)
+    elif not isinstance(subjids, (list, tuple)):
+        subjids = [subjids]
+
+    def _dates_for(subjid):
+        if not isinstance(dates, dict):
+            return dates
+        if subjid in dates:
+            return dates[subjid]
+        try:
+            if int(subjid) in dates:
+                return dates[int(subjid)]
+        except (TypeError, ValueError):
+            pass
+        return dates.get(str(subjid))
+
+    single_subject = len(subjids) == 1
+    gap_on = show_gap_shading and single_subject
+    boundary_on = show_session_boundaries and single_subject
+
+    fig_time, ax_time = plt.subplots(figsize=figsize)
+    fig_trial, ax_trial = plt.subplots(figsize=figsize)
+    colors = plt.cm.tab10(range(len(subjids)))
+
+    for subj_idx, subjid in enumerate(subjids):
+        subj_dates = _dates_for(subjid)
+        if isinstance(dates, dict) and subj_dates is None:
+            print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
+            continue
+        timeline = _load_subject_trial_timeline(subjid, subj_dates)
+        if timeline is None:
+            print(f"Warning: No trials found for subject {subjid}")
+            continue
+        combined = timeline["combined"]
+        if value_col not in combined.columns:
+            print(f"Warning: '{value_col}' column missing for subject {subjid}")
+            continue
+        color = colors[subj_idx]
+
+        # ---- Time-axis: per-trial value, rolling median + IQR (log y) ----
+        tdata = combined[combined["is_rewarded"]] if rewarded_only else combined
+        tdata = tdata[["time_seconds", value_col]].copy()
+        tdata = tdata[tdata[value_col].notna() & (tdata[value_col] > 0)]
+        tdata = tdata.sort_values("time_seconds")
+        if not tdata.empty:
+            if gap_on:
+                for gap_start, gap_end in timeline["time_gaps"]:
+                    ax_time.axvspan(gap_start, gap_end, alpha=0.2, color="gray", zorder=0)
+            if boundary_on:
+                for boundary in timeline["time_boundaries"]:
+                    ax_time.axvline(x=boundary, color="gray", linestyle="-", linewidth=0.8, alpha=0.6, zorder=3)
+            mx, med, q25, q75 = _rolling_median_iqr(
+                tdata["time_seconds"].to_numpy(), tdata[value_col].to_numpy(), window_size, step_size,
+            )
+            if len(mx):
+                ax_time.fill_between(mx, q25, q75, color=color, alpha=0.2, zorder=2)
+                ax_time.plot(mx, med, color=color, linewidth=2, label=f"Subject {subjid}", zorder=3)
+
+        # ---- Trial-axis: cumulative value over continuous trial index ----
+        contrib = combined[value_col].to_numpy(dtype=float)
+        contrib = np.nan_to_num(contrib, nan=0.0)
+        # Only positive values contribute (ignore NaN and non-positive, e.g. a
+        # negative ITI from overlapping trials, which would otherwise drag the
+        # cumulative curve down).
+        contrib = np.where(contrib > 0, contrib, 0.0)
+        if rewarded_only:
+            contrib = np.where(combined["is_rewarded"].to_numpy(), contrib, 0.0)
+        cumulative = np.cumsum(contrib)
+        xs = combined["trial_index"].to_numpy()
+        if gap_on:
+            for gap_start, gap_end in timeline["trial_gaps"]:
+                ax_trial.axvspan(gap_start, gap_end, alpha=0.2, color="gray", zorder=0)
+        if boundary_on:
+            for boundary in timeline["trial_boundaries"]:
+                ax_trial.axvline(x=boundary, color="gray", linestyle="-", linewidth=0.8, alpha=0.6, zorder=3)
+        ax_trial.plot(xs, cumulative, color=color, linewidth=2, label=f"Subject {subjid}", zorder=3)
+
+    rew_tag = " (rewarded only)" if rewarded_only else ""
+    ax_time.set_xlabel("Time (s)")
+    ax_time.set_ylabel(f"{metric_name} ({unit})")
+    _style_log_yaxis(ax_time)
+    ax_time.set_xlim(left=0)
+    ax_time.legend()
+    fig_time.tight_layout()
+
+    ax_trial.set_xlabel("Trial (continuous global_trial_id)")
+    ax_trial.set_ylabel(f"Cumulative {metric_name} ({unit})")
+    ax_trial.set_xlim(left=0)
+    ax_trial.legend()
+    fig_trial.tight_layout()
+
+    if save:
+        rew_save = "_rewarded" if rewarded_only else ""
+        if isinstance(dates, dict):
+            save_dates = []
+            for v in dates.values():
+                if isinstance(v, (list, tuple)):
+                    save_dates.extend(v)
+                elif v is not None:
+                    save_dates.append(v)
+        else:
+            save_dates = dates
+        subj_list = list(subjids) if isinstance(subjids, (list, tuple)) else [subjids]
+        for fig, axis_tag in ((fig_time, "timeaxis"), (fig_trial, "trialaxis")):
+            try:
+                out_path = save_figure(fig, f"{save_key}_{axis_tag}{rew_save}",
+                                       subjids=subj_list, dates=save_dates)
+                if verbose:
+                    print(f"[{save_key}] Saved figure to {out_path}")
+            except Exception as exc:
+                if verbose:
+                    print(f"[{save_key}] Failed to save figure: {exc}")
+
+    plt.show()
+    return fig_time, ax_time, fig_trial, ax_trial
+
+
+def plot_latency_over_time(
+    subjids,
+    dates=None,
+    *,
+    rewarded_only=False,
+    window_size=20,
+    step_size=5,
+    save=False,
+    verbose=True,
+    show_gap_shading=True,
+    show_session_boundaries=True,
+    figsize=(12, 6.5),
+):
+    """Response-time (latency) over time, as two figures.
+
+    1. Time axis (collapsed inter-session gaps, like ``plot_cumulative_rewards``):
+       per-trial ``response_time_ms`` on a log Y, summarised by a rolling median
+       over a trial window (``window_size``/``step_size``) with the 25th-75th
+       percentile range shaded around it.
+    2. Trial axis (continuous ``global_trial_id``, like
+       ``plot_cumulative_rewards_by_trial``): cumulative response time.
+
+    ``rewarded_only=True`` restricts to rewarded trials
+    (``response_time_category == "rewarded"``); otherwise all trials with a
+    response time are used. ``show_gap_shading`` / ``show_session_boundaries``
+    apply to a single subject only. ``subjids`` may be a ``{subjid: date_range}``
+    dict (pass with ``dates=None``).
+
+    Returns ``(fig_time, ax_time, fig_trial, ax_trial)``.
+    """
+    return _plot_metric_over_sessions(
+        subjids, dates, value_col="response_time_ms", metric_name="Response Time",
+        unit="ms", rewarded_only=rewarded_only, window_size=window_size, step_size=step_size,
+        save=save, save_key="latency_over_time", verbose=verbose,
+        show_gap_shading=show_gap_shading, show_session_boundaries=show_session_boundaries,
+        figsize=figsize,
+    )
+
+
+def plot_iti_over_time(
+    subjids,
+    dates=None,
+    *,
+    window_size=20,
+    step_size=5,
+    save=False,
+    verbose=True,
+    show_gap_shading=True,
+    show_session_boundaries=True,
+    figsize=(12, 6.5),
+):
+    """Inter-trial interval (ITI) over time, mirroring ``plot_latency_over_time``.
+
+    ITI is computed within a session only: for consecutive trials (by
+    ``global_trial_id``) it is ``sequence_start[i+1] - sequence_end[i]``; the last
+    trial of each session has no ITI (never across sessions). Two figures: time
+    axis with per-trial ITI on a log Y (rolling median + 25th-75th percentile
+    band), and trial axis with cumulative ITI. No ``rewarded_only`` toggle.
+
+    Returns ``(fig_time, ax_time, fig_trial, ax_trial)``.
+    """
+    return _plot_metric_over_sessions(
+        subjids, dates, value_col="iti_seconds", metric_name="ITI", unit="s",
+        rewarded_only=False, window_size=window_size, step_size=step_size,
+        save=save, save_key="iti_over_time", verbose=verbose,
+        show_gap_shading=show_gap_shading, show_session_boundaries=show_session_boundaries,
+        figsize=figsize,
+    )
+
 
 def plot_choice_history(
     subjid,

@@ -166,7 +166,7 @@ def poster_style() -> dict:
 # Apply the default (nature) style globally so display and saved figures match.
 # To switch to poster style for a notebook, call:
 #     mpl.rcParams.update(poster_style())
-mpl.rcParams.update(poster_style())
+mpl.rcParams.update(nature_style())
 
 mpl.rcParams["pdf.fonttype"] = 42
 mpl.rcParams["ps.fonttype"] = 42

@@ -18,6 +18,11 @@ from matplotlib import cm
 from typing import Iterable, Optional, Union
 from hypnose.utils.helpers import _filter_session_dirs
 from hypnose.io.paths import get_derivatives_root
+from hypnose.metric_analysis.sing_rew_metrics import (
+    compute_sing_rew_metrics,
+    compute_sing_rew_rates,
+    is_singrew_session,
+)
 # ================== Loading, Wrapper, and Helper Functions ==================
 
 def load_session_results(subjid, date):
@@ -304,6 +309,47 @@ def run_all_metrics(results, save_txt=True, save_json=True):
                 'total_fa_by_odor': fa_port_ratio_without['total_fa_by_odor'],
             }
         }
+
+        # Single-reward protocol only: outcome-category metrics (Hit / Miss / FA / CR)
+        # built from the singrew trial_data columns. Only computed when the session's
+        # stage_name contains "singrew", so default-protocol output is unchanged.
+        if is_singrew_session(results):
+            print("\n--- Single-Reward Outcome Categories ---")
+            sing_rew = compute_sing_rew_metrics(results)
+            metrics['sing_rew_categories'] = sing_rew
+            sing_rew_rates = compute_sing_rew_rates(sing_rew)
+            metrics['sing_rew_metrics'] = sing_rew_rates
+            print(f"Total trials: {sing_rew.get('total_trials', 0)}")
+            for cat in ("hit", "miss", "false_alarm", "correct_rejection",
+                        "premature_port_entry", "premature_abort", "uncategorized"):
+                cat_info = sing_rew.get(cat, {})
+                print(f"{cat}: n={cat_info.get('n', 0)}")
+                for sub, sub_info in cat_info.get("subcategories", {}).items():
+                    print(f"    {sub}: n={sub_info.get('n', 0)}")
+            val = sing_rew.get("validation", {})
+            print(f"Validation: classified {val.get('n_classified', 0)}/"
+                  f"{val.get('n_total_trials', 0)}")
+            not_any = val.get("not_in_any_category", {})
+            in_multi = val.get("in_multiple_categories", {})
+            if not_any.get("n", 0):
+                print(f"  [FLAG] {not_any['n']} trial(s) in NO category: "
+                      f"{not_any.get('global_trial_ids', [])}")
+            if in_multi.get("n", 0):
+                print(f"  [FLAG] {in_multi['n']} global_trial_id(s) in MULTIPLE categories: "
+                      f"{in_multi.get('global_trial_ids', {})}")
+            if val.get("n_trials_missing_global_trial_id", 0):
+                print(f"  [FLAG] {val['n_trials_missing_global_trial_id']} trial(s) "
+                      f"missing global_trial_id")
+            print("\n--- Single-Reward Metrics ---")
+            counts = sing_rew_rates.get("counts", {})
+            print(f"n_go={counts.get('n_go', 0)} n_nogo={counts.get('n_nogo', 0)} "
+                  f"n_amb={counts.get('n_amb', 0)} n_det={counts.get('n_det', 0)} "
+                  f"n_tot={counts.get('n_tot', 0)}")
+            for key in ("hit_rate", "fa_rate", "H_prime", "F_prime", "headline_sensitivity",
+                        "criterion", "balanced_accuracy", "earned_reward_rate", "port_accuracy",
+                        "efficient_rejection_rate", "early_rejection_index", "anticipatory_rate",
+                        "forfeit_rate", "omission_rate", "impulsivity_rate", "impatience_rate"):
+                print(f"    {key}: {sing_rew_rates.get(key)}")
 
     # Print to screen
     print(buffer.getvalue())
