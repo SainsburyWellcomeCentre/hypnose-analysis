@@ -26,7 +26,9 @@ from hypnose.io.save import save_figure
 from hypnose.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_metrics,
     compute_sing_rew_rates,
+    _classify_trial,
 )
+from hypnose.visualization.visualization_utils import _load_subject_trial_timeline
 from hypnose.visualization.pred_seq_utils import (
     _collect_sessions,
     _load_sorted_session,
@@ -1077,3 +1079,213 @@ def outcome_composition(
         for line in flags:
             print(line)
     return figs
+
+
+# =========================================================================
+# Cumulative Hit + Correct Rejection over time / trials
+# =========================================================================
+#
+# Like plot_cumulative_rewards / plot_cumulative_rewards_by_trial, but the curve
+# steps up by 1 on every HIT or CORRECT REJECTION trial (broad singrew category)
+# and stays flat on MISS / FALSE ALARM (and premature / uncategorized). One
+# figure each: continuous time axis, or continuous global_trial_id axis. Both
+# start at the first trial of the first session that contains single-reward data.
+
+
+def _normalize_subjids_dates(subjids, dates):
+    """Normalize the (subjids, dates) inputs shared by the cumulative plotters,
+    supporting a ``{subjid: date_range}`` dict passed as ``subjids``."""
+    if isinstance(subjids, dict):
+        dates = subjids if (dates is None or not isinstance(dates, dict)) else dates
+        subjids = list(subjids.keys())
+    elif isinstance(subjids, set):
+        subjids = sorted(subjids)
+    elif not isinstance(subjids, (list, tuple)):
+        subjids = [subjids]
+
+    def dates_for(subjid):
+        if not isinstance(dates, dict):
+            return dates
+        if subjid in dates:
+            return dates[subjid]
+        try:
+            if int(subjid) in dates:
+                return dates[int(subjid)]
+        except (TypeError, ValueError):
+            pass
+        return dates.get(str(subjid))
+
+    return subjids, dates, dates_for
+
+
+def _trim_timeline_to_singrew(timeline):
+    """Trim a subject timeline (from ``_load_subject_trial_timeline``) to start at
+    the first trial whose session contains single-reward data (``reward_determinacy``
+    populated), re-zeroing the time axis and re-basing the trial axis to start at 1.
+    Returns the trimmed dict, or None if there is no single-reward data."""
+    combined = timeline["combined"]
+    if "reward_determinacy" not in combined.columns:
+        return None
+    mask = combined["reward_determinacy"].notna().to_numpy()
+    if not mask.any():
+        return None
+    start_pos = int(np.argmax(mask))
+    sub = combined.iloc[start_pos:].copy()
+    t0 = float(sub["time_seconds"].iloc[0])
+    idx0 = int(sub["trial_index"].iloc[0])
+    sub["time_seconds"] = sub["time_seconds"] - t0
+    sub["trial_index"] = sub["trial_index"] - (idx0 - 1)  # first kept trial -> 1
+
+    def _shift_gaps(gaps, off):
+        return [(max(0.0, s - off), e - off) for s, e in gaps if e > off]
+
+    def _shift_bounds(bounds, off):
+        # > off + 0.5 also drops the boundary marking the first kept session's
+        # own start (it would otherwise land at the left edge).
+        return [b - off for b in bounds if b > off + 0.5]
+
+    return {
+        "combined": sub,
+        "time_gaps": _shift_gaps(timeline["time_gaps"], t0),
+        "time_boundaries": _shift_bounds(timeline["time_boundaries"], t0),
+        "trial_gaps": _shift_gaps(timeline["trial_gaps"], idx0 - 1),
+        "trial_boundaries": _shift_bounds(timeline["trial_boundaries"], idx0 - 1),
+    }
+
+
+def _plot_cumulative_hit_cr(subjids, dates, *, by_trial, save, verbose,
+                            show_gap_shading, show_session_boundaries, figsize):
+    """Core for the cumulative Hit+CR plots (time axis or trial axis)."""
+    subjids, dates, dates_for = _normalize_subjids_dates(subjids, dates)
+    single_subject = len(subjids) == 1
+    gap_on = show_gap_shading and single_subject
+    boundary_on = show_session_boundaries and single_subject
+
+    fig, ax = plt.subplots(figsize=figsize)
+    colors = plt.cm.tab10(range(len(subjids)))
+
+    for subj_idx, subjid in enumerate(subjids):
+        subj_dates = dates_for(subjid)
+        if isinstance(dates, dict) and subj_dates is None:
+            print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
+            continue
+        timeline = _load_subject_trial_timeline(subjid, subj_dates)
+        if timeline is None:
+            print(f"Warning: No trials found for subject {subjid}")
+            continue
+        trimmed = _trim_timeline_to_singrew(timeline)
+        if trimmed is None:
+            print(f"Warning: No single-reward data found for subject {subjid}")
+            continue
+        combined = trimmed["combined"]
+
+        increments = [
+            1 if _classify_trial(row)[0] in ("hit", "correct_rejection") else 0
+            for _, row in combined.iterrows()
+        ]
+        cumulative = np.cumsum(increments)
+
+        if by_trial:
+            xs = combined["trial_index"].to_numpy()
+            gaps = trimmed["trial_gaps"]
+            boundaries = trimmed["trial_boundaries"]
+        else:
+            xs = combined["time_seconds"].to_numpy()
+            gaps = trimmed["time_gaps"]
+            boundaries = trimmed["time_boundaries"]
+
+        if gap_on:
+            for gap_start, gap_end in gaps:
+                ax.axvspan(gap_start, gap_end, alpha=0.2, color="gray", zorder=0)
+        if boundary_on:
+            for boundary in boundaries:
+                ax.axvline(x=boundary, color="gray", linestyle="-", linewidth=0.8, alpha=0.6, zorder=3)
+
+        ax.plot(xs, cumulative, color=colors[subj_idx], marker="o", markersize=3,
+                label=f"Subject {subjid}")
+
+    ax.set_xlabel("Trial (continuous global_trial_id)" if by_trial else "Time (s)")
+    ax.set_ylabel("Cumulative Hit and Correct Rejection")
+    ax.set_xlim(left=0)
+    ax.set_ylim(bottom=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.legend()
+    fig.tight_layout()
+
+    if save:
+        if isinstance(dates, dict):
+            save_dates = []
+            for v in dates.values():
+                if isinstance(v, (list, tuple)):
+                    save_dates.extend(v)
+                elif v is not None:
+                    save_dates.append(v)
+        else:
+            save_dates = dates
+        save_name = "cumulative_hit_cr_by_trial" if by_trial else "cumulative_hit_cr"
+        try:
+            out_path = save_figure(fig, save_name,
+                                   subjids=list(subjids) if isinstance(subjids, (list, tuple)) else [subjids],
+                                   dates=save_dates)
+            if verbose:
+                print(f"[{save_name}] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[{save_name}] Failed to save figure: {exc}")
+
+    plt.show()
+    return fig, ax
+
+
+def plot_cumulative_hit_cr(
+    subjids,
+    dates=None,
+    *,
+    save=False,
+    verbose=True,
+    show_gap_shading=True,
+    show_session_boundaries=True,
+    figsize=(12, 6.5),
+):
+    """Cumulative Hit + Correct Rejection vs continuous time.
+
+    Steps up by 1 on each trial in the broad HIT or CORRECT REJECTION category
+    and stays flat on MISS / FALSE ALARM (and premature / uncategorized). The X
+    axis is continuous time with collapsed inter-session gaps (like
+    ``plot_cumulative_rewards``); it starts at 0 at the first trial of the first
+    session that contains single-reward data.
+
+    ``subjids`` may be a ``{subjid: date_range}`` dict (pass with ``dates=None``).
+    ``show_gap_shading`` / ``show_session_boundaries`` apply to a single subject
+    only. Returns ``(fig, ax)``.
+    """
+    return _plot_cumulative_hit_cr(
+        subjids, dates, by_trial=False, save=save, verbose=verbose,
+        show_gap_shading=show_gap_shading, show_session_boundaries=show_session_boundaries,
+        figsize=figsize,
+    )
+
+
+def plot_cumulative_hit_cr_by_trial(
+    subjids,
+    dates=None,
+    *,
+    save=False,
+    verbose=True,
+    show_gap_shading=True,
+    show_session_boundaries=True,
+    figsize=(12, 6.5),
+):
+    """Cumulative Hit + Correct Rejection vs continuous trial index.
+
+    Identical to ``plot_cumulative_hit_cr`` except the X axis is the continuous
+    ``global_trial_id`` (concatenated across sessions, like
+    ``plot_cumulative_rewards_by_trial``): every trial advances X by one, and the
+    curve steps up on Hit/CR, flat on Miss/FA. Returns ``(fig, ax)``.
+    """
+    return _plot_cumulative_hit_cr(
+        subjids, dates, by_trial=True, save=save, verbose=verbose,
+        show_gap_shading=show_gap_shading, show_session_boundaries=show_session_boundaries,
+        figsize=figsize,
+    )
