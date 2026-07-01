@@ -16,6 +16,37 @@ def vprint(verbose: bool, *args, **kwargs):
         print(*args, **kwargs)
 
 
+def read_tracking_table(path: Union[str, Path]):
+    """Read a tracking table from .parquet or .csv.
+
+    Parquet preserves dtypes (tz-aware datetimes, nullable ints) natively; CSV keeps
+    the historical utf-8/latin1 fallback.
+    """
+    import pandas as pd
+
+    path = Path(path)
+    if path.suffix == ".parquet":
+        return pd.read_parquet(path)
+    try:
+        return pd.read_csv(path, encoding="utf-8")
+    except UnicodeDecodeError:
+        return pd.read_csv(path, encoding="latin1")
+
+
+def find_tracking_file(results_dir: Path, stem_glob: str) -> Optional[Path]:
+    """Find a tracking file matching ``stem_glob`` (a filename glob WITHOUT extension),
+    preferring .parquet over .csv. Returns None if nothing matches.
+
+    Example: find_tracking_file(results_dir, "*_combined_sleap_tracking_timestamps")
+    """
+    for ext in ("parquet", "csv"):
+        matches = [f for f in sorted(results_dir.glob(f"{stem_glob}.{ext}"))
+                   if not f.name.startswith("._")]
+        if matches:
+            return matches[0]
+    return None
+
+
 def _update_cache(subjid, dates, data, kind):
     """Update cache entries for a subject/date set and kind."""
     global CACHE

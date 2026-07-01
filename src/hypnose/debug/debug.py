@@ -500,9 +500,46 @@ def _normalize_pairs(subjids, dates):
 	return list(product(subj_list, date_list))
 
 
+def _available_session_dates(root: Path, subjid) -> list[str]:
+	"""Return all session date tokens that exist on disk for a subject."""
+	subject_dir = _find_subject_dir(root, subjid)
+	dates = []
+	for session_dir in subject_dir.glob("ses-*_date-*"):
+		match = re.search(r"_date-(\d{8})", session_dir.name)
+		if match:
+			dates.append(match.group(1))
+	return sorted(set(dates))
+
+
+def _expand_date_range(subjid, start, end) -> list[str]:
+	"""Expand an inclusive (start, end) range to the session dates that exist for a subject."""
+	start_token = _normalize_date(start)
+	end_token = _normalize_date(end)
+	if start_token > end_token:
+		start_token, end_token = end_token, start_token
+	available = _available_session_dates(get_derivatives_root(), subjid)
+	return [date for date in available if start_token <= date <= end_token]
+
+
 def check_pre_odor_grace_period(subjids, dates):
-	"""Summarize num_odors across non-aborted trials for one or more sessions."""
-	pairs = _normalize_pairs(subjids, dates)
+	"""Summarize num_odors across non-aborted trials for one or more sessions.
+
+	``dates`` may be a single date, a list of discrete dates, or a 2-tuple
+	``(start, end)`` which is treated as an inclusive date range and expanded
+	to the sessions that exist on disk for each subject.
+	"""
+	if isinstance(dates, tuple) and len(dates) == 2:
+		subj_list = list(subjids) if isinstance(subjids, (list, tuple, set)) else [subjids]
+		pairs = [
+			(subjid, date)
+			for subjid in subj_list
+			for date in _expand_date_range(subjid, dates[0], dates[1])
+		]
+		if not pairs:
+			print(f"No sessions found in range {dates[0]}..{dates[1]} for {subj_list}.")
+			return []
+	else:
+		pairs = _normalize_pairs(subjids, dates)
 	summaries = []
 
 	for subjid, date in sorted(pairs, key=lambda item: (_normalize_subjid(item[0]), _normalize_date(item[1]))):
@@ -520,11 +557,13 @@ def check_pre_odor_grace_period(subjids, dates):
 
 		unique_non_na = [value for value in counts.index.tolist() if pd.notna(value)]
 		if len(set(unique_non_na)) > 1:
-			columns = [col for col in ["trial_id", "initiation_sequence_time", "odor_sequence", "num_odors"] if col in trial_df.columns]
-			sort_cols = [col for col in ["initiation_sequence_time", "trial_id"] if col in trial_df.columns]
-			detail = trial_df.sort_values(sort_cols, kind="stable") if sort_cols else trial_df
-			detail = detail[columns] if columns else trial_df
-			print("Multiple num_odors values detected; trial-level detail:")
+			max_num_odors = max(unique_non_na)
+			below_max = trial_df[trial_df["num_odors"] != max_num_odors].copy()
+			columns = [col for col in ["trial_id", "initiation_sequence_time", "odor_sequence", "num_odors"] if col in below_max.columns]
+			sort_cols = [col for col in ["initiation_sequence_time", "trial_id"] if col in below_max.columns]
+			detail = below_max.sort_values(sort_cols, kind="stable") if sort_cols else below_max
+			detail = detail[columns] if columns else below_max
+			print(f"Multiple num_odors values detected; trials with num_odors != {max_num_odors}:")
 			_print_small_table(detail)
 
 		summaries.append(

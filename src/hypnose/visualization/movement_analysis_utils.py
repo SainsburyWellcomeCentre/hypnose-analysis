@@ -27,6 +27,8 @@ from hypnose.utils.helpers import (
     _get_from_cache,
     _iter_subject_dirs,
     _update_cache,
+    find_tracking_file,
+    read_tracking_table,
 )
 from hypnose.visualization.visualization_utils import (
     _clean_graph,
@@ -118,21 +120,16 @@ def _load_tracking_and_behavior(subjid, date, tracking_source='sleap'):
         raise FileNotFoundError(f"Results directory not found: {results_dir}")
 
     # Find tracking files (SLEAP only)
-    sleap_files = [f for f in results_dir.glob("*_combined_sleap_tracking_timestamps.csv")
-                   if not f.name.startswith("._")]
+    csv_path = find_tracking_file(results_dir, "*_combined_sleap_tracking_timestamps")
 
-    if not sleap_files:
+    if csv_path is None:
         raise FileNotFoundError(
             f"No SLEAP tracking file found in {results_dir}."
         )
 
-    csv_path = sleap_files[0]
     source_used = 'sleap'
 
-    try:
-        tracking = pd.read_csv(csv_path, encoding='utf-8')
-    except UnicodeDecodeError:
-        tracking = pd.read_csv(csv_path, encoding='latin1')
+    tracking = read_tracking_table(csv_path)
 
     tracking['time'] = pd.to_datetime(tracking['time'], errors='coerce')
 
@@ -249,23 +246,17 @@ def plot_movement_trace(subjid, date, smooth_window=10, linewidth=1, alpha=0.5, 
         raise FileNotFoundError(f"Results directory not found: {results_dir}")
     
     # Look for combined tracking file (exclude macOS metadata files)
-    tracking_files = [f for f in results_dir.glob(f"*_combined_tracking_with_timestamps.csv") 
-                    if not f.name.startswith('._')]
-    if not tracking_files:
+    csv_path = find_tracking_file(results_dir, "*_combined_tracking_with_timestamps")
+    if csv_path is None:
         raise FileNotFoundError(
             f"No combined tracking file found in {results_dir}\n"
             f"Run add_timestamps_to_tracking({subjid}, {date}) first to create it."
         )
 
-    csv_path = tracking_files[0]
     print(f"Loading tracking data from: {csv_path.name}")
 
-    # Load the tracking data with encoding handling
-    try:
-        df = pd.read_csv(csv_path, encoding='utf-8')
-    except UnicodeDecodeError:
-        df = pd.read_csv(csv_path, encoding='latin1')
-        print("Note: Used latin1 encoding")
+    # Load the tracking data (parquet or csv, with encoding fallback)
+    df = read_tracking_table(csv_path)
 
     # Extract X and Y coordinates
     x = df['X'].values

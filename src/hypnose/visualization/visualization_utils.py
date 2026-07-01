@@ -22,6 +22,8 @@ from hypnose.utils.helpers import (
     _get_from_cache,
     _iter_subject_dirs,
     _update_cache,
+    find_tracking_file,
+    read_tracking_table,
 )
 from hypnose.io.paths import (
     get_data_root,
@@ -225,20 +227,15 @@ def load_tracking_with_behavior(subjid, date):
             raise FileNotFoundError(f"No session found for date {date_str}")
         session_dir = session_dirs[0]
         results_dir = session_dir / "saved_analysis_results"
-        tracking_files = [f for f in results_dir.glob(f"*_combined_tracking_with_timestamps.csv") 
-                          if not f.name.startswith('._')]
-        if not tracking_files:
+        tracking_file = find_tracking_file(results_dir, "*_combined_tracking_with_timestamps")
+        if tracking_file is None:
             # Fallback to SLEAP combined file
-            tracking_files = [f for f in results_dir.glob(f"*_combined_sleap_tracking_timestamps.csv") 
-                              if not f.name.startswith('._')]
-        if not tracking_files:
+            tracking_file = find_tracking_file(results_dir, "*_combined_sleap_tracking_timestamps")
+        if tracking_file is None:
             raise FileNotFoundError(
                 f"No combined tracking file found. Run add_timestamps_to_tracking({subjid}, {date}) first."
             )
-        try:
-            tracking = pd.read_csv(tracking_files[0], encoding='utf-8')
-        except UnicodeDecodeError:
-            tracking = pd.read_csv(tracking_files[0], encoding='latin1')
+        tracking = read_tracking_table(tracking_file)
         # Normalize coordinate columns
         if 'X' not in tracking.columns and 'centroid_x' in tracking.columns:
             tracking['X'] = tracking['centroid_x']
