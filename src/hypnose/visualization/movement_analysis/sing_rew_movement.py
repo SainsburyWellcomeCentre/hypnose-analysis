@@ -243,16 +243,28 @@ def _resample_trace(x, y, n_points):
 
 def _plot_category(segments, title, *,
                    show_average, linewidth, alpha, n_average_points, figsize, invert_y,
-                   mark_endpoints=False):
+                   mark_endpoints=False, highlight_idx=None):
     """Draw one category/subcategory figure (all its trials overlaid), colored by
     A/B port group. With ``show_average``, a thick mean trace is added per group
     (one for A, one for B, arc-length resampled across all overlaid sessions).
     With ``mark_endpoints`` (single-trial debug mode) the start (cue exit) and end
-    of each trace are marked."""
+    of each trace are marked. With ``highlight_idx`` set (single-trial debug mode),
+    every trial is still drawn but in faint grey, except the trial at that index
+    which is drawn opaque in its group color (A/B) or dimgray ("other")."""
     fig, ax = plt.subplots(figsize=figsize)
-    for seg in segments:
-        ax.plot(seg["x"], seg["y"], color=GROUP_COLORS.get(seg["group"], "lightgray"),
-                alpha=alpha, linewidth=linewidth, zorder=2)
+    for i, seg in enumerate(segments):
+        if highlight_idx is not None and i != highlight_idx:
+            ax.plot(seg["x"], seg["y"], color="lightgray",
+                    alpha=alpha * 0.5, linewidth=linewidth, zorder=1)
+            continue
+        is_highlight = highlight_idx is not None and i == highlight_idx
+        color = ("dimgray" if seg["group"] == "other" else GROUP_COLORS.get(seg["group"], "lightgray")) \
+            if is_highlight else GROUP_COLORS.get(seg["group"], "lightgray")
+        seg_alpha = 1.0 if is_highlight else alpha
+        seg_linewidth = linewidth * 1.5 if is_highlight else linewidth
+        seg_zorder = 4 if is_highlight else 2
+        ax.plot(seg["x"], seg["y"], color=color,
+                alpha=seg_alpha, linewidth=seg_linewidth, zorder=seg_zorder)
         if mark_endpoints and len(seg["x"]):
             ax.scatter([seg["x"][0]], [seg["y"][0]], s=90, facecolor="none",
                        edgecolor="black", linewidths=1.8, zorder=6)
@@ -320,11 +332,11 @@ def plot_category_traces(
     ``dates`` are overlaid in the same figure; ``show_average`` adds a thick mean
     trace per group (one for A, one for B) across all overlaid trials.
 
-    ``trial_number`` (1-indexed) is a debug mode: instead of overlaying all
-    trials, it plots only the Nth trial of each category (or subcategory), marks
-    its start (cue exit) and end, and prints that trial's global_trial_id, date
-    and start/end timestamps so it can be cross-referenced against the annotated
-    video.
+    ``trial_number`` (1-indexed) is a debug mode: all trials of each category (or
+    subcategory) are still drawn, faint and grey, but the Nth trial is highlighted
+    in its group color (A/B) or dimgray ("other"), with its start (cue exit) and
+    end marked. Also prints that trial's global_trial_id, date and start/end
+    timestamps so it can be cross-referenced against the annotated video.
 
     Parameters mirror the other movement plots (``smooth_window`` etc.). Call
     with a single subject.
@@ -382,32 +394,36 @@ def plot_category_traces(
     else:
         plan = [(cat, CATEGORY_TITLES[cat], store[cat]) for cat in CATEGORY_ORDER]
 
-    # Debug mode: keep only the Nth trial (1-indexed) of each figure's list.
+    # Debug mode: highlight the Nth trial (1-indexed) of each figure's list, but
+    # keep every other trial visible (faint grey) for context.
     if trial_number is not None:
         idx = int(trial_number) - 1
         reduced = []
         for key, title, segments in plan:
             if 0 <= idx < len(segments):
                 sel = segments[idx]
-                reduced.append((key, f"{title} — trial #{trial_number}", [sel]))
+                reduced.append((key, f"{title} — trial #{trial_number}", segments, idx))
                 first_t = sel["times"][0] if len(sel["times"]) else None
                 print(f"[plot_category_traces] {title} #{trial_number}: "
                       f"global_trial_id={sel['gid']} date={sel['date']} "
                       f"start(cue exit)={sel['start']} end={sel['end']} "
                       f"first_tracked_frame={first_t} start_xy=({sel['x'][0]:.1f}, {sel['y'][0]:.1f})")
             else:
-                reduced.append((key, f"{title} — trial #{trial_number} (n/a)", []))
+                reduced.append((key, f"{title} — trial #{trial_number} (n/a)", segments, None))
                 print(f"[plot_category_traces] {title}: fewer than {trial_number} trials "
                       f"({len(segments)}); nothing to plot.")
         plan = reduced
+    else:
+        plan = [(key, title, segments, None) for key, title, segments in plan]
 
     figs = []
-    for key, title, segments in plan:
+    for key, title, segments, highlight_idx in plan:
         fig = _plot_category(
             segments, title,
             show_average=show_average, linewidth=linewidth,
             alpha=alpha, n_average_points=n_average_points, figsize=figsize, invert_y=invert_y,
             mark_endpoints=(trial_number is not None),
+            highlight_idx=highlight_idx,
         )
         figs.append(fig)
         if save:
