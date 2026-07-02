@@ -142,24 +142,36 @@ def _naive_dt(value):
 
 
 def _last_poke_out(row):
-    """Time the animal leaves the odor cue port = poke_odor_end of the last
-    presented position (parsed from position_poke_times), with fallbacks."""
+    """Time the animal leaves the odor cue port for the last time before its
+    response = the latest ``poke_odor_end`` across all entries in
+    ``position_poke_times``.
+
+    We take the maximum ``poke_odor_end`` (temporally last) rather than trusting
+    dict/position ordering, so the start is always the final cue-port exit.
+    Falls back only to explicit poke-out fields — never to ``sequence_start`` /
+    ``sequence_end`` (those are the trial start/end, not the cue exit); if no
+    poke-out time is available we return NaT so the trace is skipped rather than
+    started at the wrong place.
+    """
     pts = row.get("position_poke_times")
     if isinstance(pts, str):
         try:
             pts = json.loads(pts)
         except Exception:
             pts = None
-    if isinstance(pts, dict) and pts:
-        vals = list(pts.values())
-        if all(isinstance(v, dict) and "position" in v for v in vals):
-            vals = sorted(vals, key=lambda v: v.get("position", 0))
-        last = vals[-1]
-        if isinstance(last, dict):
-            return _naive_dt(last.get("poke_odor_end"))
-    if isinstance(pts, list) and pts and isinstance(pts[-1], dict):
-        return _naive_dt(pts[-1].get("poke_odor_end"))
-    for cand in ("poke_odor_end", "last_poke_out_time", "last_poke_time", "sequence_end"):
+
+    entries = []
+    if isinstance(pts, dict):
+        entries = [v for v in pts.values() if isinstance(v, dict)]
+    elif isinstance(pts, list):
+        entries = [v for v in pts if isinstance(v, dict)]
+
+    ends = [_naive_dt(v.get("poke_odor_end")) for v in entries]
+    ends = [t for t in ends if pd.notna(t)]
+    if ends:
+        return max(ends)
+
+    for cand in ("last_odor_poke_out", "poke_odor_end", "last_poke_out_time", "last_poke_time"):
         if cand in row and pd.notna(row.get(cand)):
             return _naive_dt(row.get(cand))
     return pd.NaT
