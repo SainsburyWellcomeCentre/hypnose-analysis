@@ -11,7 +11,7 @@ category (Hit / Miss / False Alarm / Correct Rejection):
 Trials are categorised with the same ``_classify_trial`` used by the singrew
 metrics, so categories/subcategories match exactly. With ``plot_subcategories``
 each category is split into its subcategories (one figure each). Traces are
-colored by A/B port group (A=red, B=blue), matching the other movement plots.
+colored by A/B port group (A=red, B=green), matching plot_choice_history.
 Multiple dates are overlaid in one figure per category; ``show_average`` adds a
 thick mean trace per group (one for A, one for B) across all overlaid sessions.
 Intended to be called with a single subject.
@@ -63,12 +63,13 @@ SUBCATEGORY_TITLES = {
     "active_cr": "Active CR",
 }
 
-# Port/last-odor grouping colors, matching the A=red / B=blue scheme used by the
-# other movement_analysis plots. Traces (and per-group means) are colored by the
-# trial's A/B side.
+# Port/last-odor grouping colors, matching the A=red / B=green(teal) scheme used
+# by plot_choice_history. Traces (and per-group means) are colored by the trial's
+# A/B side; trials whose side cannot be determined (e.g. an ambiguous abort) are
+# grey ("other").
 GROUP_ORDER = ["A", "B", "other"]
-GROUP_COLORS = {"A": "red", "B": "blue", "other": "lightgray"}
-GROUP_MEAN_COLORS = {"A": "darkred", "B": "darkblue", "other": "dimgray"}
+GROUP_COLORS = {"A": "#E53935", "B": "#00796B", "other": "lightgray"}
+GROUP_MEAN_COLORS = {"A": "#B71C1C", "B": "#004D40", "other": "dimgray"}
 GROUP_LABELS = {"A": "A", "B": "B", "other": "Other/Unknown"}
 
 
@@ -289,7 +290,7 @@ def plot_category_traces(
     odor cue port to its endpoint (reward-port poke for Hit/FA, next trial
     initiation for Miss/CR). With ``plot_subcategories=True`` each category is
     split into its subcategories (one figure each). Traces are colored by A/B
-    port group (A=red, B=blue): the poked port for Hit/FA, and the would-be
+    port group (A=red, B=green): the poked port for Hit/FA, and the would-be
     reward odor (``determined_final_odor``, else last odor) for Miss/CR. Multiple
     ``dates`` are overlaid in the same figure; ``show_average`` adds a thick mean
     trace per group (one for A, one for B) across all overlaid trials.
