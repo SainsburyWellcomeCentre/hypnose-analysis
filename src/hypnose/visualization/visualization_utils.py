@@ -4287,7 +4287,7 @@ def plot_position_completion_rate(
 
     ax.set_xticks(x_idx_array)
     ax.set_xticklabels([str(p) for p in positions])
-    ax.set_xlabel("Position in Sequence")
+    ax.set_xlabel("Sequence Position")
     ax.set_ylabel("Completion Rate")
     ax.set_xlim(-0.5, len(positions) - 0.5)
     ax.set_ylim(0, 1.05)
@@ -4570,7 +4570,7 @@ def plot_false_alarm_rate_by_position(
 
     ax.set_xticks(x_idx_array)
     ax.set_xticklabels([str(p) for p in positions])
-    ax.set_xlabel("Position in Sequence")
+    ax.set_xlabel("Sequence Position")
     ax.set_ylabel("False Alarm Rate")
     ax.set_xlim(-0.5, len(positions) - 0.5)
     ax.set_ylim(bottom=0, top=1.05)
@@ -4879,7 +4879,7 @@ def plot_poke_duration_by_position(
 
         ax.set_xticks(x_idx_array)
         ax.set_xticklabels([str(p) for p in positions_list])
-        ax.set_xlabel("Position")
+        ax.set_xlabel("Sequence Position")
         ax.set_ylabel("Poke Duration (ms)")
         ax.set_xlim(-0.5, len(positions_list) - 0.5)
         ax.set_ylim(bottom=0)
@@ -5119,6 +5119,15 @@ def plot_decision_accuracy(
     from matplotlib.transforms import offset_copy
     hr_offset = offset_copy(ax.transData, fig=fig, y=2.5, units="points")
 
+    # Per-subject dash phase so overlapping HR (dashed) lines interleave — one
+    # animal's dashes fall in another's gaps — instead of hiding each other
+    # (probe accuracy is often a flat 1.0 for every animal, so they coincide).
+    sorted_ids = sorted(subjids)
+    n_ids = max(len(sorted_ids), 1)
+    dash_on = dash_off = 6
+    dash_period = dash_on + dash_off
+    subj_dash_phase = {s: dash_period * i / n_ids for i, s in enumerate(sorted_ids)}
+
     # Line per animal, aligned so day 1 = first session with data. When HR trials
     # are present, the non-HR accuracy is the solid line and HR accuracy is a
     # dashed line in the same color (NaN days leave gaps).
@@ -5131,8 +5140,9 @@ def plot_decision_accuracy(
         ax.plot(x, main, color=color, linewidth=per_series_lw, alpha=alpha, zorder=2)
         if hr_active:
             hr = np.array(series["hr"], dtype=float)
+            hr_ls = (subj_dash_phase.get(subjid, 0.0), (dash_on, dash_off))
             ax.plot(x, hr, color=color, linewidth=per_series_lw, alpha=alpha,
-                    linestyle="--", marker="o", markersize=4,
+                    linestyle=hr_ls, marker="o", markersize=4,
                     transform=hr_offset, zorder=2.5)
 
     # Group mean at each day index, over whichever animals have data there.
