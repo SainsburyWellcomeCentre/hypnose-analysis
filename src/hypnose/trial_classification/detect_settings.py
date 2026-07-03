@@ -133,6 +133,13 @@ def detect_settings(root):
     schema_settings['sequenceLengthFromDefinition'] = sequence_length_from_def
     schema_settings['sequenceLengthSource'] = sequence_length_source
     schema_settings['sequenceLength'] = sequence_length
+    # Index of the final (last) position of a full sequence. This position is
+    # always the reward position, so it can never be a hidden-rule position (the
+    # classifier drops it from the hidden-rule candidates). Detected here so the
+    # classifier doesn't hardcode a max position.
+    schema_settings['finalPositionIndex'] = (
+        (sequence_length - 1) if isinstance(sequence_length, int) and sequence_length >= 1 else None
+    )
     
     schema_settings['minimumSamplingTime_by_odor'] = minimumSamplingTime_by_odor
     schema_settings['sampleOffsetTime'] = metadata.metadata.sampleOffsetTime

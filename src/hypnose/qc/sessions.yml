@@ -27,3 +27,9 @@ sessions:
   - subjid: "058"
     date: "20260528"
     label: preseq_triples_stage1
+  - subjid: "045"
+    date: "20260203"
+    label: hidden_rule_pos2
+  - subjid: "040"
+    date: "20251124"
+    label: hidden_rule_pos12345_finalpos_bug

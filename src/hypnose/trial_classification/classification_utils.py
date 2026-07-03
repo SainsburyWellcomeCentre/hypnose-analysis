@@ -140,6 +140,23 @@ def _resolve_hidden_rule_from_stage(stage) -> tuple[list[int], str | None]:
     return indices, sequence_name
 
 
+def _drop_final_hidden_rule_index(hidden_rule_indices, schema_settings, is_single_reward):
+    """Remove the final-sequence-position index from hidden-rule candidates.
+
+    The final position of a full sequence is always the reward position, so a
+    rewarded odor appearing there is the normal reward, never a hidden rule. The
+    final position index is detected in ``detect_settings`` (``finalPositionIndex``,
+    == sequenceLength - 1) so it is not hardcoded here. The single-reward protocol
+    is left untouched (its final position is not always rewarded).
+    """
+    if is_single_reward:
+        return list(hidden_rule_indices)
+    final_idx = schema_settings.get('finalPositionIndex')
+    if final_idx is None:
+        return list(hidden_rule_indices)
+    return [idx for idx in hidden_rule_indices if idx != final_idx]
+
+
 def _get_single_reward_info(root) -> tuple[bool, frozenset, frozenset]:
     """Determine whether a session uses the single-reward protocol and list its sequences.
 
@@ -982,6 +999,13 @@ def classify_trials(data, events, trial_counts, odor_map, stage, root, verbose=T
     if single_reward_info is None:
         single_reward_info = _get_single_reward_info(root)
     is_single_reward, rewarded_sequences, all_sequences = single_reward_info
+    # The final position of a full sequence is always the reward position, so it can
+    # never be a hidden-rule position — drop it (single-reward left untouched).
+    hidden_rule_indices = _drop_final_hidden_rule_index(hidden_rule_indices, schema_settings, is_single_reward)
+    hidden_rule_positions = [idx + 1 for idx in hidden_rule_indices]
+    hidden_rule_location = hidden_rule_indices[0] if hidden_rule_indices else None
+    hidden_rule_position = hidden_rule_positions[0] if hidden_rule_positions else None
+    multiple_hidden_rule_locations = len(hidden_rule_positions) > 1
     response_time_ms_window = float(response_time_sec) * 1000.0 if response_time_sec is not None else None
 
     # Aggregators for summary prints (completed trials only)
@@ -2071,6 +2095,8 @@ def analyze_response_times(data, trial_counts, events, odor_map, stage, root, ve
         hidden_rule_indices = _ensure_int_list(inferred_indices)
 
     hidden_rule_indices = sorted({idx for idx in hidden_rule_indices if isinstance(idx, int)})
+    # Final position is always rewarded -> never a hidden-rule position (single-reward untouched).
+    hidden_rule_indices = _drop_final_hidden_rule_index(hidden_rule_indices, schema_settings, is_single_reward)
     hidden_rule_positions = [idx + 1 for idx in hidden_rule_indices]
     hidden_rule_location = hidden_rule_indices[0] if hidden_rule_indices else None
     hidden_rule_position = hidden_rule_positions[0] if hidden_rule_positions else None
@@ -3558,6 +3584,8 @@ def classify_and_analyze_with_response_times(data, events, trial_counts, odor_ma
         hidden_rule_indices = _ensure_int_list(inferred_indices)
 
     hidden_rule_indices = sorted({idx for idx in hidden_rule_indices if isinstance(idx, int)})
+    # Final position is always rewarded -> never a hidden-rule position (single-reward untouched).
+    hidden_rule_indices = _drop_final_hidden_rule_index(hidden_rule_indices, schema_settings, single_reward_info[0])
     hidden_rule_positions = [idx + 1 for idx in hidden_rule_indices]
     hidden_rule_location = hidden_rule_indices[0] if hidden_rule_indices else None
     hidden_rule_pos = hidden_rule_positions[0] if hidden_rule_positions else None
