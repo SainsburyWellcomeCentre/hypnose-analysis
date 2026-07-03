@@ -4336,6 +4336,286 @@ def plot_position_completion_rate(
     return fig, ax
 
 
+def _positions_in_presentations(pres_json):
+    """Return the list of positions present in a trial's ``presentations`` JSON.
+
+    ``presentations`` is a list of per-odor dicts (one per position the animal
+    sampled), so this is every position the trial reached.
+    """
+    data = parse_json_column(pres_json)
+    if not isinstance(data, list):
+        return []
+    out = []
+    for entry in data:
+        if isinstance(entry, dict):
+            pos = entry.get("position")
+            if pos is not None:
+                try:
+                    out.append(int(pos))
+                except (TypeError, ValueError):
+                    pass
+    return out
+
+
+def plot_false_alarm_rate_by_position(
+    subjids,
+    dates=None,
+    positions=(1, 2, 3, 4, 5),
+    fa_label="FA_time_in",
+    figsize=(8, 6.8),
+    title=None,
+    *,
+    save=False,
+    verbose=True,
+    show_title=True,
+    color_by_id=False,
+    avg_per_animal=False,
+):
+    """Per-position false-alarm rate across sessions (dot plot with mean ± SD).
+
+    For each session and each position ``p``:
+    - Reach count = number of trials whose ``presentations`` include position
+      ``p`` (i.e. trials that got to position ``p``, completed or aborted).
+    - FA count = number of aborted trials matching ``fa_label`` whose last
+      sampled position (``last_odor_position``) is ``p``.
+    - FA rate at ``p`` = FA count / reach count.
+
+    Each session yields one rate per requested position; rates are plotted as
+    dots jittered around each x-tick with a black mean line and SD error bars,
+    matching :func:`plot_position_completion_rate`.
+
+    Parameters
+    ----------
+    subjids : int | list[int] | dict
+        Subject id(s). May also be a dict ``{subjid: date_range}`` shorthand.
+    dates : list | tuple | dict | None
+        Dates or per-subject ``{subjid: date_range}`` dict. ``None`` = all sessions.
+    positions : iterable[int]
+        Positions to display on the x-axis.
+    fa_label : str | list[str] | None
+        Which false-alarm label(s) count toward the numerator. Default
+        ``"FA_time_in"``. Accepts a single label or a list. ``None`` counts any
+        false alarm (every aborted trial whose ``fa_label`` is not ``nFA``).
+    figsize : tuple
+    title : str | None
+    save : bool
+    verbose : bool
+    show_title : bool
+        If False, no title is rendered (useful for poster-style figures).
+    color_by_id : bool
+        If True, each animal's dots are colored consistently (shared tab10
+        palette, assigned by ascending id).
+    avg_per_animal : bool
+        If True, no individual dots; each animal's session rates become a small
+        violin per position and the black line shows mean ± SEM across animals.
+
+    Returns
+    -------
+    fig, ax
+    """
+    # Mirror plot_position_completion_rate's input flexibility.
+    if isinstance(subjids, dict):
+        dates = subjids if not isinstance(dates, dict) or dates is None else dates
+        subjids = list(subjids.keys())
+    elif isinstance(subjids, set):
+        subjids = sorted(subjids)
+    elif not isinstance(subjids, (list, tuple)):
+        subjids = [subjids]
+
+    def _dates_for(subjid):
+        if not isinstance(dates, dict):
+            return dates
+        if subjid in dates:
+            return dates[subjid]
+        try:
+            int_key = int(subjid)
+            if int_key in dates:
+                return dates[int_key]
+        except (TypeError, ValueError):
+            pass
+        str_key = str(subjid)
+        if str_key in dates:
+            return dates[str_key]
+        return None
+
+    # Normalize fa_label into a lowercase set (or None = any non-nFA).
+    if fa_label is None:
+        fa_set = None
+    elif isinstance(fa_label, (list, tuple, set)):
+        fa_set = {str(s).strip().lower() for s in fa_label}
+    else:
+        fa_set = {str(fa_label).strip().lower()}
+
+    derivatives_dir = get_derivatives_root()
+    positions = list(positions)
+    rates_per_position: dict[int, list[float]] = {p: [] for p in positions}
+    subj_per_position: dict[int, list] = {p: [] for p in positions}
+
+    for subjid in subjids:
+        subj_dates = _dates_for(subjid)
+        if isinstance(dates, dict) and subj_dates is None:
+            print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
+            continue
+
+        subj_str = f"sub-{str(subjid).zfill(3)}"
+        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+        if not subj_dirs:
+            if verbose:
+                print(f"Warning: No subject directory found for {subj_str}")
+            continue
+        subj_dir = subj_dirs[0]
+
+        ses_dirs = _filter_session_dirs(subj_dir, subj_dates)
+        for ses_dir in ses_dirs:
+            results_dir = ses_dir / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            views = _load_trial_views(results_dir)
+            td = views["trial_data"]
+            if td.empty or "presentations" not in td.columns:
+                continue
+
+            reach_counts: dict[int, int] = {p: 0 for p in positions}
+            fa_counts: dict[int, int] = {p: 0 for p in positions}
+
+            # Denominator: every position each trial reached.
+            for pres in td["presentations"]:
+                for p in set(_positions_in_presentations(pres)):
+                    if p in reach_counts:
+                        reach_counts[p] += 1
+
+            # Numerator: FA-aborts, counted at their last sampled position.
+            aborted = views["aborted"]
+            if not aborted.empty and "fa_label" in aborted.columns and "last_odor_position" in aborted.columns:
+                fa_lc = aborted["fa_label"].astype(str).str.lower()
+                if fa_set is None:
+                    fa_mask = fa_lc.ne("nfa") & aborted["fa_label"].notna()
+                else:
+                    fa_mask = fa_lc.isin(fa_set)
+                fa_pos = pd.to_numeric(aborted.loc[fa_mask, "last_odor_position"], errors="coerce").dropna().astype(int)
+                for p in fa_pos:
+                    if p in fa_counts:
+                        fa_counts[p] += 1
+
+            for p in positions:
+                denom = reach_counts[p]
+                if denom == 0:
+                    continue
+                rates_per_position[p].append(fa_counts[p] / denom)
+                subj_per_position[p].append(subjid)
+
+    fig, ax = plt.subplots(figsize=figsize)
+    rng = np.random.default_rng(0)
+    x_idx_array = np.arange(len(positions))
+    halfwidth = 0.25  # horizontal extent of both mean line and dot jitter
+
+    # Per-subject color map (shared palette with plot_cumulative_rewards).
+    # Sorted by ascending id so the same subject keeps its color across plots.
+    subj_colors = {s: plt.cm.tab10(i % 10) for i, s in enumerate(sorted(subjids))}
+
+    for x_idx, p in enumerate(positions):
+        rates = np.array(rates_per_position[p], dtype=float)
+        if rates.size == 0:
+            continue
+        subj_ids = subj_per_position[p]
+
+        if avg_per_animal:
+            # One violin per animal (distribution of that animal's session
+            # rates), spread horizontally within the position slot.
+            per_animal: dict = {}
+            for s, r in zip(subj_ids, rates):
+                per_animal.setdefault(s, []).append(r)
+            subj_order = [s for s in subjids if s in per_animal]
+            n = len(subj_order)
+            offsets = np.linspace(-halfwidth, halfwidth, n) if n > 1 else np.array([0.0])
+            vwidth = (2 * halfwidth / max(n, 1)) * 0.8
+
+            for subj, off in zip(subj_order, offsets):
+                vals = np.array(per_animal[subj], dtype=float)
+                color = subj_colors[subj] if color_by_id else "tab:blue"
+                if vals.size >= 2:
+                    parts = ax.violinplot([vals], positions=[x_idx + off],
+                                          widths=vwidth, showextrema=False)
+                    for body in parts["bodies"]:
+                        body.set_facecolor(color)
+                        body.set_edgecolor(color)
+                        body.set_alpha(0.2)
+                else:
+                    # A single session can't form a violin; mark the point.
+                    ax.scatter([x_idx + off], vals, color=color, alpha=0.7,
+                               s=40, edgecolors="none", zorder=2)
+
+            # Mean ± SEM across animals (each animal = mean of its session rates).
+            animal_means = np.array([np.mean(per_animal[s]) for s in subj_order], dtype=float)
+            mean = float(animal_means.mean())
+            err = (float(animal_means.std(ddof=1) / np.sqrt(animal_means.size))
+                   if animal_means.size > 1 else 0.0)
+        else:
+            jitter = rng.uniform(-halfwidth, halfwidth, size=rates.size)
+            xs = np.full_like(jitter, x_idx) + jitter
+            if color_by_id:
+                pt_colors = [subj_colors[s] for s in subj_ids]
+                ax.scatter(xs, rates, c=pt_colors, alpha=0.7, s=40,
+                           edgecolors="none", zorder=2)
+            else:
+                ax.scatter(xs, rates, color="tab:blue", alpha=0.55, s=40,
+                           edgecolors="none", zorder=2)
+            mean = float(rates.mean())
+            err = float(rates.std(ddof=1)) if rates.size > 1 else 0.0
+
+        ax.hlines(mean, x_idx - halfwidth, x_idx + halfwidth,
+                  colors="black", linewidth=2.0, zorder=3)
+        ax.errorbar(x_idx, mean, yerr=err, color="black", linewidth=1.5,
+                    capsize=6, capthick=1.5, fmt="none", zorder=3)
+
+    ax.set_xticks(x_idx_array)
+    ax.set_xticklabels([str(p) for p in positions])
+    ax.set_xlabel("Position in Sequence")
+    ax.set_ylabel("False Alarm Rate")
+    ax.set_xlim(-0.5, len(positions) - 0.5)
+    ax.set_ylim(bottom=0, top=1.05)
+
+    if color_by_id:
+        present = [s for s in subjids if any(s in subj_per_position[p] for p in positions)]
+        handles = [
+            Line2D([0], [0], marker="o", linestyle="none", color=subj_colors[s],
+                   label=f"Sub {str(s).zfill(3)}")
+            for s in present
+        ]
+        if handles:
+            ax.legend(handles=handles, title="Subject", loc="best")
+
+    if show_title:
+        ax.set_title(title if title else "False Alarm Rate by Position")
+
+    fig.tight_layout(pad=1.5)
+
+    if save:
+        try:
+            if isinstance(dates, dict):
+                save_dates = []
+                for v in dates.values():
+                    if isinstance(v, (list, tuple)):
+                        save_dates.extend(v)
+                    elif v is not None:
+                        save_dates.append(v)
+            else:
+                save_dates = dates
+            out_path = save_figure(
+                fig, "false_alarm_rate_by_position",
+                subjids=list(subjids), dates=save_dates,
+                boxplot=True,
+            )
+            if verbose:
+                print(f"[plot_false_alarm_rate_by_position] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_false_alarm_rate_by_position] Failed to save figure: {exc}")
+
+    plt.show()
+    return fig, ax
+
+
 def _extract_completed_position_poke_times(json_str):
     """Return list of (position, poke_ms) tuples from a completed trial's
     ``position_poke_times`` JSON (dict of ``{position: {poke_time_ms, ...}}``)."""
@@ -4663,15 +4943,24 @@ def plot_decision_accuracy(
 ):
     """Decision accuracy over training days, per animal + group mean.
 
-    Each animal is drawn as a thin grey line: its per-session ``decision_accuracy``
-    (read from ``metrics_{subjid}_{date}.json``, same source as
-    :func:`plot_behavior_metrics`) plotted against day index. Day 1 is each
-    animal's first session with data, so animals are aligned by training day
-    rather than calendar date. No individual points are drawn — just the lines.
+    Each animal is drawn as a thin grey line: its per-session decision accuracy
+    (rewarded / (rewarded + unrewarded), same as the ``decision_accuracy`` metric,
+    computed here from ``trial_data``) plotted against day index. Day 1 is each
+    animal's first session with an A/B decision, so animals are aligned by
+    training day rather than calendar date. No individual points are drawn — just
+    the lines.
 
     A thicker black line shows the mean across animals at each day index. At a
     given day the mean uses only the animals that have data there, so as animals
     run out of sessions the mean is averaged over fewer of them.
+
+    Hidden-rule split: if any session in the input contains hidden-rule trials
+    (``hidden_rule_success == True``), decision accuracy is computed separately
+    for non-HR and HR trials. The non-HR accuracy is drawn as the usual solid
+    line; the HR accuracy is drawn as a dashed line in the same per-animal color
+    (present only on days that have HR trials). The group mean is likewise split
+    into a solid (non-HR) and dashed (HR) black line. If no session has HR trials,
+    behavior is unchanged (single solid line = overall accuracy).
 
     Parameters
     ----------
@@ -4750,9 +5039,25 @@ def plot_decision_accuracy(
 
     derivatives_dir = get_derivatives_root()
 
-    # Per-animal ordered list of per-session decision accuracies (day 1 = first
-    # session with data).
+    def _hr_mask(td):
+        """Boolean mask of hidden-rule trials (hidden_rule_success truthy)."""
+        if "hidden_rule_success" not in td.columns:
+            return pd.Series(False, index=td.index)
+        return td["hidden_rule_success"].astype(str).str.lower().isin(["true", "1", "1.0"])
+
+    def _decision_acc(td, mask):
+        """rewarded / (rewarded + unrewarded) among the masked trials (as in the
+        decision_accuracy metric)."""
+        rtc = td["response_time_category"].astype(str)
+        r = int(((rtc == "rewarded") & mask).sum())
+        u = int(((rtc == "unrewarded") & mask).sum())
+        return (r / (r + u)) if (r + u) > 0 else np.nan
+
+    # Per-animal, day-aligned accuracy for non-HR ("main") and HR trials (day 1 =
+    # first session with an A/B decision). HR splitting only matters if any
+    # session actually has hidden-rule trials (hr_active).
     per_animal_series: dict = {}
+    hr_active = False
     for subjid in subjids:
         subj_dates = _dates_for(subjid)
         if isinstance(dates, dict) and subj_dates is None:
@@ -4773,21 +5078,27 @@ def plot_decision_accuracy(
             continue
         subj_dir = subj_dirs[0]
 
-        values = []
+        main_vals, hr_vals = [], []
         for ses in _filter_session_dirs(subj_dir, subj_dates):
-            date_str = ses.name.split("_date-")[-1]
             results_dir = ses / "saved_analysis_results"
             if not results_dir.exists():
                 continue
-            metrics = _ensure_metrics_json(subjid, date_str, results_dir, compute_if_missing=False)
-            if metrics is None:
+            td = _load_trial_views(results_dir)["trial_data"]
+            if td.empty or "response_time_category" not in td.columns:
                 continue
-            val = _extract_metric_value(metrics, "decision_accuracy")
-            if isinstance(val, (int, float)) and not np.isnan(val):
-                values.append(float(val))
+            hr = _hr_mask(td)
+            non_hr_acc = _decision_acc(td, ~hr)
+            hr_acc = _decision_acc(td, hr)
+            # A session counts as a "day" only if it has an A/B decision.
+            if np.isnan(non_hr_acc) and np.isnan(hr_acc):
+                continue
+            main_vals.append(non_hr_acc)
+            hr_vals.append(hr_acc)
+            if not np.isnan(hr_acc):
+                hr_active = True
 
-        if values:
-            per_animal_series[int(subjid)] = values
+        if main_vals:
+            per_animal_series[int(subjid)] = {"main": main_vals, "hr": hr_vals}
 
     if not per_animal_series:
         print("No data found")
@@ -4802,24 +5113,46 @@ def plot_decision_accuracy(
     # Line widths shared with plot_behavior_metrics.
     per_series_lw, mean_lw = _series_line_widths(mean)
 
-    # Line per animal, aligned so day 1 = first session with data.
-    max_days = max(len(v) for v in per_animal_series.values())
-    for subjid, values in per_animal_series.items():
-        x = np.arange(1, len(values) + 1)
-        if color_by_id:
-            ax.plot(x, values, color=subj_colors[subjid], linewidth=per_series_lw, alpha=0.7, zorder=2)
-        else:
-            ax.plot(x, values, color="grey", linewidth=per_series_lw, alpha=0.6, zorder=2)
+    # HR (dashed) lines are nudged up ~2.5 points and get small markers so they
+    # stay visible when they exactly overlap the non-HR line, and so isolated HR
+    # days (a gap on either side) still show up as a point.
+    from matplotlib.transforms import offset_copy
+    hr_offset = offset_copy(ax.transData, fig=fig, y=2.5, units="points")
+
+    # Line per animal, aligned so day 1 = first session with data. When HR trials
+    # are present, the non-HR accuracy is the solid line and HR accuracy is a
+    # dashed line in the same color (NaN days leave gaps).
+    max_days = max(len(v["main"]) for v in per_animal_series.values())
+    for subjid, series in per_animal_series.items():
+        color = subj_colors[subjid] if color_by_id else "grey"
+        alpha = 0.7 if color_by_id else 0.6
+        main = np.array(series["main"], dtype=float)
+        x = np.arange(1, len(main) + 1)
+        ax.plot(x, main, color=color, linewidth=per_series_lw, alpha=alpha, zorder=2)
+        if hr_active:
+            hr = np.array(series["hr"], dtype=float)
+            ax.plot(x, hr, color=color, linewidth=per_series_lw, alpha=alpha,
+                    linestyle="--", marker="o", markersize=4,
+                    transform=hr_offset, zorder=2.5)
 
     # Group mean at each day index, over whichever animals have data there.
     if mean:
-        mean_x, mean_y = [], []
-        for day in range(1, max_days + 1):
-            day_vals = [v[day - 1] for v in per_animal_series.values() if len(v) >= day]
-            if day_vals:
-                mean_x.append(day)
-                mean_y.append(float(np.mean(day_vals)))
-        ax.plot(mean_x, mean_y, color="black", linewidth=mean_lw, zorder=3)
+        def _day_mean(key):
+            mx, my = [], []
+            for day in range(1, max_days + 1):
+                vals = [s[key][day - 1] for s in per_animal_series.values()
+                        if len(s[key]) >= day and not np.isnan(s[key][day - 1])]
+                if vals:
+                    mx.append(day)
+                    my.append(float(np.mean(vals)))
+            return mx, my
+
+        mx, my = _day_mean("main")
+        ax.plot(mx, my, color="black", linewidth=mean_lw, zorder=3)
+        if hr_active:
+            hx, hy = _day_mean("hr")
+            ax.plot(hx, hy, color="black", linewidth=mean_lw, linestyle="--",
+                    marker="o", markersize=5, transform=hr_offset, zorder=3.5)
 
     ax.set_xlabel("Days")
     ax.set_ylabel("Decision Accuracy")
@@ -4830,13 +5163,25 @@ def plot_decision_accuracy(
     from matplotlib.ticker import MaxNLocator
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
+    subj_leg = None
     if color_by_id:
         handles = [
             Line2D([0], [0], color=subj_colors[s], linewidth=1.5, label=f"Sub {str(s).zfill(3)}")
             for s in sorted(per_animal_series.keys())
         ]
         if handles:
-            ax.legend(handles=handles, title="Subject", loc="best")
+            subj_leg = ax.legend(handles=handles, title="Subject", loc="best")
+
+    if hr_active:
+        # Solid = non-HR, dashed = HR. Keep the subject legend too, if present.
+        if subj_leg is not None:
+            ax.add_artist(subj_leg)
+        style_handles = [
+            Line2D([0], [0], color="black", linestyle="-", linewidth=2.0, label="Non-HR"),
+            Line2D([0], [0], color="black", linestyle="--", linewidth=2.0,
+                   marker="o", markersize=5, label="HR"),
+        ]
+        ax.legend(handles=style_handles, title="Trial type", loc="lower right")
 
     if show_title:
         ax.set_title(title if title else "Decision Accuracy over Days")
