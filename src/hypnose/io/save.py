@@ -163,9 +163,89 @@ def poster_style() -> dict:
     }
 
 
+# Distinctive rcParam values that identify the presentations style at save time
+# (used so the y-tick cap works no matter how the style was applied — via
+# use_presentations_style() OR a bare mpl.rcParams.update(presentations_style())).
+_PRES_AXES_LABELSIZE = 24
+_PRES_TICK_LABELSIZE = 18
+_PRES_AXES_LINEWIDTH = 2.0
+# Boxplot-style figures get even bigger x-tick labels (the category positions
+# are the most important thing to read). Applied by save_figure(boxplot=True).
+_PRES_XTICK_BOXPLOT_LABELSIZE = 28
+
+# Number of y-ticks the presentations style caps to (no rcParam exists for tick
+# count, so save_figure enforces it per-axes). Configurable via
+# use_presentations_style(max_yticks=...).
+_PRESENTATION_MAX_YTICKS = 4
+
+
+def presentations_style() -> dict:
+    """Return rcParams dict for 'presentations' figures (projector-friendly).
+
+    Same as nature_style(), but tuned for readability on a big projector:
+    - bigger, bold tick labels (x and y)
+    - bigger, bold axis labels
+    - thicker axis lines and ticks
+
+    The y-axis tick count is also capped (default 4). That has no rcParam
+    equivalent, so it is enforced per-axes by save_figure whenever this style is
+    active — detected from the rcParams below — so both
+    ``mpl.rcParams.update(presentations_style())`` and
+    ``use_presentations_style()`` get the cap.
+    """
+    style = nature_style()
+    style.update({
+        # Bold fonts throughout. There is no per-tick weight rcParam, so bolding
+        # the global font weight is what makes tick labels bold.
+        "font.weight": "bold",
+
+        # Axis labels: bigger + bold
+        "axes.labelsize": _PRES_AXES_LABELSIZE,
+        "axes.labelweight": "bold",
+
+        # Tick labels: bigger (bold comes from font.weight above)
+        "xtick.labelsize": _PRES_TICK_LABELSIZE,
+        "ytick.labelsize": _PRES_TICK_LABELSIZE,
+
+        # Thicker axis lines and ticks
+        "axes.linewidth": _PRES_AXES_LINEWIDTH,
+        "xtick.major.width": 2.0,
+        "ytick.major.width": 2.0,
+        "xtick.major.size": 8,
+        "ytick.major.size": 8,
+    })
+    return style
+
+
+def _presentations_active() -> bool:
+    """True when the presentations style is the active matplotlib style."""
+    try:
+        return (
+            float(mpl.rcParams.get("axes.labelsize", 0)) == float(_PRES_AXES_LABELSIZE)
+            and float(mpl.rcParams.get("xtick.labelsize", 0)) == float(_PRES_TICK_LABELSIZE)
+            and float(mpl.rcParams.get("axes.linewidth", 0)) == float(_PRES_AXES_LINEWIDTH)
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def use_presentations_style(max_yticks: int = 4) -> None:
+    """Activate the presentations style globally and set the y-tick cap.
+
+    Call once (e.g. at the top of a notebook), analogous to
+    ``mpl.rcParams.update(poster_style())``. Applying the style via a bare
+    ``mpl.rcParams.update(presentations_style())`` also works — save_figure
+    detects the active style and still caps y-ticks (to 4).
+    """
+    global _PRESENTATION_MAX_YTICKS
+    _PRESENTATION_MAX_YTICKS = max_yticks
+    mpl.rcParams.update(presentations_style())
+
+
 # Apply the default (nature) style globally so display and saved figures match.
-# To switch to poster style for a notebook, call:
+# To switch styles for a notebook, call one of:
 #     mpl.rcParams.update(poster_style())
+#     use_presentations_style()          # presentations (also caps y-ticks)
 mpl.rcParams.update(nature_style())
 
 mpl.rcParams["pdf.fonttype"] = 42
@@ -306,6 +386,7 @@ def save_figure(
     dpi: int = 600,
     bbox_inches=None,
     clear_legends: bool = False,
+    boxplot: bool = False,
 ):
     """Save a matplotlib figure as PDF into a location derived from subject/session scope.
 
@@ -324,6 +405,10 @@ def save_figure(
         the folder is created automatically (e.g., "movement_figures").
     dpi : int
         Dots per inch passed to savefig (default 300).
+    boxplot : bool
+        Mark this figure as a boxplot-style plot (categorical x positions). Under
+        the presentations style, its x-tick labels are enlarged beyond the y-ticks
+        since the positions are the most important thing to read.
     """
 
     if fig is None:
@@ -351,6 +436,21 @@ def save_figure(
 
     if clear_legends:
         strip_legends(fig)
+
+    # Presentations style: cap y-ticks to a few round values (no rcParam for
+    # this), and, for boxplot-style figures, enlarge the x-tick labels.
+    if _presentations_active():
+        from matplotlib.ticker import MaxNLocator
+        for _ax in fig.axes:
+            if _PRESENTATION_MAX_YTICKS:
+                # nbins is a MAX; the "nice" steps prefer round values (0, 0.5,
+                # 1.0 rather than 0, 0.3, 0.6, 0.9), so fewer ticks are fine.
+                _ax.yaxis.set_major_locator(
+                    MaxNLocator(nbins=_PRESENTATION_MAX_YTICKS, steps=[1, 2, 2.5, 5, 10])
+                )
+            if boxplot:
+                _ax.tick_params(axis="x", labelsize=_PRES_XTICK_BOXPLOT_LABELSIZE)
+            _ax.figure.canvas.draw_idle()
 
     bbox = bbox_inches if bbox_inches is not None else "tight"
     fig.savefig(out_path, bbox_inches=bbox, dpi=dpi)

@@ -7,6 +7,7 @@ from matplotlib.lines import Line2D
 from matplotlib import cm
 from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
+from matplotlib.ticker import MaxNLocator
 from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
 from hypnose.metric_analysis.metrics_utils import (
@@ -343,6 +344,22 @@ def _ensure_metrics_json(subjid: int, date: Union[int, str], results_dir: Path, 
 
 # =========================================================== Metrics Plotting Functions =============================================================================
 
+def _series_line_widths(show_mean: bool):
+    """Shared per-line / mean-line widths so line-style plots (e.g.
+    :func:`plot_behavior_metrics`, :func:`plot_decision_accuracy`) render with
+    matching thickness.
+
+    Returns ``(per_series_lw, mean_lw)``. When ``show_mean`` is True the
+    individual lines are thinner and a thick mean line sits on top; when False
+    there is no mean line and the individual lines are drawn thicker (a bit
+    thicker than the with-mean group line). ``mean_lw`` is ``None`` when
+    ``show_mean`` is False.
+    """
+    if show_mean:
+        return 2.0, 4.0
+    return 3.5, None
+
+
 def plot_behavior_metrics(
     subjids: Optional[Iterable[int]] = None,
     dates: Optional[Union[Iterable[Union[int, str]], tuple]] = None,
@@ -354,11 +371,11 @@ def plot_behavior_metrics(
     black_white: bool = False,
     y_range: Optional[Tuple[float, float]] = None,
     plot_HR_separately: bool = False,
+    mean: bool = False,
     show_title: bool = True,
     show_legend: bool = True,
     y_title: Optional[str] = None,
     lw_scale: float = 1.0,
-    marker_scale: float = 1.0,
     save: bool = False,
     return_paths: bool = False,
 ):
@@ -386,14 +403,15 @@ def plot_behavior_metrics(
     - verbose: If True, print progress and warnings.
     - y_range: Optional tuple (ymin, ymax); if provided, sets y-limits for each plot.
     - plot_HR_separately: If True and plotting hidden_rule_detection_rate, also plot per-HR-odor detection alongside total.
+    - mean: If True, overlay a thick line showing the mean across subjects at each
+        session index (per series). Individual lines are drawn thinner; line
+        widths match plot_decision_accuracy via _series_line_widths.
     - show_title: If False, no plot title is rendered (useful for poster-style figures).
     - show_legend: If False, the subject / protocol / series legends are skipped.
     - y_title: If provided, overrides the default y-axis label (derived from the
         variable name); if None, the variable name is used as before.
     - lw_scale: Multiplier applied to every line width (per-series values keep
         their relative ratios). Default 1.0; use e.g. 3.0 for poster figures.
-    - marker_scale: Multiplier applied to scatter point size and legend marker
-        size. Default 1.0.
     - save: If True, save each figure as PDF via save_figure using subjids/dates to resolve the folder.
     - return_paths: If True and save=True, return (figs, paths); otherwise return figs.
 
@@ -599,6 +617,9 @@ def plot_behavior_metrics(
             series_to_ls = {s: "-" for s in series_values}
             series_to_lw = {s: (2.5 if s == "Total" else 1.5) for s in series_values}
 
+        # Line widths (shared with plot_decision_accuracy). Lines only, no dots.
+        per_series_lw, mean_lw = _series_line_widths(mean)
+
         # Plot each series per subject
         for series in series_values:
             df_series = df_var[df_var.get("series", "Total") == series]
@@ -606,24 +627,18 @@ def plot_behavior_metrics(
                 dsub = df_series[df_series["subjid"] == sid].sort_values("session_num")
                 if dsub.empty:
                     continue
-                if subject_colored_mode:
-                    color = subj_to_color[sid]
-                    marker = 'o'
-                else:
-                    color = series_to_color.get(series, "black")
-                    marker = subj_to_marker[sid]
+                color = subj_to_color[sid] if subject_colored_mode else series_to_color.get(series, "black")
                 ls = series_to_ls.get(series, "-")
-                lw = series_to_lw.get(series, 1.0)
-                ax.plot(dsub["session_num"], dsub["value"], color=color, linestyle=ls, linewidth=lw * lw_scale, alpha=0.8, zorder=1)
-                ax.scatter(
-                    dsub["session_num"], dsub["value"],
-                    c=[color] * len(dsub),
-                    marker=marker,
-                    edgecolors="black",
-                    linewidths=0.5,
-                    s=40 * marker_scale,
-                    zorder=2,
-                )
+                ax.plot(dsub["session_num"], dsub["value"], color=color, linestyle=ls,
+                        linewidth=per_series_lw * lw_scale, alpha=0.8, zorder=1)
+
+            # Mean across subjects at each session index (per series).
+            if mean:
+                grp = df_series.groupby("session_num")["value"].mean().sort_index()
+                if not grp.empty:
+                    ax.plot(grp.index, grp.values, color=series_to_color.get(series, "black"),
+                            linestyle=series_to_ls.get(series, "-"),
+                            linewidth=mean_lw * lw_scale, zorder=3)
 
         # X-axis: session numbers with sparse labels
         session_nums = sorted(df_var["session_num"].unique())
@@ -677,7 +692,7 @@ def plot_behavior_metrics(
                        color="black", linestyle="",
                        markerfacecolor=subj_to_color[sid],
                        markeredgecolor="black",
-                       markersize=7 * marker_scale,
+                       markersize=7,
                        label=f"sub-{sid:03d}")
                 for sid in unique_subj
             ]
@@ -688,7 +703,7 @@ def plot_behavior_metrics(
                        color="black", linestyle="",
                        markerfacecolor="white",
                        markeredgecolor="black",
-                       markersize=7 * marker_scale,
+                       markersize=7,
                        label=f"sub-{sid:03d}")
                 for sid in unique_subj
             ]
@@ -708,7 +723,7 @@ def plot_behavior_metrics(
                         linewidth=lw * lw_scale,
                         markerfacecolor='white' if black_white else color,
                         markeredgecolor="black",
-                        markersize=7 * marker_scale,
+                        markersize=7,
                         label=s,
                     )
                 )
@@ -722,7 +737,7 @@ def plot_behavior_metrics(
                        color='none', linestyle="",
                        markerfacecolor=prot_to_color.get(p, (0, 0, 0, 1)),
                        markeredgecolor="black",
-                       markersize=7 * marker_scale,
+                       markersize=7,
                        label=p)
                 for p in unique_protocols
             ]
@@ -4063,6 +4078,8 @@ def plot_position_completion_rate(
     save=False,
     verbose=True,
     show_title=True,
+    color_by_id=False,
+    avg_per_animal=False,
 ):
     """Per-position completion rate across sessions (dot plot with mean ± SD).
 
@@ -4101,6 +4118,16 @@ def plot_position_completion_rate(
     verbose : bool
     show_title : bool
         If False, no title is rendered (useful for poster-style figures).
+    color_by_id : bool
+        If True, each animal's dots are colored consistently using the same
+        per-subject tab10 palette as :func:`plot_cumulative_rewards`.
+    avg_per_animal : bool
+        If True, no individual session dots are drawn. Instead each animal's
+        session rates at a position are shown as a small violin (one violin per
+        animal per position, spread horizontally within the position slot). The
+        black line then shows the mean ± SEM computed across animals (each animal
+        contributing its mean of session rates). Violins are colored by subject
+        when ``color_by_id`` is True.
 
     Returns
     -------
@@ -4134,6 +4161,7 @@ def plot_position_completion_rate(
     derivatives_dir = get_derivatives_root()
     positions = list(positions)
     rates_per_position: dict[int, list[float]] = {p: [] for p in positions}
+    subj_per_position: dict[int, list] = {p: [] for p in positions}
 
     for subjid in subjids:
         subj_dates = _dates_for(subjid)
@@ -4191,26 +4219,70 @@ def plot_position_completion_rate(
                 if denom == 0:
                     continue
                 rates_per_position[p].append(completed_counts[p] / denom)
+                subj_per_position[p].append(subjid)
 
     fig, ax = plt.subplots(figsize=figsize)
     rng = np.random.default_rng(0)
     x_idx_array = np.arange(len(positions))
     halfwidth = 0.25  # horizontal extent of both mean line and dot jitter
 
+    # Per-subject color map (shared palette with plot_cumulative_rewards).
+    # Sorted by ascending id so the same subject keeps its color across plots.
+    subj_colors = {s: plt.cm.tab10(i % 10) for i, s in enumerate(sorted(subjids))}
+
     for x_idx, p in enumerate(positions):
         rates = np.array(rates_per_position[p], dtype=float)
         if rates.size == 0:
             continue
-        jitter = rng.uniform(-halfwidth, halfwidth, size=rates.size)
-        ax.scatter(
-            np.full_like(jitter, x_idx) + jitter, rates,
-            color="tab:blue", alpha=0.55, s=40, edgecolors="none", zorder=2,
-        )
-        mean = float(rates.mean())
-        sd = float(rates.std(ddof=1)) if rates.size > 1 else 0.0
+        subj_ids = subj_per_position[p]
+
+        if avg_per_animal:
+            # One violin per animal (distribution of that animal's session
+            # rates), spread horizontally within the position slot.
+            per_animal: dict = {}
+            for s, r in zip(subj_ids, rates):
+                per_animal.setdefault(s, []).append(r)
+            subj_order = [s for s in subjids if s in per_animal]
+            n = len(subj_order)
+            offsets = np.linspace(-halfwidth, halfwidth, n) if n > 1 else np.array([0.0])
+            vwidth = (2 * halfwidth / max(n, 1)) * 0.8
+
+            for subj, off in zip(subj_order, offsets):
+                vals = np.array(per_animal[subj], dtype=float)
+                color = subj_colors[subj] if color_by_id else "tab:blue"
+                if vals.size >= 2:
+                    parts = ax.violinplot([vals], positions=[x_idx + off],
+                                          widths=vwidth, showextrema=False)
+                    for body in parts["bodies"]:
+                        body.set_facecolor(color)
+                        body.set_edgecolor(color)
+                        body.set_alpha(0.2)
+                else:
+                    # A single session can't form a violin; mark the point.
+                    ax.scatter([x_idx + off], vals, color=color, alpha=0.7,
+                               s=40, edgecolors="none", zorder=2)
+
+            # Mean ± SEM across animals (each animal = mean of its session rates).
+            animal_means = np.array([np.mean(per_animal[s]) for s in subj_order], dtype=float)
+            mean = float(animal_means.mean())
+            err = (float(animal_means.std(ddof=1) / np.sqrt(animal_means.size))
+                   if animal_means.size > 1 else 0.0)
+        else:
+            jitter = rng.uniform(-halfwidth, halfwidth, size=rates.size)
+            xs = np.full_like(jitter, x_idx) + jitter
+            if color_by_id:
+                pt_colors = [subj_colors[s] for s in subj_ids]
+                ax.scatter(xs, rates, c=pt_colors, alpha=0.7, s=40,
+                           edgecolors="none", zorder=2)
+            else:
+                ax.scatter(xs, rates, color="tab:blue", alpha=0.55, s=40,
+                           edgecolors="none", zorder=2)
+            mean = float(rates.mean())
+            err = float(rates.std(ddof=1)) if rates.size > 1 else 0.0
+
         ax.hlines(mean, x_idx - halfwidth, x_idx + halfwidth,
                   colors="black", linewidth=2.0, zorder=3)
-        ax.errorbar(x_idx, mean, yerr=sd, color="black", linewidth=1.5,
+        ax.errorbar(x_idx, mean, yerr=err, color="black", linewidth=1.5,
                     capsize=6, capthick=1.5, fmt="none", zorder=3)
 
     ax.set_xticks(x_idx_array)
@@ -4219,6 +4291,16 @@ def plot_position_completion_rate(
     ax.set_ylabel("Completion Rate")
     ax.set_xlim(-0.5, len(positions) - 0.5)
     ax.set_ylim(0, 1.05)
+
+    if color_by_id:
+        present = [s for s in subjids if any(s in subj_per_position[p] for p in positions)]
+        handles = [
+            Line2D([0], [0], marker="o", linestyle="none", color=subj_colors[s],
+                   label=f"Sub {str(s).zfill(3)}")
+            for s in present
+        ]
+        if handles:
+            ax.legend(handles=handles, title="Subject", loc="best")
 
     if show_title:
         ax.set_title(title if title else "Position Completion Rate by Session")
@@ -4242,12 +4324,545 @@ def plot_position_completion_rate(
             out_path = save_figure(
                 fig, "position_completion_rate",
                 subjids=list(subjids), dates=save_dates,
+                boxplot=True,
             )
             if verbose:
                 print(f"[plot_position_completion_rate] Saved figure to {out_path}")
         except Exception as exc:
             if verbose:
                 print(f"[plot_position_completion_rate] Failed to save figure: {exc}")
+
+    plt.show()
+    return fig, ax
+
+
+def _extract_completed_position_poke_times(json_str):
+    """Return list of (position, poke_ms) tuples from a completed trial's
+    ``position_poke_times`` JSON (dict of ``{position: {poke_time_ms, ...}}``)."""
+    try:
+        data = parse_json_column(json_str)
+        if not isinstance(data, dict):
+            return []
+        results = []
+        for pos_str, info in data.items():
+            if isinstance(info, dict):
+                poke_ms = info.get("poke_time_ms")
+                if isinstance(poke_ms, (int, float)) and poke_ms > 0:
+                    try:
+                        results.append((int(pos_str), float(poke_ms)))
+                    except (ValueError, TypeError):
+                        pass
+        return results
+    except Exception:
+        return []
+
+
+def _extract_aborted_position_poke_times(presentations_str, last_event_idx):
+    """Return list of (position, poke_ms) tuples from an aborted trial's
+    ``presentations`` JSON, excluding the abort event (``last_event_idx``)."""
+    try:
+        pres_list = parse_json_column(presentations_str)
+        if not isinstance(pres_list, list):
+            return []
+        results = []
+        for pres in pres_list:
+            if isinstance(pres, dict):
+                if pres.get("index_in_trial") == last_event_idx:
+                    continue
+                poke_ms = pres.get("poke_time_ms")
+                pos = pres.get("position")
+                if pos is not None and isinstance(poke_ms, (int, float)) and poke_ms > 0:
+                    try:
+                        results.append((int(pos), float(poke_ms)))
+                    except (ValueError, TypeError):
+                        pass
+        return results
+    except Exception:
+        return []
+
+
+def plot_poke_duration_by_position(
+    subjids,
+    dates=None,
+    positions=None,
+    figsize=(8, 6.8),
+    title=None,
+    *,
+    save=False,
+    verbose=True,
+    show_title=True,
+    color_by_id=False,
+    avg_per_animal=False,
+):
+    """Per-position poke (sampling) duration across sessions, split by trial outcome.
+
+    Produces two separate figures ("Completed" and "Aborted"). For every session
+    and every position, the mean poke duration (ms) at that position is computed
+    and contributes one dot to the corresponding figure:
+
+    - Completed trials (``is_aborted == False``): poke durations are read from the
+      ``position_poke_times`` column, keyed by position.
+    - Aborted trials (``is_aborted == True``): poke durations are read from the
+      ``presentations`` column, excluding the abort event; keyed by position.
+
+    Dots are horizontally jittered around each x-tick, with a black mean line and
+    SD error bars — mirroring :func:`plot_position_completion_rate`.
+
+    Parameters
+    ----------
+    subjids : int | list[int] | dict
+        Subject id(s). May also be a dict ``{subjid: date_range}`` as a convenience
+        shorthand — in that case the dict is used as ``dates`` and the subjids are
+        its keys.
+    dates : list | tuple | dict | None
+        Specific dates [YYYYMMDD, ...] or inclusive range (start, end). If a dict,
+        must map ``subjid → date_range`` so each subject can use its own date
+        window. Subjids not present as keys are skipped with a warning.
+        ``None`` = all sessions for every subject.
+    positions : iterable[int] | None
+        Positions to display on the x-axis. ``None`` (default) shows every
+        position present in the data (1 .. max position across any protocol).
+    figsize : tuple
+        Size of each individual figure.
+    title : str | None
+        Title base; the trial outcome ("Completed"/"Aborted") is appended per
+        figure. Only rendered when ``show_title`` is True.
+    save : bool
+    verbose : bool
+    show_title : bool
+        If False, no titles are rendered (useful for poster-style figures).
+    color_by_id : bool
+        If True, each animal's dots are colored consistently using the same
+        per-subject tab10 palette as :func:`plot_cumulative_rewards`.
+    avg_per_animal : bool
+        If True, no individual session dots are drawn. Instead each animal's
+        session means at a position are shown as a small violin (one violin per
+        animal per position, spread horizontally within the position slot). The
+        black line then shows the mean ± SEM computed across animals (each animal
+        contributing its mean of session means). Violins are colored by subject
+        when ``color_by_id`` is True.
+
+    Returns
+    -------
+    fig_completed, ax_completed, fig_aborted, ax_aborted
+    """
+    # Mirror plot_position_completion_rate's input flexibility.
+    if isinstance(subjids, dict):
+        dates = subjids if not isinstance(dates, dict) or dates is None else dates
+        subjids = list(subjids.keys())
+    elif isinstance(subjids, set):
+        subjids = sorted(subjids)
+    elif not isinstance(subjids, (list, tuple)):
+        subjids = [subjids]
+
+    def _dates_for(subjid):
+        if not isinstance(dates, dict):
+            return dates
+        if subjid in dates:
+            return dates[subjid]
+        try:
+            int_key = int(subjid)
+            if int_key in dates:
+                return dates[int_key]
+        except (TypeError, ValueError):
+            pass
+        str_key = str(subjid)
+        if str_key in dates:
+            return dates[str_key]
+        return None
+
+    derivatives_dir = get_derivatives_root()
+
+    # One row per (subject, session, position, trial_type) = session mean poke ms.
+    rows = []
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, subjids):
+        subj_dates = _dates_for(sid)
+        if isinstance(dates, dict) and subj_dates is None:
+            print(f"Warning: No date range provided in dict for subject {sid}, skipping")
+            continue
+
+        ses_dirs = _filter_session_dirs(subj_dir, subj_dates)
+        for ses_dir in ses_dirs:
+            results_dir = ses_dir / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            views = _load_trial_views(results_dir)
+            comp = views["completed"]
+            aborted = views["aborted"]
+
+            comp_pairs = []
+            if not comp.empty and "position_poke_times" in comp.columns:
+                for lst in comp["position_poke_times"].apply(_extract_completed_position_poke_times):
+                    comp_pairs.extend(lst)
+
+            abort_pairs = []
+            if not aborted.empty and "presentations" in aborted.columns:
+                extracted = aborted.apply(
+                    lambda r: _extract_aborted_position_poke_times(
+                        r["presentations"], r.get("last_event_index")
+                    ),
+                    axis=1,
+                )
+                for lst in extracted:
+                    abort_pairs.extend(lst)
+
+            # Collapse each session to one mean per position per trial type.
+            for trial_type, pairs in (("completed", comp_pairs), ("aborted", abort_pairs)):
+                if not pairs:
+                    continue
+                dfp = pd.DataFrame(pairs, columns=["position", "poke_ms"])
+                for pos, grp in dfp.groupby("position"):
+                    rows.append({
+                        "subjid": sid,
+                        "trial_type": trial_type,
+                        "position": int(pos),
+                        "mean_poke_ms": float(grp["poke_ms"].mean()),
+                    })
+
+    if not rows:
+        print("No data found")
+        return None, None, None, None
+
+    if positions is not None:
+        positions_list = [int(p) for p in positions]
+    else:
+        positions_list = sorted({r["position"] for r in rows})
+    pos_to_idx = {p: i for i, p in enumerate(positions_list)}
+    x_idx_array = np.arange(len(positions_list))
+
+    # Per-subject color map (shared palette with plot_cumulative_rewards).
+    # Sorted by ascending id so the same subject keeps its color across plots.
+    subj_colors = {s: plt.cm.tab10(i % 10) for i, s in enumerate(sorted(subjids))}
+
+    rng = np.random.default_rng(0)
+    halfwidth = 0.25
+
+    present = [s for s in subjids if any(r["subjid"] == s for r in rows)]
+
+    def _draw_panel(trial_type, label, base_color):
+        fig, ax = plt.subplots(figsize=figsize)
+        for p in positions_list:
+            pos_rows = [r for r in rows if r["trial_type"] == trial_type and r["position"] == p]
+            if not pos_rows:
+                continue
+            x_idx = pos_to_idx[p]
+
+            if avg_per_animal:
+                # One violin per animal (distribution of that animal's session
+                # means), spread horizontally within the position slot.
+                per_animal = {}
+                for r in pos_rows:
+                    per_animal.setdefault(r["subjid"], []).append(r["mean_poke_ms"])
+                subj_order = [s for s in subjids if s in per_animal]
+                n = len(subj_order)
+                offsets = np.linspace(-halfwidth, halfwidth, n) if n > 1 else np.array([0.0])
+                vwidth = (2 * halfwidth / max(n, 1)) * 0.8
+
+                for subj, off in zip(subj_order, offsets):
+                    vals = np.array(per_animal[subj], dtype=float)
+                    color = subj_colors[subj] if color_by_id else base_color
+                    if vals.size >= 2:
+                        parts = ax.violinplot([vals], positions=[x_idx + off],
+                                              widths=vwidth, showextrema=False)
+                        for body in parts["bodies"]:
+                            body.set_facecolor(color)
+                            body.set_edgecolor(color)
+                            body.set_alpha(0.2)
+                    else:
+                        # A single session can't form a violin; mark the point.
+                        ax.scatter([x_idx + off], vals, color=color, alpha=0.7,
+                                   s=40, edgecolors="none", zorder=2)
+
+                # Mean ± SEM across animals (each animal = mean of its session means).
+                animal_means = np.array([np.mean(per_animal[s]) for s in subj_order], dtype=float)
+                mean = float(animal_means.mean())
+                err = (float(animal_means.std(ddof=1) / np.sqrt(animal_means.size))
+                       if animal_means.size > 1 else 0.0)
+            else:
+                values = np.array([r["mean_poke_ms"] for r in pos_rows], dtype=float)
+                jitter = rng.uniform(-halfwidth, halfwidth, size=values.size)
+                xs = np.full_like(jitter, x_idx) + jitter
+                if color_by_id:
+                    pt_colors = [subj_colors[r["subjid"]] for r in pos_rows]
+                    ax.scatter(xs, values, c=pt_colors, alpha=0.7, s=40,
+                               edgecolors="none", zorder=2)
+                else:
+                    ax.scatter(xs, values, color=base_color, alpha=0.55, s=40,
+                               edgecolors="none", zorder=2)
+                mean = float(values.mean())
+                err = float(values.std(ddof=1)) if values.size > 1 else 0.0
+
+            ax.hlines(mean, x_idx - halfwidth, x_idx + halfwidth,
+                      colors="black", linewidth=2.0, zorder=3)
+            ax.errorbar(x_idx, mean, yerr=err, color="black", linewidth=1.5,
+                        capsize=6, capthick=1.5, fmt="none", zorder=3)
+
+        ax.set_xticks(x_idx_array)
+        ax.set_xticklabels([str(p) for p in positions_list])
+        ax.set_xlabel("Position")
+        ax.set_ylabel("Poke Duration (ms)")
+        ax.set_xlim(-0.5, len(positions_list) - 0.5)
+        ax.set_ylim(bottom=0)
+
+        if color_by_id and present:
+            handles = [
+                Line2D([0], [0], marker="o", linestyle="none", color=subj_colors[s],
+                       label=f"Sub {str(s).zfill(3)}")
+                for s in present
+            ]
+            ax.legend(handles=handles, title="Subject", loc="best")
+
+        if show_title:
+            base = title if title else "Poke Duration by Position"
+            ax.set_title(f"{base} ({label})")
+
+        fig.tight_layout(pad=1.5)
+
+        if save:
+            try:
+                if isinstance(dates, dict):
+                    save_dates = []
+                    for v in dates.values():
+                        if isinstance(v, (list, tuple)):
+                            save_dates.extend(v)
+                        elif v is not None:
+                            save_dates.append(v)
+                else:
+                    save_dates = dates
+                out_path = save_figure(
+                    fig, f"poke_duration_by_position_{trial_type}",
+                    subjids=list(subjids), dates=save_dates,
+                    boxplot=True,
+                )
+                if verbose:
+                    print(f"[plot_poke_duration_by_position] Saved {label} figure to {out_path}")
+            except Exception as exc:
+                if verbose:
+                    print(f"[plot_poke_duration_by_position] Failed to save {label} figure: {exc}")
+
+        return fig, ax
+
+    fig_completed, ax_completed = _draw_panel("completed", "Completed", "steelblue")
+    fig_aborted, ax_aborted = _draw_panel("aborted", "Aborted", "coral")
+
+    plt.show()
+    return fig_completed, ax_completed, fig_aborted, ax_aborted
+
+
+def plot_decision_accuracy(
+    subjids,
+    dates=None,
+    figsize=(10, 7),
+    title=None,
+    *,
+    save=False,
+    verbose=True,
+    show_title=True,
+    color_by_id=False,
+    mean=True,
+):
+    """Decision accuracy over training days, per animal + group mean.
+
+    Each animal is drawn as a thin grey line: its per-session ``decision_accuracy``
+    (read from ``metrics_{subjid}_{date}.json``, same source as
+    :func:`plot_behavior_metrics`) plotted against day index. Day 1 is each
+    animal's first session with data, so animals are aligned by training day
+    rather than calendar date. No individual points are drawn — just the lines.
+
+    A thicker black line shows the mean across animals at each day index. At a
+    given day the mean uses only the animals that have data there, so as animals
+    run out of sessions the mean is averaged over fewer of them.
+
+    Parameters
+    ----------
+    subjids : int | list[int] | dict
+        Subject id(s). May also be a dict ``{subjid: date_range}`` as a
+        convenience shorthand — in that case the dict is used as ``dates`` and the
+        subjids are its keys.
+    dates : list | tuple | dict | None
+        Specific dates [YYYYMMDD, ...] or inclusive range (start, end). If a dict,
+        must map ``subjid → date_range`` so each subject can use its own date
+        window. Subjids not present as keys are skipped with a warning.
+        ``None`` = all sessions for every subject.
+    figsize : tuple
+    title : str | None
+    save : bool
+    verbose : bool
+    show_title : bool
+        If False, no title is rendered (useful for poster-style figures).
+    color_by_id : bool
+        If True, each animal's thin line is colored using the shared per-subject
+        tab10 palette (:func:`plot_cumulative_rewards`). Colors are assigned by
+        ascending subject id, so the same ids keep the same colors across plots.
+    mean : bool
+        If True (default) overlay the thick group-mean line. If False, no mean
+        line is drawn and the per-animal lines are drawn thicker. Line widths are
+        shared with :func:`plot_behavior_metrics` via ``_series_line_widths``.
+
+    Returns
+    -------
+    fig, ax
+    """
+    # Mirror plot_behavior_metrics's input flexibility.
+    if isinstance(subjids, dict):
+        dates = subjids if not isinstance(dates, dict) or dates is None else dates
+        subjids = list(subjids.keys())
+    elif isinstance(dates, dict) and subjids is None:
+        subjids = list(dates.keys())
+    elif isinstance(subjids, set):
+        subjids = sorted(subjids)
+    elif not isinstance(subjids, (list, tuple)):
+        subjids = [subjids]
+
+    def _dates_for(subjid):
+        if not isinstance(dates, dict):
+            return dates
+        if subjid in dates:
+            return dates[subjid]
+        try:
+            int_key = int(subjid)
+            if int_key in dates:
+                return dates[int_key]
+        except (TypeError, ValueError):
+            pass
+        str_key = str(subjid)
+        if str_key in dates:
+            return dates[str_key]
+        return None
+
+    def _dates_ok(date_range):
+        """Reject malformed date tokens (must be 8-digit YYYYMMDD).
+
+        A typo like ``2025118`` (7 digits) or ``202251120`` (9 digits) would
+        otherwise be treated by ``_filter_session_dirs`` as a numeric range
+        endpoint and silently match every real session, so we guard here.
+        """
+        def _ok(tok):
+            s = str(tok)
+            return s.isdigit() and len(s) == 8
+        if date_range is None:
+            return True
+        if isinstance(date_range, tuple):
+            return all(t is None or _ok(t) for t in date_range)
+        if isinstance(date_range, (list, set)):
+            return all(_ok(t) for t in date_range)
+        return _ok(date_range)
+
+    derivatives_dir = get_derivatives_root()
+
+    # Per-animal ordered list of per-session decision accuracies (day 1 = first
+    # session with data).
+    per_animal_series: dict = {}
+    for subjid in subjids:
+        subj_dates = _dates_for(subjid)
+        if isinstance(dates, dict) and subj_dates is None:
+            if verbose:
+                print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
+            continue
+        if not _dates_ok(subj_dates):
+            if verbose:
+                print(f"Warning: subject {subjid} has malformed date(s) {subj_dates!r} "
+                      f"(expected 8-digit YYYYMMDD); skipping")
+            continue
+
+        subj_str = f"sub-{str(subjid).zfill(3)}"
+        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+        if not subj_dirs:
+            if verbose:
+                print(f"Warning: No subject directory found for {subj_str}")
+            continue
+        subj_dir = subj_dirs[0]
+
+        values = []
+        for ses in _filter_session_dirs(subj_dir, subj_dates):
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            metrics = _ensure_metrics_json(subjid, date_str, results_dir, compute_if_missing=False)
+            if metrics is None:
+                continue
+            val = _extract_metric_value(metrics, "decision_accuracy")
+            if isinstance(val, (int, float)) and not np.isnan(val):
+                values.append(float(val))
+
+        if values:
+            per_animal_series[int(subjid)] = values
+
+    if not per_animal_series:
+        print("No data found")
+        return None, None
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # Per-subject color map (shared palette with plot_cumulative_rewards).
+    # Sorted by ascending id so the same subject keeps its color across plots.
+    subj_colors = {s: plt.cm.tab10(i % 10) for i, s in enumerate(sorted(subjids))}
+
+    # Line widths shared with plot_behavior_metrics.
+    per_series_lw, mean_lw = _series_line_widths(mean)
+
+    # Line per animal, aligned so day 1 = first session with data.
+    max_days = max(len(v) for v in per_animal_series.values())
+    for subjid, values in per_animal_series.items():
+        x = np.arange(1, len(values) + 1)
+        if color_by_id:
+            ax.plot(x, values, color=subj_colors[subjid], linewidth=per_series_lw, alpha=0.7, zorder=2)
+        else:
+            ax.plot(x, values, color="grey", linewidth=per_series_lw, alpha=0.6, zorder=2)
+
+    # Group mean at each day index, over whichever animals have data there.
+    if mean:
+        mean_x, mean_y = [], []
+        for day in range(1, max_days + 1):
+            day_vals = [v[day - 1] for v in per_animal_series.values() if len(v) >= day]
+            if day_vals:
+                mean_x.append(day)
+                mean_y.append(float(np.mean(day_vals)))
+        ax.plot(mean_x, mean_y, color="black", linewidth=mean_lw, zorder=3)
+
+    ax.set_xlabel("Days")
+    ax.set_ylabel("Decision Accuracy")
+    ax.set_xlim(0.8, max_days + 0.5)
+    ax.set_ylim(0, 1.05)
+    # Only ever tick whole days (never 1.5, 2.5, ...). Local import so autoreload
+    # picks it up without a kernel restart.
+    from matplotlib.ticker import MaxNLocator
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    if color_by_id:
+        handles = [
+            Line2D([0], [0], color=subj_colors[s], linewidth=1.5, label=f"Sub {str(s).zfill(3)}")
+            for s in sorted(per_animal_series.keys())
+        ]
+        if handles:
+            ax.legend(handles=handles, title="Subject", loc="best")
+
+    if show_title:
+        ax.set_title(title if title else "Decision Accuracy over Days")
+
+    fig.tight_layout(pad=1.5)
+
+    if save:
+        try:
+            if isinstance(dates, dict):
+                save_dates = []
+                for v in dates.values():
+                    if isinstance(v, (list, tuple)):
+                        save_dates.extend(v)
+                    elif v is not None:
+                        save_dates.append(v)
+            else:
+                save_dates = dates
+            out_path = save_figure(
+                fig, "decision_accuracy",
+                subjids=list(subjids), dates=save_dates,
+            )
+            if verbose:
+                print(f"[plot_decision_accuracy] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_decision_accuracy] Failed to save figure: {exc}")
 
     plt.show()
     return fig, ax
