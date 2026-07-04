@@ -781,6 +781,126 @@ def plot_behavior_metrics(
     return figs
 
 
+# ---------------------------------------------------------------------------
+# Shared odor colour scheme (used by hidden_rule_and_false_alarm and
+# plot_poke_duration_by_odor so odors are coloured identically across plots).
+#   A               -> bright red
+#   B               -> teal/green
+#   hidden-rule odor-> a lighter shade of the colour of the reward it is
+#                      associated with (lighter red if it maps to reward A,
+#                      lighter green if it maps to reward B)
+#   any other odor  -> a distinct colour from a fixed palette (blue, yellow,
+#                      orange, ...)
+# The A/B association of each hidden-rule odor is not hard-coded: it is learned
+# from the animal's hidden-rule sessions (conserved across sessions), so new
+# odor sets work without code changes.
+# ---------------------------------------------------------------------------
+_ODOR_A_COLOR = "#E53935"   # bright red
+_ODOR_B_COLOR = "#00796B"   # teal/green
+_HR_A_COLOR = "#EF9A9A"     # lighter red  (HR odor associated with reward A)
+_HR_B_COLOR = "#4DB6AC"     # lighter green (HR odor associated with reward B)
+_OTHER_ODOR_COLORS = [      # distinct colours for non-A/B, non-HR odors
+    "#1E88E5",  # blue
+    "#FDD835",  # yellow
+    "#FB8C00",  # orange
+    "#8E24AA",  # purple
+    "#00ACC1",  # cyan
+    "#6D4C41",  # brown
+]
+# Colours for the pooled series that only plot_poke_duration_by_odor draws.
+_POOLED_SERIES_COLORS = {
+    "AB": "#AE05CF",     # magenta   (A+B pooled)
+    "HR": "#FF0766",     # pink/rose (hidden-rule pair pooled)
+    "OTHER": "#4D4C4B",  # dark grey (remaining odors pooled)
+}
+
+
+def _odor_to_letter(value) -> str:
+    """Normalize a stored odor token ('OdorC' / '"OdorC"' / 'odor c' / 'C') to a
+    bare upper-case letter."""
+    s = str(value).strip().strip('[]"\'').strip()
+    if s.lower().startswith("odor"):
+        s = s[4:].strip()
+    return s.upper()
+
+
+def _hr_odor_associations(subj_dirs) -> dict:
+    """Learn which reward ('A' or 'B') each hidden-rule odor maps to.
+
+    Scans hidden-rule sessions for the given subject directories and, for every
+    hidden-rule *success* trial, reads which HR odor fired (odor_sequence at the
+    success position) and the reward identity it produced
+    (``first_supply_odor_identity``). Votes are accumulated per odor; since the
+    association is conserved for an animal, we stop scanning a subject once all
+    of its HR odors are resolved.
+
+    Returns ``{odor_letter: 'A' | 'B'}`` (empty if no HR sessions found).
+    """
+    votes: dict = defaultdict(lambda: {"A": 0, "B": 0})
+    for subj_dir in subj_dirs:
+        if subj_dir is None:
+            continue
+        for ses in sorted(subj_dir.glob("ses-*_date-*")):
+            results_dir = ses / "saved_analysis_results"
+            summary_path = results_dir / "summary.json"
+            if not summary_path.exists():
+                continue
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    hr_raw = json.load(f).get("params", {}).get("hidden_rule_odors", []) or []
+            except Exception:
+                hr_raw = []
+            # A/B are decision/reward odors, not genuine hidden-rule odors; some
+            # probe sessions list them as hidden_rule_odors, so ignore them here.
+            hr_letters = {_odor_to_letter(o) for o in hr_raw if o} - {"A", "B"}
+            if not hr_letters:
+                continue
+            td = _load_trial_views(results_dir)["trial_data"]
+            if td.empty or "hidden_rule_success" not in td.columns:
+                continue
+            mask = td["hidden_rule_success"].astype(str).str.lower().isin(["true", "1", "1.0"])
+            for _, r in td[mask].iterrows():
+                ident = r.get("first_supply_odor_identity")
+                if ident not in ("A", "B"):
+                    continue
+                seq = parse_json_column(r.get("odor_sequence"))
+                pos = r.get("hidden_rule_success_position")
+                if not isinstance(seq, (list, tuple, np.ndarray)) or pos is None:
+                    continue
+                try:
+                    if isinstance(pos, float) and np.isnan(pos):
+                        continue
+                    letter = _odor_to_letter(seq[int(pos) - 1])
+                except Exception:
+                    continue
+                if letter in hr_letters:
+                    votes[letter][ident] += 1
+            # Association is conserved per animal; stop once all HR odors resolved.
+            if all(sum(votes[l].values()) > 0 for l in hr_letters):
+                break
+    return {l: ("A" if v["A"] >= v["B"] else "B") for l, v in votes.items() if sum(v.values()) > 0}
+
+
+def _build_odor_colors(subj_dirs, odors_list) -> Tuple[dict, dict]:
+    """Return ``({odor_letter: color}, {hr_odor_letter: 'A'|'B'})`` using the
+    shared scheme: A=red, B=green, hidden-rule odor=lighter red/green by its
+    learned A/B association, every other odor=a distinct palette colour."""
+    assoc = _hr_odor_associations(subj_dirs)
+    colors: dict = {}
+    other_i = 0
+    for letter in odors_list:
+        if letter == "A":
+            colors[letter] = _ODOR_A_COLOR
+        elif letter == "B":
+            colors[letter] = _ODOR_B_COLOR
+        elif letter in assoc:
+            colors[letter] = _HR_A_COLOR if assoc[letter] == "A" else _HR_B_COLOR
+        else:
+            colors[letter] = _OTHER_ODOR_COLORS[other_i % len(_OTHER_ODOR_COLORS)]
+            other_i += 1
+    return colors, assoc
+
+
 def hidden_rule_and_false_alarm(
     subjids=None,
     dates=None,
@@ -794,10 +914,15 @@ def hidden_rule_and_false_alarm(
     verbose: bool = True,
     show_title: bool = True,
     show_legend: bool = True,
+    show_lines: bool = False,
     lw_scale: float = 1.0,
     marker_scale: float = 1.0,
 ):
     """Plot hidden-rule detection rate alongside per-odor false-alarm rate.
+
+    ``show_lines`` additionally overlays each hidden-rule odor's own detection
+    rate (from ``hidden_rule_by_odor`` in ``metrics_*.json``) as a line in that
+    odor's colour, so the two contributions to the black mean line are visible.
 
     For each (subject, session) we produce:
     - The metric ``hidden_rule_detection_rate`` (from ``metrics_*.json``) — plotted in black.
@@ -881,6 +1006,7 @@ def hidden_rule_and_false_alarm(
         return s.upper()
 
     odors_list = [_odor_letter(o) for o in odors]
+    odors_set = set(odors_list)
     fa_set = None if fa_label is None else {str(s).strip().lower() for s in fa_label}
 
     if subjids is None:
@@ -1005,6 +1131,26 @@ def hidden_rule_and_false_alarm(
                     "value": hr_val if hr_val <= 1.0 else hr_val / 100.0,
                 })
 
+            # Per-hidden-rule-odor detection rate (show_lines): one series per HR
+            # odor. These are performance lines, independent of the `odors`
+            # (false-alarm) parameter — every genuine HR odor is included.
+            if show_lines and metrics is not None:
+                by_odor = (metrics.get("hidden_rule_by_odor", {}) or {}).get("by_odor", {}) or {}
+                for odor_name, stats in by_odor.items():
+                    letter = _odor_to_letter(odor_name)
+                    if letter in ("A", "B"):
+                        continue
+                    dr = stats.get("detection_rate") if isinstance(stats, dict) else None
+                    if not isinstance(dr, (int, float)) or np.isnan(dr):
+                        continue
+                    rows.append({
+                        "subjid": int(sid),
+                        "session_num": session_num,
+                        "date_str": str(date_str),
+                        "series": f"HRPERF_{letter}",
+                        "value": float(dr) if dr <= 1.0 else float(dr) / 100.0,
+                    })
+
     if not rows:
         if verbose:
             print("[hidden_rule_and_false_alarm] No data found for selected subjects/dates.")
@@ -1015,14 +1161,28 @@ def hidden_rule_and_false_alarm(
     markers_cycle = ['o', '^', 's', 'X', 'D', 'P', 'v', '>', '<', '*', 'h', 'H', '8', 'p', 'x']
     subj_to_marker = {sid: markers_cycle[i % len(markers_cycle)] for i, sid in enumerate(unique_subj)}
 
-    # Colors: odors from active style's prop_cycle, HR forced to black.
-    cycle_colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    # Colors: shared odor scheme (A=red, B=green, HR odor=lighter red/green by
+    # its learned reward association, other odors=distinct palette); the
+    # hidden-rule detection series ("HR") is forced to black.
     series_order = list(odors_list) + ["HR"]
-    series_color = {o: cycle_colors[i % len(cycle_colors)] for i, o in enumerate(odors_list)}
+    # Per-HR-odor detection series (only present when show_lines added rows).
+    hrperf_series = sorted(s for s in df["series"].unique() if str(s).startswith("HRPERF_"))
+    series_order += hrperf_series
+    # Colour over the odors AND any HR-performance odors (which may not be in
+    # `odors`), so HR odors get their proper lighter-red/green regardless.
+    hrperf_letters = [s.split("_", 1)[1] for s in hrperf_series]
+    color_letters = list(odors_list) + [l for l in hrperf_letters if l not in odors_list]
+    subj_dirs_for_colors = [t[1] for t in subject_iter]
+    odor_colors, _ = _build_odor_colors(subj_dirs_for_colors, color_letters)
+    series_color = dict(odor_colors)
     series_color["HR"] = "black"
-    series_lw = {s: (3.0 if s == "HR" else 1.8) for s in series_order}
+    for s in hrperf_series:
+        series_color[s] = odor_colors.get(s.split("_", 1)[1], "#000000")
+    # Slightly thicker lines than before; the mean (HR) a bit more than the rest.
+    series_lw = {s: (3.6 if s == "HR" else 2.4) for s in series_order}
 
     fig, ax = plt.subplots(figsize=figsize)
+    ax2 = ax.twinx()
 
     for series in series_order:
         df_s = df[df["series"] == series]
@@ -1030,24 +1190,18 @@ def hidden_rule_and_false_alarm(
             continue
         color = series_color[series]
         base_lw = series_lw[series]
+        # HR mean and per-HR-odor detection lines live on the left (performance)
+        # axis; the per-odor false-alarm rates on the right axis.
+        target_ax = ax if (series == "HR" or str(series).startswith("HRPERF_")) else ax2
         for sid in unique_subj:
             d = df_s[df_s["subjid"] == sid].sort_values("session_num")
             if d.empty:
                 continue
-            ax.plot(
+            target_ax.plot(
                 d["session_num"], d["value"],
                 color=color, linestyle="-",
                 linewidth=base_lw * lw_scale,
                 alpha=0.85, zorder=1,
-            )
-            ax.scatter(
-                d["session_num"], d["value"],
-                c=[color] * len(d),
-                marker=subj_to_marker[sid],
-                edgecolors="black",
-                linewidths=0.5,
-                s=40 * marker_scale,
-                zorder=2,
             )
 
     # X-axis tick spacing (sparse)
@@ -1065,43 +1219,40 @@ def hidden_rule_and_false_alarm(
         ax.set_xticklabels([str(t) for t in ticks])
 
     ax.set_xlabel("Days")
-    ax.set_ylabel(
-        "Hidden Rule Performance /\nFalse-Alarm Rate",
-        multialignment="center"
-    )
+    ax.set_ylabel("Hidden Rule Performance")
+    ax2.set_ylabel("False Alarm Rate")
     ax.set_ylim(0, 1.05)
+    ax2.set_ylim(0, 1.05)
 
     if show_title:
         ax.set_title(title if title else "Hidden-rule detection & per-odor false-alarm rate")
 
     ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    ax2.spines['top'].set_visible(False)
+    ax2.spines['right'].set_visible(True)
     ax.grid(False)
+    ax2.grid(False)
 
     if show_legend:
+        # Per-HR-odor detection lines reuse the odor colours already in the
+        # legend, so they don't get their own entries.
         series_handles = [
             Line2D([0], [0],
-                marker='o',
                 color=series_color[s],
                 linestyle="-",
                 linewidth=series_lw[s] * lw_scale,
-                markerfacecolor=series_color[s],
-                markeredgecolor="black",
-                markersize=7 * marker_scale,
                 label=("Hidden Rule" if s == "HR" else f"Odor {s}"))
-            for s in series_order
+            for s in series_order if not str(s).startswith("HRPERF_")
         ]
 
         legend = ax.legend(
             handles=series_handles,
             title="Legend",
             loc="upper left",
-            bbox_to_anchor=(1.02, 1.0),
-            alignment="left",   
-            borderaxespad=-1
+            alignment="left",
         )
 
-        legend.get_title().set_ha("left") 
+        legend.get_title().set_ha("left")
 
     plt.tight_layout()
 
@@ -5218,6 +5369,397 @@ def plot_decision_accuracy(
         except Exception as exc:
             if verbose:
                 print(f"[plot_decision_accuracy] Failed to save figure: {exc}")
+
+    plt.show()
+    return fig, ax
+
+
+def plot_poke_duration_by_odor(
+    subjid,
+    date=None,
+    figsize=(10, 7),
+    title=None,
+    *,
+    show_mean=True,
+    show_lines=False,
+    pool_subjids=False,
+    odors=("C", "D", "E", "F", "G"),
+    save=False,
+    verbose=True,
+    show_title=True,
+):
+    """Mean poke (sampling) duration per odor over training days.
+
+    For each animal + session, every ``presentations`` entry belonging to a
+    *completed* trial in ``trial_data`` is read off and grouped by odor
+    (aborted trials are excluded entirely). Per animal, per session, per odor,
+    the mean poke duration is plotted against day index and connected across
+    days — one line per odor, colored as in :func:`hidden_rule_and_false_alarm`
+    (one color per series, no point markers), following the "no dots"
+    per-animal line style of :func:`plot_decision_accuracy`.
+
+    Day 1 is each animal's first session with usable data for the requested
+    odors. The x-axis then counts *consecutive sessions in the derivatives*
+    (session order), not calendar dates — off-days/weekends with no session do
+    not create gaps. A gap appears only when a session that exists has genuinely
+    no data for that series.
+
+    Parameters
+    ----------
+    subjid : int | list[int] | dict
+        Subject id(s). May also be a dict ``{subjid: date_range}`` as a
+        convenience shorthand — in that case the dict is used as ``date`` and
+        the subjids are its keys.
+    date : list | tuple | dict | None
+        Specific dates [YYYYMMDD, ...] or inclusive range (start, end). If a
+        dict, must map ``subjid -> date_range`` so each subject can use its own
+        date window. Subjids not present as keys are skipped with a warning.
+        ``None`` = all sessions for every subject.
+    figsize : tuple
+    title : str | None
+    show_mean : bool
+        If True (default):
+        - When both ``"A"`` and ``"B"`` are in ``odors``, their poke durations
+          are pooled into a single "A+B" line instead of two separate lines.
+        - On any session flagged as a hidden-rule session (its two hidden-rule
+          odors, from ``summary.json``, both present in ``odors``), those two
+          odors' poke durations are pooled into a single "Hidden Rule" line for
+          that session, and every *other* requested odor (excluding "A"/"B")
+          is pooled into a single "Other Odors" line for that session — instead
+          of each contributing to its own individual odor line. On sessions
+          that aren't hidden-rule sessions, every requested odor still gets its
+          own individual line.
+        If False, every requested odor is always plotted as its own line.
+    show_lines : bool
+        Only used when ``show_mean`` is True. If True, overlays the individual
+        odors that make up each mean as thin dashed low-alpha lines in their own
+        colour (e.g. D/E/G under the "Other Odors" mean, the two hidden-rule
+        odors under the "Hidden Rule" mean, A/B under the "A+B" mean).
+    pool_subjids : bool
+        If False (default), each subject gets its own line per series (odor,
+        "A+B", or "Hidden Rule"), day-aligned to that subject's own day 1. If
+        True, subjects are combined into a single line per series: at each day
+        index, raw poke-duration samples from every subject with data that day
+        are pooled together before averaging (so a subject contributing more
+        trials counts for more, rather than each subject's mean counting
+        equally).
+    odors : iterable[str]
+        Odor labels to include (case-insensitive; ``"OdorC"``-style tokens are
+        also accepted). Default ``("C", "D", "E", "F", "G")``.
+    save : bool
+    verbose : bool
+    show_title : bool
+        If False, no title is rendered (useful for poster-style figures).
+
+    Returns
+    -------
+    fig, ax
+    """
+    # Mirror plot_decision_accuracy's input flexibility.
+    if isinstance(subjid, dict):
+        date = subjid if not isinstance(date, dict) or date is None else date
+        subjid = list(subjid.keys())
+    elif isinstance(date, dict) and subjid is None:
+        subjid = list(date.keys())
+    elif isinstance(subjid, set):
+        subjid = sorted(subjid)
+    elif not isinstance(subjid, (list, tuple)):
+        subjid = [subjid]
+
+    def _dates_for(sid):
+        if not isinstance(date, dict):
+            return date
+        if sid in date:
+            return date[sid]
+        try:
+            int_key = int(sid)
+            if int_key in date:
+                return date[int_key]
+        except (TypeError, ValueError):
+            pass
+        str_key = str(sid)
+        if str_key in date:
+            return date[str_key]
+        return None
+
+    def _odor_letter(value) -> str:
+        """Normalize stored odor tokens ('OdorC' / '"OdorC"' / 'odor c' / 'C') to a
+        bare upper-case letter, same convention as hidden_rule_and_false_alarm."""
+        s = str(value).strip().strip('[]"\'').strip()
+        low = s.lower()
+        if low.startswith("odor"):
+            s = s[4:].strip()
+        return s.upper()
+
+    odors_list = [_odor_letter(o) for o in odors]
+    odors_set = set(odors_list)
+    ab_grouped = show_mean and "A" in odors_set and "B" in odors_set
+
+    def _session_hr_odors(results_dir):
+        """Hidden-rule odor letters for a session (from summary.json), or [] if
+        the session has none / isn't a hidden-rule session."""
+        summary_path = results_dir / "summary.json"
+        if not summary_path.exists():
+            return []
+        try:
+            with open(summary_path, "r", encoding="utf-8") as f:
+                summary = json.load(f)
+            hr_odors = summary.get("params", {}).get("hidden_rule_odors", [])
+            if not hr_odors:
+                runs = summary.get("session", {}).get("runs", [])
+                if runs and isinstance(runs[0], dict):
+                    stage = runs[0].get("stage", {}) if isinstance(runs[0].get("stage", {}), dict) else {}
+                    hr_odors = stage.get("hidden_rule_odors", []) or []
+            return [_odor_letter(o) for o in hr_odors if o]
+        except Exception:
+            return []
+
+    def _extract_odor_poke_ms(td):
+        """Return {odor_letter: [poke_ms, ...]} for requested odors, from
+        completed trials' ``presentations`` only (aborted trials excluded)."""
+        out: dict = {}
+        if td.empty or "presentations" not in td.columns:
+            return out
+        completed = td.loc[~td["is_aborted"], "presentations"]
+        for pres_json in completed:
+            pres_list = parse_json_column(pres_json)
+            if not isinstance(pres_list, list):
+                continue
+            for pres in pres_list:
+                if not isinstance(pres, dict):
+                    continue
+                poke_ms = pres.get("poke_time_ms")
+                odor = pres.get("odor_name")
+                if odor is None or not isinstance(poke_ms, (int, float)) or poke_ms <= 0:
+                    continue
+                letter = _odor_letter(odor)
+                if letter not in odors_set:
+                    continue
+                out.setdefault(letter, []).append(float(poke_ms))
+        return out
+
+    derivatives_dir = get_derivatives_root()
+
+    # per_subject_days[sid][day_idx] = {series_key: [poke_ms, ...]}
+    per_subject_days: dict = {}
+    per_subject_days_ind: dict = {}  # same but per individual odor letter (show_lines)
+    hr_active_overall = False
+    used_subj_dirs = []  # for the shared odor-colour scheme
+
+    for sid in subjid:
+        subj_date = _dates_for(sid)
+        if isinstance(date, dict) and subj_date is None:
+            if verbose:
+                print(f"Warning: No date range provided in dict for subject {sid}, skipping")
+            continue
+
+        subj_str = f"sub-{str(sid).zfill(3)}"
+        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
+        if not subj_dirs:
+            if verbose:
+                print(f"Warning: No subject directory found for {subj_str}")
+            continue
+        subj_dir = subj_dirs[0]
+        used_subj_dirs.append(subj_dir)
+
+        # Day index = consecutive session order in the derivatives (NOT calendar
+        # date), so off-days/weekends with no session don't create gaps. Day 1 is
+        # the first session with data; sessions before it are skipped. After that,
+        # every existing session occupies the next day slot, and a session that
+        # exists but has genuinely no data for a series leaves a gap there.
+        session_series = []  # per session-day: {series_key: [poke_ms, ...]}
+        session_ind = []     # per session-day: {odor_letter: [poke_ms, ...]} (for show_lines)
+        started = False
+        for ses in _filter_session_dirs(subj_dir, subj_date):
+            date_str = ses.name.split("_date-")[-1]
+            if not (str(date_str).isdigit() and len(str(date_str)) == 8):
+                continue
+            results_dir = ses / "saved_analysis_results"
+            if not results_dir.exists():
+                continue
+            td = _load_trial_views(results_dir)["trial_data"]
+            raw = _extract_odor_poke_ms(td)
+            if not started:
+                if not raw:
+                    continue  # sessions before the first with data don't count
+                started = True
+
+            hr_letters = [l for l in _session_hr_odors(results_dir) if l in odors_set]
+            session_is_hr = show_mean and len(hr_letters) >= 2
+            if session_is_hr:
+                hr_active_overall = True
+
+            series: dict = {}
+            for letter, vals in raw.items():
+                if letter in ("A", "B"):
+                    key = "AB" if ab_grouped else letter
+                elif session_is_hr and letter in hr_letters:
+                    key = "HR"
+                elif session_is_hr:
+                    # Non-A/B, non-HR-pair odor on a hidden-rule session -> pooled.
+                    key = "OTHER"
+                else:
+                    key = letter
+                series.setdefault(key, []).extend(vals)
+
+            session_series.append(series)
+            session_ind.append({l: list(v) for l, v in raw.items()})
+
+        if not session_series:
+            continue
+
+        day_map = {i + 1: series for i, series in enumerate(session_series)}
+        per_subject_days[int(sid)] = day_map
+        per_subject_days_ind[int(sid)] = {i + 1: ind for i, ind in enumerate(session_ind)}
+
+    if not per_subject_days:
+        print("No data found")
+        return None, None
+
+    max_day = max(max(day_map.keys()) for day_map in per_subject_days.values())
+
+    # Series order: requested odors in their given order (A/B collapsed to a
+    # single "AB" entry when grouped), then "HR" and "OTHER" if any session used them.
+    series_order = []
+    for o in odors_list:
+        if o in ("A", "B"):
+            key = "AB" if ab_grouped else o
+        else:
+            key = o
+        if key not in series_order:
+            series_order.append(key)
+    if hr_active_overall:
+        series_order.append("HR")
+        series_order.append("OTHER")
+
+    fig, ax = plt.subplots(figsize=figsize)
+    # Shared odor colour scheme (same as hidden_rule_and_false_alarm): A=red,
+    # B=green, HR odor=lighter red/green by association, other odors=distinct
+    # palette. Pooled AB/HR/OTHER series get their own fixed colours.
+    odor_colors, _ = _build_odor_colors(used_subj_dirs, odors_list)
+    series_color = {
+        s: (_POOLED_SERIES_COLORS[s] if s in _POOLED_SERIES_COLORS
+            else odor_colors.get(s, "#000000"))
+        for s in series_order
+    }
+    x = np.arange(1, max_day + 1)
+
+    def _series_label(s):
+        if s == "AB":
+            return "Odor A+B"
+        if s == "HR":
+            return "Hidden Rule"
+        if s == "OTHER":
+            return "Other Odors"
+        return f"Odor {s}"
+
+    plotted = set()
+    if pool_subjids:
+        for s_key in series_order:
+            y = np.full(max_day, np.nan)
+            for day in range(1, max_day + 1):
+                total, count = 0.0, 0
+                for day_map in per_subject_days.values():
+                    vals = day_map.get(day, {}).get(s_key)
+                    if vals:
+                        total += sum(vals)
+                        count += len(vals)
+                if count > 0:
+                    y[day - 1] = total / count
+            if np.all(np.isnan(y)):
+                continue
+            plotted.add(s_key)
+            ax.plot(x, y, color=series_color[s_key], linewidth=2.5, alpha=0.9, zorder=2)
+    else:
+        for day_map in per_subject_days.values():
+            for s_key in series_order:
+                y = np.full(max_day, np.nan)
+                for day in range(1, max_day + 1):
+                    vals = day_map.get(day, {}).get(s_key)
+                    if vals:
+                        y[day - 1] = float(np.mean(vals))
+                if np.all(np.isnan(y)):
+                    continue
+                plotted.add(s_key)
+                ax.plot(x, y, color=series_color[s_key], linewidth=2.0, alpha=0.7, zorder=2)
+
+    # Optionally overlay the individual odors that make up each mean, as thin
+    # low-alpha lines in their own colour (only meaningful with show_mean).
+    # Colours come from the shared scheme (A=red, B=green, HR odor=lighter
+    # red/green), so e.g. the "A+B" mean is magenta but A and B stay red/teal.
+    if show_mean and show_lines:
+        for letter in odors_list:
+            color = odor_colors.get(letter, "#000000")
+            if pool_subjids:
+                y = np.full(max_day, np.nan)
+                for day in range(1, max_day + 1):
+                    total, count = 0.0, 0
+                    for dm in per_subject_days_ind.values():
+                        vals = dm.get(day, {}).get(letter)
+                        if vals:
+                            total += sum(vals)
+                            count += len(vals)
+                    if count > 0:
+                        y[day - 1] = total / count
+                if not np.all(np.isnan(y)):
+                    plotted.add(letter)
+                    ax.plot(x, y, color=color, linewidth=1.0, alpha=0.45, zorder=1.5)
+            else:
+                for dm in per_subject_days_ind.values():
+                    y = np.full(max_day, np.nan)
+                    for day in range(1, max_day + 1):
+                        vals = dm.get(day, {}).get(letter)
+                        if vals:
+                            y[day - 1] = float(np.mean(vals))
+                    if not np.all(np.isnan(y)):
+                        plotted.add(letter)
+                        ax.plot(x, y, color=color, linewidth=0.9, alpha=0.4, zorder=1.5)
+
+    ax.set_xlabel("Days")
+    ax.set_ylabel("Poke Duration (ms)")
+    ax.set_xlim(0.8, max_day + 0.5)
+    ax.set_ylim(bottom=0)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+
+    # Legend: the pooled/individual series in series_order, plus any individual
+    # odors split out by show_lines that series_order collapsed (A/B into "AB"),
+    # each with its own scheme colour.
+    legend_series = [s for s in series_order if s in plotted]
+    legend_series += [l for l in odors_list if l in plotted and l not in legend_series]
+    if legend_series:
+        handles = [
+            Line2D([0], [0],
+                   color=(_POOLED_SERIES_COLORS.get(s) or odor_colors.get(s, "#000000")),
+                   linewidth=2.0, label=_series_label(s))
+            for s in legend_series
+        ]
+        ax.legend(handles=handles, title="Odor", loc="best")
+
+    if show_title:
+        ax.set_title(title if title else "Poke Duration by Odor over Days")
+
+    fig.tight_layout(pad=1.5)
+
+    if save:
+        try:
+            if isinstance(date, dict):
+                save_dates = []
+                for v in date.values():
+                    if isinstance(v, (list, tuple)):
+                        save_dates.extend(v)
+                    elif v is not None:
+                        save_dates.append(v)
+            else:
+                save_dates = date
+            out_path = save_figure(
+                fig, "poke_duration_by_odor",
+                subjids=list(subjid), dates=save_dates,
+            )
+            if verbose:
+                print(f"[plot_poke_duration_by_odor] Saved figure to {out_path}")
+        except Exception as exc:
+            if verbose:
+                print(f"[plot_poke_duration_by_odor] Failed to save figure: {exc}")
 
     plt.show()
     return fig, ax
