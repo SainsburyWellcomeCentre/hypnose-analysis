@@ -671,7 +671,7 @@ def plot_behavior_metrics(
 
         
         # Axis labels always set; size/visibility is controlled by the active style.
-        ax.set_xlabel("Days")
+        ax.set_xlabel("Day")
         ax.set_ylabel(y_title if y_title is not None else var.replace("_", " ").title())
         if show_title:
             ax.set_title(title_formatted)
@@ -1028,6 +1028,7 @@ def hidden_rule_and_false_alarm(
             subject_iter.append((int(subjid), subj_dirs[0], subj_dates))
 
     rows = []
+    observed_hr_letters = set()
     for sid, subj_dir, subj_dates in subject_iter:
         ses_dirs = _filter_session_dirs(subj_dir, subj_dates)
         for session_num, ses in enumerate(ses_dirs, start=1):
@@ -1043,6 +1044,15 @@ def hidden_rule_and_false_alarm(
                 v = _extract_metric_value(metrics, "hidden_rule_detection_rate")
                 if isinstance(v, (int, float)) and not np.isnan(v):
                     hr_val = float(v)
+                hr_by_odor = metrics.get("hidden_rule_by_odor", {}) or {}
+                for odor_name in hr_by_odor.get("hr_odors", []) or []:
+                    letter = _odor_to_letter(odor_name)
+                    if letter not in ("A", "B"):
+                        observed_hr_letters.add(letter)
+                for odor_name in (hr_by_odor.get("by_odor", {}) or {}).keys():
+                    letter = _odor_to_letter(odor_name)
+                    if letter not in ("A", "B"):
+                        observed_hr_letters.add(letter)
 
             # Trial data for false-alarm counts
             views = _load_trial_views(results_dir)
@@ -1173,13 +1183,53 @@ def hidden_rule_and_false_alarm(
     hrperf_letters = [s.split("_", 1)[1] for s in hrperf_series]
     color_letters = list(odors_list) + [l for l in hrperf_letters if l not in odors_list]
     subj_dirs_for_colors = [t[1] for t in subject_iter]
-    odor_colors, _ = _build_odor_colors(subj_dirs_for_colors, color_letters)
+    odor_colors, hr_assoc = _build_odor_colors(subj_dirs_for_colors, color_letters)
     series_color = dict(odor_colors)
     series_color["HR"] = "black"
     for s in hrperf_series:
         series_color[s] = odor_colors.get(s.split("_", 1)[1], "#000000")
     # Slightly thicker lines than before; the mean (HR) a bit more than the rest.
     series_lw = {s: (3.6 if s == "HR" else 2.4) for s in series_order}
+
+    hidden_rule_letters = set(observed_hr_letters)
+    hidden_rule_letters.update(hrperf_letters)
+    hidden_rule_letters.update(l for l in color_letters if l in hr_assoc)
+    hidden_rule_letters.discard("A")
+    hidden_rule_letters.discard("B")
+    hr_dash_cycle = [(0, (7, 3)), (0, (2, 2)), (0, (6, 2, 1, 2))]
+    odor_linestyle = {}
+    odor_alpha = {}
+    for idx, letter in enumerate(sorted(hidden_rule_letters)):
+        odor_linestyle[letter] = hr_dash_cycle[idx % len(hr_dash_cycle)]
+        odor_alpha[letter] = 0.45
+        series_color[letter] = "#000000"
+        series_color[f"HRPERF_{letter}"] = "#000000"
+
+    def _series_linestyle(series):
+        if series == "HR":
+            return "-"
+        if str(series).startswith("HRPERF_"):
+            letter = str(series).split("_", 1)[1]
+            return odor_linestyle.get(letter, "--")
+        return odor_linestyle.get(series, "-")
+
+    def _series_alpha(series):
+        if series == "HR":
+            return 0.85
+        if str(series).startswith("HRPERF_"):
+            letter = str(series).split("_", 1)[1]
+            return odor_alpha.get(letter, 0.45)
+        return odor_alpha.get(series, 0.85)
+
+    def _series_legend_label(series):
+        if series == "HR":
+            return "Hidden Rule"
+        if str(series).startswith("HRPERF_"):
+            letter = str(series).split("_", 1)[1]
+            return f"Hidden Rule Odor {letter}"
+        if series in hidden_rule_letters:
+            return f"Hidden Rule Odor {series}"
+        return f"Odor {series}"
 
     fig, ax = plt.subplots(figsize=figsize)
     ax2 = ax.twinx()
@@ -1199,9 +1249,9 @@ def hidden_rule_and_false_alarm(
                 continue
             target_ax.plot(
                 d["session_num"], d["value"],
-                color=color, linestyle="-",
+                color=color, linestyle=_series_linestyle(series),
                 linewidth=base_lw * lw_scale,
-                alpha=0.85, zorder=1,
+                alpha=_series_alpha(series), zorder=1,
             )
 
     # X-axis tick spacing (sparse)
@@ -1218,7 +1268,7 @@ def hidden_rule_and_false_alarm(
         ax.set_xticks(ticks)
         ax.set_xticklabels([str(t) for t in ticks])
 
-    ax.set_xlabel("Days")
+    ax.set_xlabel("Day")
     ax.set_ylabel("Hidden Rule Performance")
     ax2.set_ylabel("False Alarm Rate")
     ax.set_ylim(0, 1.05)
@@ -1234,16 +1284,28 @@ def hidden_rule_and_false_alarm(
     ax2.grid(False)
 
     if show_legend:
-        # Per-HR-odor detection lines reuse the odor colours already in the
-        # legend, so they don't get their own entries.
         series_handles = [
             Line2D([0], [0],
                 color=series_color[s],
-                linestyle="-",
+                linestyle=_series_linestyle(s),
                 linewidth=series_lw[s] * lw_scale,
-                label=("Hidden Rule" if s == "HR" else f"Odor {s}"))
+                label=_series_legend_label(s))
             for s in series_order if not str(s).startswith("HRPERF_")
         ]
+        plotted_handle_keys = {
+            s for s in series_order if not str(s).startswith("HRPERF_")
+        }
+        for letter in sorted(hidden_rule_letters):
+            if letter in plotted_handle_keys:
+                continue
+            series = f"HRPERF_{letter}"
+            series_handles.append(
+                Line2D([0], [0],
+                    color=series_color.get(series, "#000000"),
+                    linestyle=_series_linestyle(series),
+                    linewidth=series_lw.get(series, 2.4) * lw_scale,
+                    label=_series_legend_label(series))
+            )
 
         legend = ax.legend(
             handles=series_handles,
@@ -1448,7 +1510,7 @@ def plot_decision_accuracy_by_odor(
                 alpha=0.7 if odor not in ('Total', 'Global Choice Accuracy') else 0.8,
                 zorder=10 if odor in ('Total', 'Global Choice Accuracy') else 1)
     
-    ax.set_xlabel('Days')
+    ax.set_xlabel('Day')
     ax.set_ylabel('Accuracy')
     ax.set_ylim([0, 1.05])
     ax.set_xlim([-0.1, len(unique_dates) + 0.1])
@@ -1474,7 +1536,7 @@ def plot_decision_accuracy_by_odor(
     ax.set_title(title)
     
     if clean_graph:
-        _clean_graph(ax, xlabel="Days", ylabel="Accuracy")
+        _clean_graph(ax, xlabel="Day", ylabel="Accuracy")
 
     plt.tight_layout()
     
@@ -3385,7 +3447,7 @@ def plot_cumulative_rewards_by_trial(
         ax.plot(xs, cumulative, color=colors[subj_idx], marker="o", markersize=3,
                 label=f"Subject {subjid}")
 
-    ax.set_xlabel("Trial (continuous global_trial_id)")
+    ax.set_xlabel("Trial number")
     ax.set_ylabel("Cumulative Rewards")
     data_xmax = max(
         (line.get_xdata().max() for line in ax.get_lines() if len(line.get_xdata())),
@@ -3830,6 +3892,7 @@ def plot_choice_history(
     dates=None,
     figsize=(16, 8),
     title=None,
+    xlim=None,
     fa_types=("FA_time_in", "FA_time_out"),
     *,
     save=False,
@@ -3862,6 +3925,9 @@ def plot_choice_history(
         Figure size (default: (16, 8))
     title : str, optional
         Plot title. If None, uses default
+    xlim : tuple, optional
+        X-axis limits in plot time seconds. If None, uses the full trial range
+        with automatic padding.
     fa_types : str | Iterable[str], optional
         FA labels to highlight on aborted trials. Matching is case-insensitive.
         Defaults to ("FA_time_in", "FA_time_out").
@@ -4167,7 +4233,10 @@ def plot_choice_history(
     x_min = trials_df['time_in_plot'].min()
     x_max = trials_df['time_in_plot'].max()
     x_padding = (x_max - x_min) * 0.05
-    ax.set_xlim([x_min - x_padding, x_max + x_padding])
+    if xlim is None:
+        ax.set_xlim([x_min - x_padding, x_max + x_padding])
+    else:
+        ax.set_xlim(xlim)
     
     ax.set_yticks([-1, 1])
     ax.set_yticklabels(['B', 'A'])
@@ -5089,19 +5158,23 @@ def plot_decision_accuracy(
     save=False,
     verbose=True,
     show_title=True,
-    color_by_id=False,
-    mean=True,
+    show_legend=True,
+    color_by_id=True,
+    mean=False,
+    show_criterion=False,
+    criterion=0.8,
 ):
-    """Decision accuracy over training days, per animal + group mean.
+    """Decision accuracy over training days, one series per subject.
 
-    Each animal is drawn as a thin grey line: its per-session decision accuracy
+    Each animal is drawn as a colored line: its per-session decision accuracy
     (rewarded / (rewarded + unrewarded), same as the ``decision_accuracy`` metric,
     computed here from ``trial_data``) plotted against day index. Day 1 is each
     animal's first session with an A/B decision, so animals are aligned by
-    training day rather than calendar date. No individual points are drawn — just
-    the lines.
+    training day rather than calendar date. Markers show each subject's value on
+    each day, matching the subject-series style of :func:`plot_cumulative_rewards`.
 
-    A thicker black line shows the mean across animals at each day index. At a
+    If ``mean=True``, a thicker black line shows the mean across animals at each
+    day index. At a
     given day the mean uses only the animals that have data there, so as animals
     run out of sessions the mean is averaged over fewer of them.
 
@@ -5130,14 +5203,20 @@ def plot_decision_accuracy(
     verbose : bool
     show_title : bool
         If False, no title is rendered (useful for poster-style figures).
+    show_legend : bool
+        If True, show a subject legend (default: True).
     color_by_id : bool
         If True, each animal's thin line is colored using the shared per-subject
         tab10 palette (:func:`plot_cumulative_rewards`). Colors are assigned by
         ascending subject id, so the same ids keep the same colors across plots.
     mean : bool
-        If True (default) overlay the thick group-mean line. If False, no mean
+        If True, overlay the thick group-mean line. If False (default), no mean
         line is drawn and the per-animal lines are drawn thicker. Line widths are
         shared with :func:`plot_behavior_metrics` via ``_series_line_widths``.
+    show_criterion : bool
+        If True, draw a dashed horizontal criterion line (default: False).
+    criterion : float
+        Y-value for the criterion line (default: 0.8).
 
     Returns
     -------
@@ -5288,7 +5367,15 @@ def plot_decision_accuracy(
         alpha = 0.7 if color_by_id else 0.6
         main = np.array(series["main"], dtype=float)
         x = np.arange(1, len(main) + 1)
-        ax.plot(x, main, color=color, linewidth=per_series_lw, alpha=alpha, zorder=2)
+        ax.plot(
+            x, main,
+            color=color,
+            linewidth=per_series_lw,
+            alpha=alpha,
+            marker="o",
+            markersize=4,
+            zorder=2,
+        )
         if hr_active:
             hr = np.array(series["hr"], dtype=float)
             hr_ls = (subj_dash_phase.get(subjid, 0.0), (dash_on, dash_off))
@@ -5315,17 +5402,26 @@ def plot_decision_accuracy(
             ax.plot(hx, hy, color="black", linewidth=mean_lw, linestyle="--",
                     marker="o", markersize=5, transform=hr_offset, zorder=3.5)
 
-    ax.set_xlabel("Days")
+    ax.set_xlabel("Day")
     ax.set_ylabel("Decision Accuracy")
     ax.set_xlim(0.8, max_days + 0.5)
     ax.set_ylim(0, 1.05)
+    if show_criterion:
+        ax.axhline(
+            y=criterion,
+            color="gray",
+            linestyle="--",
+            linewidth=1.2,
+            alpha=0.8,
+            zorder=1,
+        )
     # Only ever tick whole days (never 1.5, 2.5, ...). Local import so autoreload
     # picks it up without a kernel restart.
     from matplotlib.ticker import MaxNLocator
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
 
     subj_leg = None
-    if color_by_id:
+    if show_legend and color_by_id:
         handles = [
             Line2D([0], [0], color=subj_colors[s], linewidth=1.5, label=f"Sub {str(s).zfill(3)}")
             for s in sorted(per_animal_series.keys())
@@ -5333,7 +5429,7 @@ def plot_decision_accuracy(
         if handles:
             subj_leg = ax.legend(handles=handles, title="Subject", loc="best")
 
-    if hr_active:
+    if show_legend and hr_active:
         # Solid = non-HR, dashed = HR. Keep the subject legend too, if present.
         if subj_leg is not None:
             ax.add_artist(subj_leg)
@@ -5345,7 +5441,7 @@ def plot_decision_accuracy(
         ax.legend(handles=style_handles, title="Trial type", loc="lower right")
 
     if show_title:
-        ax.set_title(title if title else "Decision Accuracy over Days")
+        ax.set_title(title if title else "Decision Accuracy over Day")
 
     fig.tight_layout(pad=1.5)
 
@@ -5544,6 +5640,7 @@ def plot_poke_duration_by_odor(
     per_subject_days: dict = {}
     per_subject_days_ind: dict = {}  # same but per individual odor letter (show_lines)
     hr_active_overall = False
+    observed_hr_letters = set()
     used_subj_dirs = []  # for the shared odor-colour scheme
 
     for sid in subjid:
@@ -5585,6 +5682,7 @@ def plot_poke_duration_by_odor(
                 started = True
 
             hr_letters = [l for l in _session_hr_odors(results_dir) if l in odors_set]
+            observed_hr_letters.update(l for l in hr_letters if l not in ("A", "B"))
             session_is_hr = show_mean and len(hr_letters) >= 2
             if session_is_hr:
                 hr_active_overall = True
@@ -5633,15 +5731,68 @@ def plot_poke_duration_by_odor(
         series_order.append("OTHER")
 
     fig, ax = plt.subplots(figsize=figsize)
-    # Shared odor colour scheme (same as hidden_rule_and_false_alarm): A=red,
-    # B=green, HR odor=lighter red/green by association, other odors=distinct
-    # palette. Pooled AB/HR/OTHER series get their own fixed colours.
+    # Local style for the grouped view: pooled means are solid; individual odors
+    # shown via show_lines are dashed in the color of their group.
     odor_colors, _ = _build_odor_colors(used_subj_dirs, odors_list)
+    pooled_red = _ODOR_A_COLOR
+    pooled_green = "#2E7D32"
     series_color = {
-        s: (_POOLED_SERIES_COLORS[s] if s in _POOLED_SERIES_COLORS
-            else odor_colors.get(s, "#000000"))
+        s: (
+            pooled_red if s == "AB"
+            else "black" if s == "HR"
+            else pooled_green if s == "OTHER"
+            else odor_colors.get(s, "#000000")
+        )
         for s in series_order
     }
+
+    def _series_color(s):
+        if s == "AB" or s in ("A", "B"):
+            return pooled_red
+        if s == "HR" or s in observed_hr_letters:
+            return "black"
+        if s == "OTHER":
+            return pooled_green
+        if s in odors_set:
+            return pooled_green if observed_hr_letters else odor_colors.get(s, "#000000")
+        return series_color.get(s, odor_colors.get(s, "#000000"))
+
+    red_dash_by_letter = {
+        "A": (0, (7, 3)),
+        "B": (0, (2, 2)),
+    }
+    hr_dash_cycle = [(0, (8, 3)), (0, (3, 2)), (0, (6, 2, 1, 2))]
+    other_dash_cycle = [
+        (0, (6, 2)),
+        (0, (2, 2)),
+        (0, (5, 2, 1, 2)),
+        (0, (1, 1)),
+        (0, (3, 1, 1, 1, 1, 1)),
+    ]
+    hr_dash_by_letter = {
+        letter: hr_dash_cycle[i % len(hr_dash_cycle)]
+        for i, letter in enumerate(sorted(observed_hr_letters))
+    }
+    other_letters = [
+        letter for letter in odors_list
+        if letter not in observed_hr_letters and letter not in ("A", "B")
+    ]
+    other_dash_by_letter = {
+        letter: other_dash_cycle[i % len(other_dash_cycle)]
+        for i, letter in enumerate(other_letters)
+    }
+
+    def _series_linestyle(s):
+        if s in ("AB", "HR", "OTHER"):
+            return "-"
+        if s in ("A", "B"):
+            return red_dash_by_letter.get(s, "--")
+        if s in observed_hr_letters:
+            return hr_dash_by_letter.get(s, "--")
+        if s in odors_set:
+            return other_dash_by_letter.get(s, "--") if observed_hr_letters else "-"
+        return "-"
+
     x = np.arange(1, max_day + 1)
 
     def _series_label(s):
@@ -5651,6 +5802,8 @@ def plot_poke_duration_by_odor(
             return "Hidden Rule"
         if s == "OTHER":
             return "Other Odors"
+        if s in observed_hr_letters:
+            return f"Hidden Rule Odor {s}"
         return f"Odor {s}"
 
     plotted = set()
@@ -5669,7 +5822,11 @@ def plot_poke_duration_by_odor(
             if np.all(np.isnan(y)):
                 continue
             plotted.add(s_key)
-            ax.plot(x, y, color=series_color[s_key], linewidth=2.5, alpha=0.9, zorder=2)
+            ax.plot(
+                x, y, color=_series_color(s_key),
+                linestyle=_series_linestyle(s_key),
+                linewidth=2.5, alpha=0.9, zorder=2,
+            )
     else:
         for day_map in per_subject_days.values():
             for s_key in series_order:
@@ -5681,15 +5838,18 @@ def plot_poke_duration_by_odor(
                 if np.all(np.isnan(y)):
                     continue
                 plotted.add(s_key)
-                ax.plot(x, y, color=series_color[s_key], linewidth=2.0, alpha=0.7, zorder=2)
+                ax.plot(
+                    x, y, color=_series_color(s_key),
+                    linestyle=_series_linestyle(s_key),
+                    linewidth=2.0, alpha=0.7, zorder=2,
+                )
 
     # Optionally overlay the individual odors that make up each mean, as thin
-    # low-alpha lines in their own colour (only meaningful with show_mean).
-    # Colours come from the shared scheme (A=red, B=green, HR odor=lighter
-    # red/green), so e.g. the "A+B" mean is magenta but A and B stay red/teal.
+    # low-alpha dashed lines in their group colour (only meaningful with show_mean).
     if show_mean and show_lines:
         for letter in odors_list:
-            color = odor_colors.get(letter, "#000000")
+            color = _series_color(letter)
+            linestyle = _series_linestyle(letter)
             if pool_subjids:
                 y = np.full(max_day, np.nan)
                 for day in range(1, max_day + 1):
@@ -5703,7 +5863,10 @@ def plot_poke_duration_by_odor(
                         y[day - 1] = total / count
                 if not np.all(np.isnan(y)):
                     plotted.add(letter)
-                    ax.plot(x, y, color=color, linewidth=1.0, alpha=0.45, zorder=1.5)
+                    ax.plot(
+                        x, y, color=color, linestyle=linestyle,
+                        linewidth=1.0, alpha=0.45, zorder=1.5,
+                    )
             else:
                 for dm in per_subject_days_ind.values():
                     y = np.full(max_day, np.nan)
@@ -5713,9 +5876,12 @@ def plot_poke_duration_by_odor(
                             y[day - 1] = float(np.mean(vals))
                     if not np.all(np.isnan(y)):
                         plotted.add(letter)
-                        ax.plot(x, y, color=color, linewidth=0.9, alpha=0.4, zorder=1.5)
+                        ax.plot(
+                            x, y, color=color, linestyle=linestyle,
+                            linewidth=0.9, alpha=0.4, zorder=1.5,
+                        )
 
-    ax.set_xlabel("Days")
+    ax.set_xlabel("Day")
     ax.set_ylabel("Poke Duration (ms)")
     ax.set_xlim(0.8, max_day + 0.5)
     ax.set_ylim(bottom=0)
@@ -5729,14 +5895,15 @@ def plot_poke_duration_by_odor(
     if legend_series:
         handles = [
             Line2D([0], [0],
-                   color=(_POOLED_SERIES_COLORS.get(s) or odor_colors.get(s, "#000000")),
+                   color=_series_color(s),
+                   linestyle=_series_linestyle(s),
                    linewidth=2.0, label=_series_label(s))
             for s in legend_series
         ]
         ax.legend(handles=handles, title="Odor", loc="best")
 
     if show_title:
-        ax.set_title(title if title else "Poke Duration by Odor over Days")
+        ax.set_title(title if title else "Poke Duration by Odor over Day")
 
     fig.tight_layout(pad=1.5)
 

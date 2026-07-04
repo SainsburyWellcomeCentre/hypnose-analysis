@@ -876,6 +876,8 @@ def plot_trial_traces_by_mode(
     mode="rewarded",
     xlim=None,
     ylim=None,
+    position_units="cm",
+    arena_size_cm=50.0,
     show_average=False,
     highlight_hr=False,
     color_by_index=False,
@@ -905,7 +907,12 @@ def plot_trial_traces_by_mode(
         One of: rewarded, rewarded_hr, completed, all_trials, fa_by_response, fa_by_odor, hr, hr_only.
         "hr" is accepted as an alias for "hr_only".
     xlim, ylim : tuple | None
-        Axis limits.
+        Pixel axis limits. When position_units="cm", each limit range is mapped
+        to 0-arena_size_cm on the displayed axis.
+    position_units : {"cm", "px"}
+        Display position coordinates in centimetres or raw pixels.
+    arena_size_cm : float
+        Physical size represented by the xlim/ylim ranges when displaying cm.
     show_average : bool
         If True, draw a black mean trace per category with a light-grey SEM tube.
     highlight_hr : bool
@@ -948,6 +955,10 @@ def plot_trial_traces_by_mode(
         raise ValueError(f"mode must be one of {sorted(allowed_modes)}")
     if mode == "hr":
         mode = "hr_only"
+    if position_units not in {"cm", "px"}:
+        raise ValueError("position_units must be either 'cm' or 'px'")
+    if position_units == "cm" and arena_size_cm <= 0:
+        raise ValueError("arena_size_cm must be positive")
 
     # FA filter
     if isinstance(fa_types, str):
@@ -1540,13 +1551,65 @@ def plot_trial_traces_by_mode(
     if color_by_trial_id:
         color_by_index = False
 
+    def _coord_limits(axis):
+        vals = []
+        for segs in segments.values():
+            for seg in segs:
+                arr = np.asarray(seg[axis], dtype=float)
+                vals.extend(arr[np.isfinite(arr)])
+        if not vals:
+            return None
+        return float(np.nanmin(vals)), float(np.nanmax(vals))
+
+    def _normalize_limits(limits, axis):
+        if limits is None:
+            limits = _coord_limits(axis)
+        if limits is None:
+            return None
+        lo, hi = limits
+        return float(lo), float(hi)
+
+    x_source_limits = _normalize_limits(xlim, "x")
+    y_source_limits = _normalize_limits(ylim, "y")
+    x_display_lim = x_source_limits
+    y_display_lim = y_source_limits
+
+    def _scale_axis(values, limits):
+        values = np.asarray(values, dtype=float)
+        if position_units == "px":
+            return values
+        lo, hi = limits
+        span = hi - lo
+        if span == 0:
+            return np.full_like(values, np.nan, dtype=float)
+        scaled = (values - lo) / span * arena_size_cm
+        return np.clip(scaled, 0.0, arena_size_cm)
+
+    def _x_display(values):
+        return _scale_axis(values, x_source_limits)
+
+    def _y_display(values):
+        return _scale_axis(values, y_source_limits)
+
+    if position_units == "cm":
+        if x_source_limits is None or y_source_limits is None:
+            raise ValueError("Cannot convert to cm without finite x/y coordinate limits")
+        x_display_lim = tuple(float(v) for v in _x_display(x_source_limits))
+        y_display_lim = tuple(float(v) for v in _y_display(y_source_limits))
+        if verbose:
+            print(
+                "[plot_trial_traces_by_mode] position mapping: "
+                f"x px {x_source_limits} -> cm {x_display_lim}; "
+                f"y px {y_source_limits} -> cm {y_display_lim}"
+            )
+
     def _plot_axis(ax, axis_key):
         segs = segments.get(axis_key, [])
         used_labels = set()
 
         def _plot_segment(seg, label=None):
-            x = np.asarray(seg["x"])
-            y = np.asarray(seg["y"])
+            x = _x_display(seg["x"])
+            y = _y_display(seg["y"])
             if color_by_speed_active:
                 t_arr = np.asarray(seg.get("time"))
                 bins_df = seg.get("speed_bins")
@@ -1604,8 +1667,8 @@ def plot_trial_traces_by_mode(
                 ys = [t[1] for t in traces if t is not None]
                 if not xs or not ys:
                     continue
-                xs = np.vstack(xs)
-                ys = np.vstack(ys)
+                xs = np.vstack([_x_display(x) for x in xs])
+                ys = np.vstack([_y_display(y) for y in ys])
                 mean_x = np.nanmean(xs, axis=0)
                 mean_y = np.nanmean(ys, axis=0)
                 sem_x = np.nanstd(xs, axis=0) / np.sqrt(xs.shape[0])
@@ -1636,14 +1699,24 @@ def plot_trial_traces_by_mode(
             cbar = plt.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
             cbar.set_label("Normalized sample index")
 
-        ax.set_xlabel("X Position (px)")
-        ax.set_ylabel("Y Position (px)")
-        if xlim:
-            ax.set_xlim(xlim)
-        if ylim:
-            ax.set_ylim(ylim)
+        unit_label = "cm" if position_units == "cm" else "px"
+        ax.set_xlabel(f"X Position ({unit_label})")
+        ax.set_ylabel(f"Y Position ({unit_label})")
+        if x_display_lim is not None:
+            ax.set_xlim(x_display_lim)
+        if y_display_lim is not None:
+            ax.set_ylim(y_display_lim)
+        if position_units == "cm":
+            tick_values = np.linspace(0.0, arena_size_cm, 6)
+            ax.set_xticks(tick_values)
+            ax.set_yticks(tick_values)
         if invert_y:
             ax.invert_yaxis()
+        if position_units == "cm":
+            tick_values = np.linspace(0.0, arena_size_cm, 6)
+            ax.set_yticks(tick_values)
+            if invert_y:
+                ax.set_yticklabels([f"{v:g}" for v in tick_values[::-1]])
         ax.set_aspect('equal', adjustable='box')
         if show_legend:
             handles, labels = ax.get_legend_handles_labels()
@@ -2617,6 +2690,10 @@ def plot_traces_with_speed_threshold(
     subjid,
     dates=None,
     *,
+    xlim=None,
+    ylim=None,
+    position_units="cm",
+    arena_size_cm=50.0,
     fa_types="FA_time_in",
     bin_ms: int = 100,
     pre_buffer_s: float = 0.2,
@@ -2646,6 +2723,13 @@ def plot_traces_with_speed_threshold(
         Subject ID.
     dates : list | tuple | None
         Dates list or inclusive range; None uses all available for the subject.
+    xlim, ylim : tuple | None
+        Pixel axis limits. When position_units="cm", each limit range is mapped
+        to 0-arena_size_cm on the displayed axis.
+    position_units : {"cm", "px"}
+        Display position coordinates in centimetres or raw pixels.
+    arena_size_cm : float
+        Physical size represented by the xlim/ylim ranges when displaying cm.
     fa_types : str | Iterable
         FA labels to include (default "FA_time_in"). Case-insensitive; accepts comma/semicolon list.
     bin_ms : int
@@ -2743,6 +2827,10 @@ def plot_traces_with_speed_threshold(
 
     if mode not in {"max", "mean"}:
         raise ValueError("mode must be 'max' or 'mean'")
+    if position_units not in {"cm", "px"}:
+        raise ValueError("position_units must be either 'cm' or 'px'")
+    if position_units == "cm" and arena_size_cm <= 0:
+        raise ValueError("arena_size_cm must be positive")
     if pre_buffer_s < 0.15:
         print("pre_buffer_s < 0.15s: baseline window [-0.15, -0.05] may be empty")
 
@@ -3106,19 +3194,94 @@ def plot_traces_with_speed_threshold(
             print(f"Warning [{date_str}]: skipped trials with no poke_odor_end in position_poke_times: {skipped_no_poke_end}")
 
     figs = {}
+
+    def _coord_limits(axis):
+        vals = []
+        for cond_traces in traces.values():
+            for tr in cond_traces:
+                arr = np.asarray(tr[axis], dtype=float)
+                vals.extend(arr[np.isfinite(arr)])
+        for cond_markers in markers.values():
+            for mk in cond_markers:
+                xy = mk.get("xy")
+                if xy is None:
+                    continue
+                val = xy[0] if axis == "x" else xy[1]
+                if np.isfinite(val):
+                    vals.append(float(val))
+        if not vals:
+            return None
+        return float(np.nanmin(vals)), float(np.nanmax(vals))
+
+    def _normalize_limits(limits, axis):
+        if limits is None:
+            limits = _coord_limits(axis)
+        if limits is None:
+            return None
+        lo, hi = limits
+        return float(lo), float(hi)
+
+    x_source_limits = _normalize_limits(xlim, "x")
+    y_source_limits = _normalize_limits(ylim, "y")
+    x_display_lim = x_source_limits
+    y_display_lim = y_source_limits
+
+    def _scale_axis(values, limits):
+        values = np.asarray(values, dtype=float)
+        if position_units == "px":
+            return values
+        lo, hi = limits
+        span = hi - lo
+        if span == 0:
+            return np.full_like(values, np.nan, dtype=float)
+        scaled = (values - lo) / span * arena_size_cm
+        return np.clip(scaled, 0.0, arena_size_cm)
+
+    def _x_display(values):
+        return _scale_axis(values, x_source_limits)
+
+    def _y_display(values):
+        return _scale_axis(values, y_source_limits)
+
+    if position_units == "cm":
+        if x_source_limits is None or y_source_limits is None:
+            raise ValueError("Cannot convert to cm without finite x/y coordinate limits")
+        x_display_lim = tuple(float(v) for v in _x_display(x_source_limits))
+        y_display_lim = tuple(float(v) for v in _y_display(y_source_limits))
+        if verbose:
+            print(
+                "[plot_traces_with_speed_threshold] position mapping: "
+                f"x px {x_source_limits} -> cm {x_display_lim}; "
+                f"y px {y_source_limits} -> cm {y_display_lim}"
+            )
+
     for cond, label in [("rewarded", "Rewarded"), ("unrewarded", "Unrewarded"), ("fa", "False Alarms")]:
         if not traces[cond]:
             continue
         fig, ax = plt.subplots(figsize=figsize)
         for tr in traces[cond]:
-            ax.plot(tr["x"], tr["y"], color=tr["color"])
+            ax.plot(_x_display(tr["x"]), _y_display(tr["y"]), color=tr["color"])
         for mk in markers[cond]:
-            ax.scatter(mk["xy"][0], mk["xy"][1], color="black", zorder=5)
+            ax.scatter(_x_display([mk["xy"][0]])[0], _y_display([mk["xy"][1]])[0], color="black", zorder=5)
         ax.set_title(f"{label} traces with speed-threshold crossing")
-        ax.set_xlabel("X Position (px)")
-        ax.set_ylabel("Y Position (px)")
+        unit_label = "cm" if position_units == "cm" else "px"
+        ax.set_xlabel(f"X Position ({unit_label})")
+        ax.set_ylabel(f"Y Position ({unit_label})")
+        if x_display_lim is not None:
+            ax.set_xlim(x_display_lim)
+        if y_display_lim is not None:
+            ax.set_ylim(y_display_lim)
+        if position_units == "cm":
+            tick_values = np.linspace(0.0, arena_size_cm, 6)
+            ax.set_xticks(tick_values)
+            ax.set_yticks(tick_values)
         if invert_y:
             ax.invert_yaxis()
+        if position_units == "cm":
+            tick_values = np.linspace(0.0, arena_size_cm, 6)
+            ax.set_yticks(tick_values)
+            if invert_y:
+                ax.set_yticklabels([f"{v:g}" for v in tick_values[::-1]])
         ax.set_aspect('equal', adjustable='box')
         fig.tight_layout()
         figs[cond] = fig
@@ -3217,14 +3380,26 @@ def plot_tortuosity_lines_overlay(
         raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
 
     start_target_s = -bin_ms / 2000.0
+    port_colors = {1: "#FF6B6B", 2: "#4ECDC4"}
     cond_colors = {"rewarded": "#4CAF50", "unrewarded": "#F44336", "fa": "#2196F3"}
     data_line_color = "#424242"
     fixed_line_color = "#9C27B0"
 
+    def _port_from_identity(val):
+        if pd.isna(val):
+            return None
+        s = str(val).strip().lower()
+        if s in {"a", "odora", "odor_a", "1", "porta", "port_a"}:
+            return 1
+        if s in {"b", "odorb", "odor_b", "2", "portb", "port_b"}:
+            return 2
+        return None
+
     def _infer_port(row):
         for col in [
             "response_port", "rewarded_port", "reward_port", "supply_port",
-            "choice_port", "port", "fa_port",
+            "choice_port", "port", "fa_port", "first_supply_port",
+            "first_reward_poke_port", "last_reward_port", "odor_port",
         ]:
             if col in row and pd.notna(row[col]):
                 try:
@@ -3234,7 +3409,35 @@ def plot_tortuosity_lines_overlay(
                         return int(float(row[col]))
                     except Exception:
                         continue
+        for col in ["first_supply_odor_identity", "last_odor_name", "last_odor", "odor_name", "odor"]:
+            if col in row:
+                port = _port_from_identity(row.get(col))
+                if port is not None:
+                    return port
         return None
+
+    def _port_for_coloring(row, cond):
+        if cond == "fa":
+            preferred_cols = ["fa_port"]
+        elif cond == "unrewarded":
+            preferred_cols = ["first_reward_poke_port", "response_port", "choice_port"]
+        else:
+            preferred_cols = ["first_supply_port", "first_supply_odor_identity", "rewarded_port", "reward_port"]
+
+        for col in preferred_cols:
+            if col not in row or pd.isna(row[col]):
+                continue
+            port = _port_from_identity(row[col])
+            if port is not None:
+                return port
+            try:
+                return int(row[col])
+            except Exception:
+                try:
+                    return int(float(row[col]))
+                except Exception:
+                    continue
+        return _infer_port(row)
 
     def _condition_label(row):
         rtc = str(row.get("response_time_category", "")).lower()
@@ -3332,11 +3535,13 @@ def plot_tortuosity_lines_overlay(
             start_xy = seg.iloc[start_idx][["X", "Y"]].to_numpy(dtype=float)
             end_xy = seg.iloc[end_idx][["X", "Y"]].to_numpy(dtype=float)
 
-            port = _infer_port(row)
+            port = _port_for_coloring(row, cond)
             fixed_start = np.asarray(fixed_start_xy, dtype=float)
             fixed_goal = np.asarray(fixed_goal_b_xy if port == 2 else fixed_goal_a_xy, dtype=float)
 
-            traces[cond].append((x_arr, y_arr))
+            trace_color = port_colors.get(port, cond_colors[cond]) if cond in {"rewarded", "unrewarded"} else cond_colors[cond]
+
+            traces[cond].append((x_arr, y_arr, trace_color))
             data_lines[cond].append((start_xy, end_xy))
             fixed_lines[cond].append((fixed_start, fixed_goal))
 
@@ -3344,8 +3549,8 @@ def plot_tortuosity_lines_overlay(
             if not traces[cond]:
                 continue
             fig, ax = plt.subplots(figsize=figsize)
-            for (x_arr, y_arr), (sxy, gxy), (fsxy, fgxy) in zip(traces[cond], data_lines[cond], fixed_lines[cond]):
-                ax.plot(x_arr, y_arr, color=cond_colors[cond])
+            for (x_arr, y_arr, trace_color), (sxy, gxy), (fsxy, fgxy) in zip(traces[cond], data_lines[cond], fixed_lines[cond]):
+                ax.plot(x_arr, y_arr, color=trace_color)
                 ax.plot([sxy[0], gxy[0]], [sxy[1], gxy[1]], color=data_line_color, linestyle="--")
                 ax.plot([fsxy[0], fgxy[0]], [fsxy[1], fgxy[1]], color=fixed_line_color)
             # Always show a reference fixed B line for visual comparison
@@ -3359,6 +3564,15 @@ def plot_tortuosity_lines_overlay(
             ax.set_ylabel("Y (px)")
             ax.set_aspect("equal", adjustable="box")
             ax.invert_yaxis()
+            if cond in {"rewarded", "unrewarded"}:
+                from matplotlib.lines import Line2D
+                legend_handles = [
+                    Line2D([0], [0], color=port_colors[1], lw=2, label="A / port 1 trace"),
+                    Line2D([0], [0], color=port_colors[2], lw=2, label="B / port 2 trace"),
+                    Line2D([0], [0], color=data_line_color, lw=2, linestyle="--", label="data start-end"),
+                    Line2D([0], [0], color=fixed_line_color, lw=2, label="fixed start-goal"),
+                ]
+                ax.legend(handles=legend_handles, loc="best")
             figs[(date_str, cond)] = fig
 
             date_scope = [int(date_str)] if str(date_str).isdigit() else [date_str]
@@ -4278,6 +4492,3 @@ def plot_movement_analysis_statistics(
     if save and return_paths:
         return result, saved_paths
     return result
-
-
-
