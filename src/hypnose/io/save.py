@@ -177,6 +177,11 @@ _PRES_XTICK_BOXPLOT_LABELSIZE = 28
 # count, so save_figure enforces it per-axes). Configurable via
 # use_presentations_style(max_yticks=...).
 _PRESENTATION_MAX_YTICKS = 4
+# Same idea for x-ticks: cap a numeric x-axis to a few nicely rounded values
+# (5, 10, 15, ... rather than 7, 14, 21). Categorical x-axes (explicit string
+# tick labels, e.g. boxplot/violin/position plots) are left untouched.
+# Configurable via use_presentations_style(max_xticks=...).
+_PRESENTATION_MAX_XTICKS = 5
 
 
 def presentations_style() -> dict:
@@ -229,17 +234,33 @@ def _presentations_active() -> bool:
         return False
 
 
-def use_presentations_style(max_yticks: int = 4) -> None:
-    """Activate the presentations style globally and set the y-tick cap.
+def use_presentations_style(max_yticks: int = 4, max_xticks: int = 5) -> None:
+    """Activate the presentations style globally and set the tick caps.
 
     Call once (e.g. at the top of a notebook), analogous to
     ``mpl.rcParams.update(poster_style())``. Applying the style via a bare
     ``mpl.rcParams.update(presentations_style())`` also works — save_figure
-    detects the active style and still caps y-ticks (to 4).
+    detects the active style and still caps y-ticks (to 4) and numeric x-ticks
+    (to 5 nicely-rounded values).
     """
-    global _PRESENTATION_MAX_YTICKS
+    global _PRESENTATION_MAX_YTICKS, _PRESENTATION_MAX_XTICKS
     _PRESENTATION_MAX_YTICKS = max_yticks
+    _PRESENTATION_MAX_XTICKS = max_xticks
     mpl.rcParams.update(presentations_style())
+
+
+def nice_x_locator(max_ticks: int | None = None):
+    """A locator giving a few nicely-rounded *integer* x-ticks (5, 10, 15, ...
+    rather than 3, 6, 9, or fractional values for small ranges).
+
+    Numeric x-axes that would otherwise set one tick per session/day should use
+    this so the *displayed* figure already matches the presentations save-time
+    x-tick cap (which uses the same settings). ``max_ticks`` defaults to the
+    presentations x-tick cap.
+    """
+    from matplotlib.ticker import MaxNLocator
+    n = max_ticks if max_ticks is not None else _PRESENTATION_MAX_XTICKS
+    return MaxNLocator(nbins=n or 5, steps=[1, 2, 2.5, 5, 10], integer=True)
 
 
 # Apply the default (nature) style globally so display and saved figures match.
@@ -437,10 +458,11 @@ def save_figure(
     if clear_legends:
         strip_legends(fig)
 
-    # Presentations style: cap y-ticks to a few round values (no rcParam for
-    # this), and, for boxplot-style figures, enlarge the x-tick labels.
+    # Presentations style: cap y-ticks (and numeric x-ticks) to a few round
+    # values (no rcParam for this), and, for boxplot-style figures, enlarge the
+    # x-tick labels.
     if _presentations_active():
-        from matplotlib.ticker import MaxNLocator
+        from matplotlib.ticker import MaxNLocator, FixedLocator, FixedFormatter
         for _ax in fig.axes:
             if _PRESENTATION_MAX_YTICKS:
                 # nbins is a MAX; the "nice" steps prefer round values (0, 0.5,
@@ -448,6 +470,17 @@ def save_figure(
                 _ax.yaxis.set_major_locator(
                     MaxNLocator(nbins=_PRESENTATION_MAX_YTICKS, steps=[1, 2, 2.5, 5, 10])
                 )
+            if _PRESENTATION_MAX_XTICKS:
+                # Only touch a *numeric* x-axis: skip categorical axes (explicit
+                # string labels / fixed ticks, e.g. boxplot/violin/position
+                # plots), which set a FixedFormatter/FixedLocator. integer=True
+                # keeps ticks whole (5, 10, 15 — never 7.5).
+                _x_categorical = (
+                    isinstance(_ax.xaxis.get_major_formatter(), FixedFormatter)
+                    or isinstance(_ax.xaxis.get_major_locator(), FixedLocator)
+                )
+                if not _x_categorical:
+                    _ax.xaxis.set_major_locator(nice_x_locator())
             if boxplot:
                 _ax.tick_params(axis="x", labelsize=_PRES_XTICK_BOXPLOT_LABELSIZE)
             _ax.figure.canvas.draw_idle()

@@ -547,7 +547,7 @@ def plot_behavior_metrics(
                 unique_protocols.append(p)
         if "Unknown" in df["protocol"].unique():
             unique_protocols.append("Unknown")
-        cmap = cm.get_cmap("tab10", max(10, len(unique_protocols)))
+        cmap = cm.get_cmap("tab20", max(20, len(unique_protocols)))
         prot_to_color = {p: cmap(i % cmap.N) for i, p in enumerate(unique_protocols)}
         if "Unknown" in prot_to_color:
             prot_to_color["Unknown"] = (0.6, 0.6, 0.6, 1.0)
@@ -590,11 +590,11 @@ def plot_behavior_metrics(
         hr_series_mode = (plot_HR_separately and var == "hidden_rule_detection_rate")
 
         # When not in HR-series mode and not black_white, color encodes SUBJECT
-        # (tab10), and all markers collapse to a uniform dot.
+        # (tab20), and all markers collapse to a uniform dot.
         subject_colored_mode = (not hr_series_mode) and (not black_white)
         if subject_colored_mode:
-            subj_cmap = cm.get_cmap("tab10")
-            subj_to_color = {sid: subj_cmap(i % 10) for i, sid in enumerate(unique_subj)}
+            subj_cmap = cm.get_cmap("tab20")
+            subj_to_color = {sid: subj_cmap(i % 20) for i, sid in enumerate(unique_subj)}
         else:
             subj_to_color = {}
 
@@ -2969,6 +2969,8 @@ def plot_cumulative_rewards(
     show_session_boundaries=True,
     show_title=True,
     show_legend=True,
+    show_da_thresh=False,
+    da_thresh=80,
 ):
     """
     Plot cumulative rewards with inter-session gap collapsing.
@@ -3004,7 +3006,15 @@ def plot_cumulative_rewards(
     show_session_boundaries : bool, optional
         If True, draw thin grey vertical lines at session boundaries
         (default: True).
-    
+    show_da_thresh : bool, optional
+        If True, draw a black finely-dashed vertical line (spanning the full y
+        axis) at the start of the first session whose decision accuracy
+        (rewarded / (rewarded + unrewarded)) first exceeds ``da_thresh``. One
+        line per subject (default: False).
+    da_thresh : float, optional
+        Decision-accuracy threshold for ``show_da_thresh``, as a percentage
+        (e.g. 80). Values <= 1 are treated as a fraction (default: 80).
+
     Returns:
     --------
     fig, ax : matplotlib figure and axes
@@ -3036,7 +3046,10 @@ def plot_cumulative_rewards(
         return None
 
     fig, ax = plt.subplots(figsize=figsize)
-    colors = plt.cm.tab10(range(len(subjids)))
+    colors = plt.cm.tab20(range(len(subjids)))
+    da_cross_xs = []  # x-positions of per-subject decision-accuracy crossings
+    data_xmax_val = 0.0  # data extents (tracked here so axvline markers don't skew limits)
+    data_ymax_val = 0.0
 
     for subj_idx, subjid in enumerate(subjids):
         subj_dates = _dates_for(subjid)
@@ -3045,6 +3058,7 @@ def plot_cumulative_rewards(
             continue
         all_rewarded = []
         session_info = []
+        session_da = {}  # date_str -> decision accuracy (for show_da_thresh)
 
         # Find subject directory
         base_path = get_rawdata_root()
@@ -3066,6 +3080,17 @@ def plot_cumulative_rewards(
                 continue
             
             views = _load_trial_views(results_dir)
+
+            # Per-session decision accuracy = rewarded / (rewarded + unrewarded).
+            if show_da_thresh:
+                td_da = views.get("trial_data", pd.DataFrame())
+                if not td_da.empty and "response_time_category" in td_da.columns:
+                    rtc = td_da["response_time_category"].astype(str)
+                    r = int((rtc == "rewarded").sum())
+                    u = int((rtc == "unrewarded").sum())
+                    if (r + u) > 0:
+                        session_da[date_str] = r / (r + u)
+
             rewarded_trials = views.get("rewarded", pd.DataFrame())
             if rewarded_trials.empty:
                 continue
@@ -3181,6 +3206,20 @@ def plot_cumulative_rewards(
         if show_session_boundaries:
             for boundary in subj_session_starts:
                 ax.axvline(x=boundary, color='gray', linestyle='-', linewidth=0.8, alpha=0.6, zorder=3)
+
+        # First session whose decision accuracy exceeds da_thresh, marked at that
+        # session's END; drawn later as a black finely-dashed full-height vertical
+        # line (after axis limits are set so it doesn't affect them). One per subject.
+        if show_da_thresh and session_info:
+            thresh_frac = da_thresh / 100.0 if da_thresh > 1 else float(da_thresh)
+            for sess in session_info:  # chronological order
+                d = sess['date']
+                da = session_da.get(d)
+                if da is not None and not np.isnan(da) and da > thresh_frac:
+                    sess_end = pd.to_datetime(sess['runs'][-1]['end_time']).tz_localize(None)
+                    cross_x = (sess_end - global_start_time).total_seconds() - session_offsets.get(d, 0)
+                    da_cross_xs.append(cross_x)
+                    break
         
         if split_days:
             # Reset count for each day
@@ -3199,27 +3238,30 @@ def plot_cumulative_rewards(
         else:
             # Continuous accumulation across days
             combined['cumulative_rewards'] = range(1, len(combined) + 1)
-            ax.plot(combined['time_seconds'], 
+            ax.plot(combined['time_seconds'],
                    combined['cumulative_rewards'],
                    color=colors[subj_idx],
                    marker='o',
                    markersize=3,
                    label=f'Subject {subjid}')
-    
+
+        if len(combined):
+            data_xmax_val = max(data_xmax_val, float(combined['time_seconds'].max()))
+            data_ymax_val = max(data_ymax_val, float(combined['cumulative_rewards'].max()))
+
     ax.set_xlabel('Time (s)')
     ax.set_ylabel('Cumulative Rewards')
     if show_title:
         ax.set_title(title if title else 'Accumulated Rewards Over Time')
-    data_xmax = max(
-        (line.get_xdata().max() for line in ax.get_lines() if len(line.get_xdata())),
-        default=ax.get_xlim()[1],
-    )
-    data_ymax = max(
-        (line.get_ydata().max() for line in ax.get_lines() if len(line.get_ydata())),
-        default=ax.get_ylim()[1],
-    )
+    data_xmax = data_xmax_val if data_xmax_val > 0 else ax.get_xlim()[1]
+    data_ymax = data_ymax_val if data_ymax_val > 0 else ax.get_ylim()[1]
     ax.set_xlim(left=0, right=data_xmax * 1.01)
     ax.set_ylim(bottom=-data_ymax * 0.01, top=data_ymax * 1.02)
+
+    # Decision-accuracy threshold marker(s): full-height, black, finely dashed.
+    for cross_x in da_cross_xs:
+        ax.axvline(x=cross_x, color='black', linestyle=(0, (2, 2)), linewidth=1.2, zorder=4)
+
     if show_legend:
         ax.legend()
     
@@ -3313,7 +3355,7 @@ def plot_cumulative_rewards_by_trial(
     boundary_on = show_session_boundaries and single_subject
 
     fig, ax = plt.subplots(figsize=figsize)
-    colors = plt.cm.tab10(range(len(subjids)))
+    colors = plt.cm.tab20(range(len(subjids)))
 
     for subj_idx, subjid in enumerate(subjids):
         subj_dates = _dates_for(subjid)
@@ -3630,6 +3672,7 @@ def _plot_metric_over_sessions(
     verbose,
     show_gap_shading,
     show_session_boundaries,
+    show_iqr,
     figsize,
 ):
     """Core for latency/ITI plots: a time-axis rolling median+IQR figure and a
@@ -3660,7 +3703,7 @@ def _plot_metric_over_sessions(
 
     fig_time, ax_time = plt.subplots(figsize=figsize)
     fig_trial, ax_trial = plt.subplots(figsize=figsize)
-    colors = plt.cm.tab10(range(len(subjids)))
+    colors = plt.cm.tab20(range(len(subjids)))
 
     for subj_idx, subjid in enumerate(subjids):
         subj_dates = _dates_for(subjid)
@@ -3690,12 +3733,29 @@ def _plot_metric_over_sessions(
                 for boundary in timeline["time_boundaries"]:
                     ax_time.axvline(x=boundary, color="gray", linestyle="-", linewidth=0.8, alpha=0.6, zorder=3)
             mx, med, q25, q75 = _rolling_median_iqr(
-                tdata["time_seconds"].to_numpy(), tdata[value_col].to_numpy(), window_size, step_size,
+                tdata["time_seconds"].to_numpy(),
+                tdata[value_col].to_numpy(),
+                window_size,
+                step_size,
             )
-            if len(mx):
-                ax_time.fill_between(mx, q25, q75, color=color, alpha=0.2, zorder=2)
-                ax_time.plot(mx, med, color=color, linewidth=2, label=f"Subject {subjid}", zorder=3)
 
+            if len(mx):
+                if show_iqr:
+                    ax_time.fill_between(
+                        mx, q25, q75,
+                        color=color,
+                        alpha=0.2,
+                        zorder=2,
+                    )
+
+                ax_time.plot(
+                    mx,
+                    med,
+                    color=color,
+                    linewidth=2,
+                    label=f"Subject {subjid}",
+                    zorder=3,
+                )
         # ---- Trial-axis: cumulative value over continuous trial index ----
         contrib = combined[value_col].to_numpy(dtype=float)
         contrib = np.nan_to_num(contrib, nan=0.0)
@@ -3762,6 +3822,7 @@ def plot_latency_over_time(
     rewarded_only=False,
     window_size=20,
     step_size=5,
+    show_iqr=False, 
     save=False,
     verbose=True,
     show_gap_shading=True,
@@ -3790,7 +3851,7 @@ def plot_latency_over_time(
         unit="ms", rewarded_only=rewarded_only, window_size=window_size, step_size=step_size,
         save=save, save_key="latency_over_time", verbose=verbose,
         show_gap_shading=show_gap_shading, show_session_boundaries=show_session_boundaries,
-        figsize=figsize,
+        figsize=figsize, show_iqr=show_iqr,
     )
 
 
@@ -3800,6 +3861,7 @@ def plot_iti_over_time(
     *,
     window_size=20,
     step_size=5,
+    show_iqr=False,
     save=False,
     verbose=True,
     show_gap_shading=True,
@@ -3821,7 +3883,7 @@ def plot_iti_over_time(
         rewarded_only=False, window_size=window_size, step_size=step_size,
         save=save, save_key="iti_over_time", verbose=verbose,
         show_gap_shading=show_gap_shading, show_session_boundaries=show_session_boundaries,
-        figsize=figsize,
+        figsize=figsize, show_iqr=show_iqr
     )
 
 
@@ -4271,7 +4333,7 @@ def plot_position_completion_rate(
         If False, no title is rendered (useful for poster-style figures).
     color_by_id : bool
         If True, each animal's dots are colored consistently using the same
-        per-subject tab10 palette as :func:`plot_cumulative_rewards`.
+        per-subject tab20 palette as :func:`plot_cumulative_rewards`.
     avg_per_animal : bool
         If True, no individual session dots are drawn. Instead each animal's
         session rates at a position are shown as a small violin (one violin per
@@ -4379,7 +4441,7 @@ def plot_position_completion_rate(
 
     # Per-subject color map (shared palette with plot_cumulative_rewards).
     # Sorted by ascending id so the same subject keeps its color across plots.
-    subj_colors = {s: plt.cm.tab10(i % 10) for i, s in enumerate(sorted(subjids))}
+    subj_colors = {s: plt.cm.tab20(i % 10) for i, s in enumerate(sorted(subjids))}
 
     for x_idx, p in enumerate(positions):
         rates = np.array(rates_per_position[p], dtype=float)
@@ -4554,7 +4616,7 @@ def plot_false_alarm_rate_by_position(
     show_title : bool
         If False, no title is rendered (useful for poster-style figures).
     color_by_id : bool
-        If True, each animal's dots are colored consistently (shared tab10
+        If True, each animal's dots are colored consistently (shared tab20
         palette, assigned by ascending id).
     avg_per_animal : bool
         If True, no individual dots; each animal's session rates become a small
@@ -4662,7 +4724,7 @@ def plot_false_alarm_rate_by_position(
 
     # Per-subject color map (shared palette with plot_cumulative_rewards).
     # Sorted by ascending id so the same subject keeps its color across plots.
-    subj_colors = {s: plt.cm.tab10(i % 10) for i, s in enumerate(sorted(subjids))}
+    subj_colors = {s: plt.cm.tab20(i % 20) for i, s in enumerate(sorted(subjids))}
 
     for x_idx, p in enumerate(positions):
         rates = np.array(rates_per_position[p], dtype=float)
@@ -4864,7 +4926,7 @@ def plot_poke_duration_by_position(
         If False, no titles are rendered (useful for poster-style figures).
     color_by_id : bool
         If True, each animal's dots are colored consistently using the same
-        per-subject tab10 palette as :func:`plot_cumulative_rewards`.
+        per-subject tab20 palette as :func:`plot_cumulative_rewards`.
     avg_per_animal : bool
         If True, no individual session dots are drawn. Instead each animal's
         session means at a position are shown as a small violin (one violin per
@@ -4963,7 +5025,7 @@ def plot_poke_duration_by_position(
 
     # Per-subject color map (shared palette with plot_cumulative_rewards).
     # Sorted by ascending id so the same subject keeps its color across plots.
-    subj_colors = {s: plt.cm.tab10(i % 10) for i, s in enumerate(sorted(subjids))}
+    subj_colors = {s: plt.cm.tab20(i % 20) for i, s in enumerate(sorted(subjids))}
 
     rng = np.random.default_rng(0)
     halfwidth = 0.25
@@ -5132,7 +5194,7 @@ def plot_decision_accuracy(
         If False, no title is rendered (useful for poster-style figures).
     color_by_id : bool
         If True, each animal's thin line is colored using the shared per-subject
-        tab10 palette (:func:`plot_cumulative_rewards`). Colors are assigned by
+        tab20 palette (:func:`plot_cumulative_rewards`). Colors are assigned by
         ascending subject id, so the same ids keep the same colors across plots.
     mean : bool
         If True (default) overlay the thick group-mean line. If False, no mean
@@ -5259,7 +5321,7 @@ def plot_decision_accuracy(
 
     # Per-subject color map (shared palette with plot_cumulative_rewards).
     # Sorted by ascending id so the same subject keeps its color across plots.
-    subj_colors = {s: plt.cm.tab10(i % 10) for i, s in enumerate(sorted(subjids))}
+    subj_colors = {s: plt.cm.tab20(i % 20) for i, s in enumerate(sorted(subjids))}
 
     # Line widths shared with plot_behavior_metrics.
     per_series_lw, mean_lw = _series_line_widths(mean)

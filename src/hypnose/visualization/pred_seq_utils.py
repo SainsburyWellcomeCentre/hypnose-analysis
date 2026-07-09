@@ -10,10 +10,11 @@ import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 
 from hypnose.utils.helpers import _filter_session_dirs, _iter_subject_dirs
 from hypnose.io.paths import get_derivatives_root
-from hypnose.io.save import save_figure
+from hypnose.io.save import save_figure, nice_x_locator
 from matplotlib.patches import Patch
 
 
@@ -235,60 +236,46 @@ def _add_size_legend(ax, counts, *, loc="lower right", title="Trials per point")
 		ax.add_artist(primary_legend)
 
 
-def _plot_box_with_points(ax, groups, y_label, x_label):
+def _plot_violins_with_stats(ax, groups, y_label, x_label, *, color_map=None):
+	"""One violin per category (coloured by color_map, matching the summary
+	line plots), with a dark SD whisker and a white mean marker on top."""
 	labels = list(groups.keys())
 	data = [groups[label] for label in labels]
-	mean_half_width = 0.18
-	cap_half_width = 0.10
-	mean_lw = 2.2
-	sem_lw = 1.4
-	jitter_half_width = 0.15
-	rng = np.random.default_rng(0)
+	whisker_lw = 1.6
+	cap_half_width = 0.06
 	for i, values in enumerate(data, start=1):
 		if not values:
 			continue
-		x = i + rng.uniform(-jitter_half_width, jitter_half_width, size=len(values))
-		ax.scatter(x, values, s=18, color="blue", alpha=0.4, zorder=2)
+		label = labels[i - 1]
+		color = _resolve_color(label, color_map) if color_map is not None else "#4c72b0"
+		edge = _darken(color)
 		mean_val = float(np.mean(values))
-		sem_val = float(np.std(values, ddof=1) / np.sqrt(len(values))) if len(values) > 1 else 0.0
-		ax.hlines(
-			mean_val,
-			i - mean_half_width,
-			i + mean_half_width,
-			colors="black",
-			linewidth=mean_lw,
-			zorder=3,
-		)
-		ax.vlines(
-			i,
-			mean_val - sem_val,
-			mean_val + sem_val,
-			colors="black",
-			linewidth=sem_lw,
-			zorder=3,
-		)
-		if sem_val > 0:
-			ax.hlines(
-				mean_val - sem_val,
-				i - cap_half_width,
-				i + cap_half_width,
-				colors="black",
-				linewidth=sem_lw,
-				zorder=3,
+		if len(values) > 1:
+			parts = ax.violinplot(
+				[values], positions=[i], widths=0.8,
+				showextrema=False, showmeans=False, showmedians=False,
 			)
-			ax.hlines(
-				mean_val + sem_val,
-				i - cap_half_width,
-				i + cap_half_width,
-				colors="black",
-				linewidth=sem_lw,
-				zorder=3,
-			)
+			for body in parts["bodies"]:
+				body.set_facecolor(color)
+				body.set_edgecolor(edge)
+				body.set_alpha(0.8)
+				body.set_linewidth(1.2)
+			err_val = float(np.std(values, ddof=1))
+		else:
+			# Single sample cannot form a violin; mark the point.
+			ax.scatter([i], values, s=30, color=color, edgecolors=edge, linewidths=1.0, zorder=4)
+			err_val = 0.0
+		# SD whisker with small caps (dark neutral, reads on any fill colour).
+		if err_val > 0:
+			ax.vlines(i, mean_val - err_val, mean_val + err_val, colors="#2b2b2b", linewidth=whisker_lw, zorder=4)
+			ax.hlines([mean_val - err_val, mean_val + err_val], i - cap_half_width, i + cap_half_width, colors="#2b2b2b", linewidth=whisker_lw, zorder=4)
+		# Mean: white dot with a dark edge, clearly visible on any violin colour.
+		ax.scatter([i], [mean_val], s=44, facecolor="white", edgecolors="#2b2b2b", linewidths=1.5, zorder=5)
+	ax.set_xlim(0.5, len(labels) + 0.5)
 	ax.set_ylabel(y_label)
 	ax.set_xlabel(x_label)
 	ax.set_xticks(range(1, len(labels) + 1))
 	ax.set_xticklabels(labels, rotation=45, ha="right")
-
 
 def _order_sequence_labels(groups):
 	preferred = ["F-G-A", "E-D-A", "E-D-B", "C-G-B"]
@@ -334,8 +321,28 @@ SEQUENCE_ORDER = ["F-G-A", "E-D-A", "E-D-B", "C-G-B"]
 ODOR_ORDER = ["OdorA", "OdorB", "OdorC", "OdorD", "OdorE", "OdorF", "OdorG-F", "OdorG-C", "OdorG"]
 
 
+def _darken(color, factor=0.62):
+	"""Return a darker shade of a colour (for violin edges)."""
+	r, g, b = mcolors.to_rgb(color)
+	return (r * factor, g * factor, b * factor)
+
+
 def _resolve_color(label, color_map, default="#444444"):
 	return color_map.get(label, default)
+
+def _canonical_odor(value) -> str:
+	"""Bare upper-case odor letter: 'OdorC' / 'odor c' / 'C' -> 'C'."""
+	t = str(value).strip()
+	return t[4:].strip().upper() if t.lower().startswith("odor") else t.upper()
+
+
+def _build_odor_filter(odor):
+	"""Set of canonical odor letters to keep, or None for no filtering. Accepts
+	a single odor or an iterable; 'A' and 'OdorA' both match odor A."""
+	if odor is None:
+		return None
+	items = [odor] if isinstance(odor, str) else list(odor)
+	return {_canonical_odor(o) for o in items}
 
 
 def _ordered_groups(group_keys, preferred):
@@ -407,8 +414,9 @@ def _plot_summary_daily(session_data, *, color_map, group_order, ylabel, title, 
 	ax.set_xlabel("Session")
 	ax.set_ylabel(ylabel)
 	ax.set_title(title)
-	ax.set_xticks(range(1, n_sessions + 1))
-	ax.set_xticklabels([str(i) for i in range(1, n_sessions + 1)])
+	# Numeric session axis: a few nicely-rounded integer ticks (5, 10, 15,
+	# ...) rather than one per session; matches the save-time x-tick cap.
+	ax.xaxis.set_major_locator(nice_x_locator())
 	ax.spines["top"].set_visible(False)
 	ax.spines["right"].set_visible(False)
 	if ylim_bottom is not None:
@@ -645,7 +653,7 @@ def last_odor_poke_time(
 			if pooled:
 				fig, ax = plt.subplots(figsize=(10, 5))
 				ordered = {k: pooled[k] for k in _order_sequence_labels(pooled)}
-				_plot_box_with_points(ax, ordered, "Last Odor Poke Time (ms)", "Odor Sequence")
+				_plot_violins_with_stats(ax, ordered, "Last Odor Poke\nTime (ms)", "Odor Sequence", color_map=SEQUENCE_COLORS)
 				ax.set_title(f"Subjid {subjid} {cat} last-odor poke time")
 				ax.set_ylim(bottom=0)
 				fig.tight_layout()
@@ -660,7 +668,7 @@ def last_odor_poke_time(
 					per_cat_sessions[cat],
 					color_map=SEQUENCE_COLORS,
 					group_order=SEQUENCE_ORDER,
-					ylabel="Last Odor Poke Time (ms)",
+					ylabel="Last Odor Poke\nTime (ms)",
 					title=f"Subjid {subjid} {cat} last-odor poke time ({mode_label})",
 					moving_avg=moving_avg,
 					window_size=window_size,
@@ -747,7 +755,7 @@ def trial_poke_duration(
 			if pooled:
 				fig, ax = plt.subplots(figsize=(10, 5))
 				ordered = {k: pooled[k] for k in _order_sequence_labels(pooled)}
-				_plot_box_with_points(ax, ordered, "Trial Poke Duration (ms)", "Odor Sequence")
+				_plot_violins_with_stats(ax, ordered, "Trial Poke Duration (ms)", "Odor Sequence", color_map=SEQUENCE_COLORS)
 				ax.set_title(f"Subjid {subjid} {cat} trial poke duration")
 				fig.tight_layout()
 				figs.append(fig)
@@ -793,14 +801,20 @@ def first_odor_poke_duration(
 	moving_avg: bool = False,
 	window_size: int = 10,
 	step_size: int = 1,
+	odor: Optional[Union[str, Iterable[str]]] = None,
 ):
 	"""
 	Boxplot of first-odor poke duration grouped by odor name (completed trials only).
+
+	``odor`` restricts which first-odor(s) are plotted (e.g. "A"/"OdorA" or
+	["A", "B"]); trials whose first odor is not in the filter are dropped. Useful
+	to exclude the occasional buggy trial that starts on an unexpected odor.
 
 	A cross-date summary plot is added when multiple sessions are loaded
 	(daily mean or rolling within session — see ``last_odor_poke_time``).
 	"""
 	figs = []
+	odor_filter = _build_odor_filter(odor)
 	for subjid, date_vals, results_dirs in _collect_sessions(subjids, dates):
 		pooled = {}
 		session_records = []
@@ -821,6 +835,8 @@ def first_odor_poke_duration(
 				poke_ms = first_entry.get("poke_time_ms")
 				if odor_name is None or poke_ms is None:
 					continue
+				if odor_filter is not None and _canonical_odor(odor_name) not in odor_filter:
+					continue
 				key = str(odor_name)
 				poke_val = float(poke_ms)
 				trial_idx = int(row["_trial_idx"])
@@ -831,7 +847,7 @@ def first_odor_poke_duration(
 		if pooled:
 			fig, ax = plt.subplots(figsize=(10, 5))
 			ordered = {k: pooled[k] for k in _order_odor_labels(pooled)}
-			_plot_box_with_points(ax, ordered, "Poke Duration", "Odor")
+			_plot_violins_with_stats(ax, ordered, "Poke Duration", "Odor", color_map=ODOR_COLORS)
 			ax.set_title(f"Subjid {subjid} first-odor poke duration")
 			ax.set_ylim(bottom=0)
 			fig.tight_layout()
@@ -874,9 +890,13 @@ def poke_time_all_pos(
 	moving_avg: bool = False,
 	window_size: int = 10,
 	step_size: int = 1,
+	odor: Optional[Union[str, Iterable[str]]] = None,
 ):
 	"""
 	Boxplots of poke duration pooled across positions, grouped by odor name.
+
+	``odor`` restricts which odor(s) are plotted (e.g. "A"/"OdorA" or ["A", "B"]);
+	entries whose odor is not in the filter are dropped (OdorG matches "G").
 
 	Two plots are produced per subject: one for completed trials (is_aborted=False)
 	and one for aborted trials (is_aborted=True), so poke durations can be compared
@@ -884,6 +904,7 @@ def poke_time_all_pos(
 	session, or rolling within session if ``moving_avg=True``).
 	"""
 	figs = []
+	odor_filter = _build_odor_filter(odor)
 	categories = [("completed", False), ("aborted", True)]
 	for subjid, date_vals, results_dirs in _collect_sessions(subjids, dates):
 		per_cat_pooled = {name: {} for name, _ in categories}
@@ -919,7 +940,7 @@ def poke_time_all_pos(
 									key = "OdorG-F"
 								else:
 									key = None
-							if key is not None:
+							if key is not None and (odor_filter is None or _canonical_odor(odor_name) in odor_filter):
 								poke_val = float(poke_ms)
 								session_groups.setdefault(key, []).append((trial_idx, poke_val))
 								per_cat_pooled[name].setdefault(key, []).append(poke_val)
@@ -932,7 +953,7 @@ def poke_time_all_pos(
 			if pooled:
 				fig, ax = plt.subplots(figsize=(10, 5))
 				ordered = {k: pooled[k] for k in _order_odor_labels(pooled)}
-				_plot_box_with_points(ax, ordered, "Poke Duration (ms)", "Odor")
+				_plot_violins_with_stats(ax, ordered, "Poke Duration (ms)", "Odor", color_map=ODOR_COLORS)
 				ax.set_title(f"Subjid {subjid} poke duration (all positions, {name})")
 				ax.set_ylim(bottom=0)
 				fig.tight_layout()
@@ -1066,7 +1087,7 @@ def response_time(
 		if pooled:
 			fig, ax = plt.subplots(figsize=(10, 5))
 			ordered = {k: pooled[k] for k in _order_sequence_labels(pooled)}
-			_plot_box_with_points(ax, ordered, "Response Time (ms)", "Odor Sequence")
+			_plot_violins_with_stats(ax, ordered, "Response Time (ms)", "Odor Sequence", color_map=SEQUENCE_COLORS)
 			ax.set_title(f"Subjid {subjid} response time")
 			fig.tight_layout()
 			figs.append(fig)
@@ -1264,7 +1285,7 @@ def fa_analysis(
 		if poke_groups:
 			fig, ax = plt.subplots(figsize=(10, 5))
 			ordered = {k: poke_groups[k] for k in _order_odor_labels(poke_groups)}
-			_plot_box_with_points(ax, ordered, "Poke Time (ms)", "Odor")
+			_plot_violins_with_stats(ax, ordered, "Poke Time (ms)", "Odor", color_map=ODOR_COLORS)
 			ax.set_title(f"Subjid {subjid} FA poke time by odor")
 			ax.set_ylim(bottom=0)
 			fig.tight_layout()
@@ -1480,7 +1501,7 @@ def valve_to_reward(
 			if pooled:
 				fig, ax = plt.subplots(figsize=(10, 5))
 				ordered = {k: pooled[k] for k in _order_sequence_labels(pooled)}
-				_plot_box_with_points(ax, ordered, "Valve→Reward Time (ms)", "Odor Sequence")
+				_plot_violins_with_stats(ax, ordered, "Valve→Reward Time (ms)", "Odor Sequence", color_map=SEQUENCE_COLORS)
 				ax.set_title(f"Subjid {subjid} {cat} valve-to-reward time")
 				ax.set_ylim(bottom=0)
 				fig.tight_layout()
@@ -1573,8 +1594,9 @@ def _plot_performance_daily(sessions_records, subjid):
 	ax.set_xlabel("Session")
 	ax.set_ylabel("Performance %")
 	ax.set_title(f"Subjid {subjid} performance")
-	ax.set_xticks(range(1, n_sessions + 1))
-	ax.set_xticklabels([str(i) for i in range(1, n_sessions + 1)])
+	# Numeric session axis: a few nicely-rounded integer ticks (5, 10, 15,
+	# ...) rather than one per session; matches the save-time x-tick cap.
+	ax.xaxis.set_major_locator(nice_x_locator())
 	ax.set_ylim(0, 100)
 	ax.spines["top"].set_visible(False)
 	ax.spines["right"].set_visible(False)
@@ -1824,7 +1846,7 @@ def cummulative_poke_time(
 			if pooled:
 				fig, ax = plt.subplots(figsize=(10, 5))
 				ordered = {k: pooled[k] for k in _order_sequence_labels(pooled)}
-				_plot_box_with_points(ax, ordered, "Cummulative Poke Duration (ms)", "Odor Sequence")
+				_plot_violins_with_stats(ax, ordered, "Cummulative Poke\nDuration (ms)", "Odor Sequence", color_map=SEQUENCE_COLORS)
 				ax.set_title(f"Subjid {subjid} {cat} cummulative poke duration")
 				ax.set_ylim(bottom=0)
 				fig.tight_layout()
@@ -1841,7 +1863,7 @@ def cummulative_poke_time(
 					per_cat_sessions[cat],
 					color_map=SEQUENCE_COLORS,
 					group_order=SEQUENCE_ORDER,
-					ylabel="Cummulative Poke Duration (ms)",
+					ylabel="Cummulative Poke\nDuration (ms)",
 					title=f"Subjid {subjid} {cat} cummulative poke duration ({mode_label})",
 					moving_avg=moving_avg,
 					window_size=window_size,
