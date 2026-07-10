@@ -48,7 +48,7 @@ from hypnose.models.switchpoint_helpers import (
 )
 from hypnose.qc.validate import validate_subject
 from hypnose.utils.helpers import _filter_session_dirs, _iter_subject_dirs
-from hypnose.visualization.visualization_utils import _load_trial_views
+from hypnose.visualization.visualization_utils import _load_trial_views, _odor_to_letter
 
 # Truthy spellings of hidden_rule_success: bool in parquet, str via the CSV fallback.
 # Mirrors the coercion the visualization helpers use.
@@ -59,6 +59,12 @@ _CONSTANT_COLOR = "#3C5488"
 _SWITCH_COLOR = "#E64B35"
 _LOGISTIC_COLOR = "#00A087"
 _DATA_COLOR = "#2b2b2b"
+
+# Reward identity of a trial. Trials whose identity cannot be resolved are drawn in grey and
+# are dropped entirely when split_ab is on.
+_AB_COLORS = {"A": "#E53935", "B": "#00796B"}
+_AB_UNKNOWN_COLOR = "#BDBDBD"
+_AB_UNKNOWN = ""
 
 # Trials per bin of the empirical P(SHORT) trace drawn under the model fits.
 _ROLLING_WINDOW = 21
@@ -119,6 +125,27 @@ def _short_mask(td: pd.DataFrame) -> pd.Series:
     return td["hidden_rule_success"].astype(str).str.lower().isin(_HR_TRUE)
 
 
+def _ab_label(td: pd.DataFrame) -> pd.Series:
+    """Reward identity of each trial: ``"A"``, ``"B"``, or ``""`` when unresolved.
+
+    ``first_supply_odor_identity`` is the reward the trial actually delivered, so it is
+    authoritative -- but it is null whenever nothing was supplied (every unrewarded/timeout
+    trial, and a few rewarded ones), and a handful of early sessions lack the column.
+    ``last_odor`` then resolves LONG trials, where the animal ran to the end of the sequence
+    and the final odor *is* the reward odor. It cannot resolve SHORT trials, whose last odor
+    is the hidden-rule odor rather than A or B, so those stay unresolved.
+    """
+    if "first_supply_odor_identity" in td.columns:
+        supply = td["first_supply_odor_identity"].astype(str)
+        letters = supply.where(supply.isin(_AB_COLORS), _AB_UNKNOWN)
+    else:
+        letters = pd.Series(_AB_UNKNOWN, index=td.index, dtype=object)
+    if "last_odor" in td.columns:
+        fallback = td["last_odor"].map(_odor_to_letter)
+        letters = letters.mask(letters == _AB_UNKNOWN, fallback.where(fallback.isin(_AB_COLORS), _AB_UNKNOWN))
+    return letters
+
+
 def _prepare_subject(
     subjid: int,
     date_range: Optional[Union[Sequence[Union[int, str]], tuple]] = None,
@@ -145,11 +172,13 @@ def _prepare_subject(
     Returns
     -------
     dict
-        ``subjid``, ``trial_ids`` (0..n-1), ``s`` (1 = SHORT, 0 = LONG), ``session_ends``
-        (global trial id of the LAST kept trial of each session -- the sleep markers),
+        ``subjid``, ``trial_ids`` (0..n-1), ``global_ids`` (position on the full trial axis;
+        equal to ``trial_ids`` here, and meaningful after ``_subset_by_ab``), ``s``
+        (1 = SHORT, 0 = LONG), ``ab`` (reward identity per trial), ``session_ends`` (global
+        trial id of the LAST kept trial of each session -- the sleep markers),
         ``session_starts`` (the trial after each sleep period; always starts at 0),
         ``session_labels`` (dates), ``session_index`` (session of each trial),
-        ``session_sizes``, ``n_trials``, ``subject_dir``.
+        ``session_sizes``, ``n_trials``, ``ab_split`` (None), ``subject_dir``.
 
     Raises
     ------
@@ -161,7 +190,7 @@ def _prepare_subject(
         raise FileNotFoundError(f"No derivatives directory for subject {subjid}")
     subj_dir = subj_dirs[0]
 
-    segments, labels, sizes = [], [], []
+    segments, ab_segments, labels, sizes = [], [], [], []
     for ses_dir in _filter_session_dirs(subj_dir, date_range):
         results_dir = ses_dir / "saved_analysis_results"
         if not results_dir.exists():
@@ -173,25 +202,65 @@ def _prepare_subject(
         if "global_trial_id" in td.columns:
             td = td.sort_values("global_trial_id")
         segments.append(_short_mask(td).to_numpy(dtype=np.int8))
+        ab_segments.append(_ab_label(td).to_numpy(dtype="<U1"))
         labels.append(ses_dir.name.split("_date-")[-1])
         sizes.append(len(td))
 
     s = np.concatenate(segments) if segments else np.zeros(0, dtype=np.int8)
+    ab = np.concatenate(ab_segments) if ab_segments else np.zeros(0, dtype="<U1")
     sizes_arr = np.asarray(sizes, dtype=int)
     session_ends = np.cumsum(sizes_arr) - 1 if sizes_arr.size else np.zeros(0, dtype=int)
     session_starts = np.concatenate(([0], session_ends[:-1] + 1)) if sizes_arr.size else np.zeros(0, dtype=int)
     return {
         "subjid": subjid,
         "trial_ids": np.arange(s.size),
+        "global_ids": np.arange(s.size),
         "s": s,
+        "ab": ab,
         "session_ends": session_ends,
         "session_starts": session_starts,
         "session_labels": labels,
         "session_index": np.repeat(np.arange(sizes_arr.size), sizes_arr),
         "session_sizes": sizes_arr,
         "n_trials": int(s.size),
+        "ab_split": None,
         "subject_dir": subj_dir,
     }
+
+
+def _subset_by_ab(prep: dict, letter: str) -> dict:
+    """Restrict a prepared subject to its A- or B-reward trials, re-indexing the trial axis.
+
+    The subset gets its own contiguous ``0..m-1`` modelling axis, because the switch-point
+    index must index the sequence being fitted. ``global_ids`` keeps each trial's position on
+    the full, unsplit axis so a ``tau`` can be reported in both. Sessions holding no trial of
+    this identity drop out, so the sleep markers stay on real trials. Trials whose reward
+    identity is unresolved belong to neither subset and are dropped.
+    """
+    mask = prep["ab"] == letter
+    sizes = np.bincount(prep["session_index"][mask], minlength=len(prep["session_labels"]))
+    kept_sessions = sizes > 0
+    sizes = sizes[kept_sessions]
+    ends = np.cumsum(sizes) - 1 if sizes.size else np.zeros(0, dtype=int)
+    starts = np.concatenate(([0], ends[:-1] + 1)) if sizes.size else np.zeros(0, dtype=int)
+    return {**prep,
+            "trial_ids": np.arange(int(mask.sum())),
+            "global_ids": prep["trial_ids"][mask],
+            "s": prep["s"][mask],
+            "ab": prep["ab"][mask],
+            "session_ends": ends,
+            "session_starts": starts,
+            "session_labels": [lab for lab, keep in zip(prep["session_labels"], kept_sessions) if keep],
+            "session_index": np.repeat(np.arange(sizes.size), sizes),
+            "session_sizes": sizes,
+            "n_trials": int(mask.sum()),
+            "ab_split": letter}
+
+
+def _subject_label(prep: dict) -> str:
+    """``"Subject 40"``, or ``"Subject 40 | reward A"`` for an A/B split."""
+    suffix = f" | reward {prep['ab_split']}" if prep.get("ab_split") else ""
+    return f"Subject {prep['subjid']}{suffix}"
 
 
 def _rolling_mean(s: np.ndarray, window: int = _ROLLING_WINDOW) -> tuple[np.ndarray, np.ndarray]:
@@ -210,20 +279,33 @@ def _mark_sessions(ax, session_ends: np.ndarray, label: bool = True) -> None:
 
 
 def _plot_strategy(prep: dict, rewarded_only: bool):
-    """Binary SHORT/LONG strategy across the continuous trial axis, with sleep markers."""
+    """Binary SHORT/LONG strategy across the continuous trial axis, coloured by reward identity.
+
+    SHORT is the lower row and LONG the upper row (the y axis is inverted). Every trial --
+    SHORT or LONG -- takes the colour of the reward it is associated with.
+    """
     fig, ax = plt.subplots(figsize=(11, 2.8))
-    ax.plot(prep["trial_ids"], prep["s"], marker="|", linestyle="none", markersize=7,
-            color=_DATA_COLOR, alpha=0.7, zorder=2)
+    ab, trials, s = prep["ab"], prep["trial_ids"], prep["s"]
+    for letter, color in _AB_COLORS.items():
+        mask = ab == letter
+        if mask.any():
+            ax.scatter(trials[mask], s[mask], marker="|", s=44, linewidths=0.9, color=color,
+                       alpha=0.8, zorder=2, label=f"reward {letter} ({int(mask.sum())})")
+    unresolved = ~np.isin(ab, list(_AB_COLORS))
+    if unresolved.any():
+        ax.scatter(trials[unresolved], s[unresolved], marker="|", s=44, linewidths=0.9,
+                   color=_AB_UNKNOWN_COLOR, alpha=0.8, zorder=2,
+                   label=f"unresolved ({int(unresolved.sum())})")
     _mark_sessions(ax, prep["session_ends"])
     ax.set_yticks([0, 1])
     ax.set_yticklabels(["LONG", "SHORT"])
-    ax.set_ylim(-0.35, 1.35)
+    ax.set_ylim(1.35, -0.35)  # inverted: SHORT on the lower row, LONG on the upper row
     ax.set_xlim(-1, max(prep["n_trials"], 1))
     ax.set_xlabel("Trial (continuous across sessions)")
     kept = "rewarded" if rewarded_only else "completed"
-    ax.set_title(f"Subject {prep['subjid']} - strategy per {kept} trial "
+    ax.set_title(f"{_subject_label(prep)} - strategy per {kept} trial "
                  f"({prep['n_trials']} trials, {len(prep['session_labels'])} sessions)")
-    ax.legend(loc="center left", fontsize=7)
+    ax.legend(loc="lower left", fontsize=7, ncol=3)
     fig.tight_layout()
     return fig
 
@@ -251,7 +333,7 @@ def _plot_posterior(prep: dict, fit: dict, likelihood_window: int):
     ax.set_ylim(bottom=0)
     ax.set_xlabel("Trial (continuous across sessions)")
     ax.set_ylabel("Posterior P(tau)")
-    ax.set_title(f"Subject {prep['subjid']} - switch-point posterior "
+    ax.set_title(f"{_subject_label(prep)} - switch-point posterior "
                  f"(+/-{likelihood_window} trials around peak)")
     ax.legend(loc="upper right", fontsize=7)
     fig.tight_layout()
@@ -259,7 +341,11 @@ def _plot_posterior(prep: dict, fit: dict, likelihood_window: int):
 
 
 def _plot_model_comparison(prep: dict, comparison: dict):
-    """Overlay the constant, switch, and logistic fits on the data, with AIC/BIC in-panel."""
+    """Overlay the constant, switch, and logistic fits on the data, with AIC/BIC in-panel.
+
+    SHORT is the lower row, matching the strategy plot: the y axis is inverted, so the fitted
+    P(SHORT) curves rise downward.
+    """
     s, x, n = prep["s"], prep["trial_ids"], prep["n_trials"]
     constant, switch, logistic = (comparison["fits"][m] for m in ("constant", "switch", "logistic"))
 
@@ -284,20 +370,66 @@ def _plot_model_comparison(prep: dict, comparison: dict):
     rows += [f"{m:<9}{comparison[m]['aic']:>10.1f}{comparison[m]['bic']:>10.1f}"
              for m in ("constant", "switch", "logistic")]
     rows.append(f"best: AIC {comparison['best_aic']}, BIC {comparison['best_bic']}")
-    ax.text(0.015, 0.97, "\n".join(rows), transform=ax.transAxes, va="top", ha="left",
+    # Bottom-left: the SHORT row before the switch, which is empty by construction.
+    ax.text(0.015, 0.03, "\n".join(rows), transform=ax.transAxes, va="bottom", ha="left",
             family="monospace", fontsize=7,
             bbox=dict(boxstyle="round", facecolor="white", edgecolor="#cccccc", alpha=0.9))
 
-    ax.set_ylim(-0.35, 1.45)
+    ax.set_ylim(1.45, -0.35)  # inverted: SHORT on the lower row, LONG on the upper row
     ax.set_xlim(-1, max(n, 1))
     ax.set_yticks([0, 1])
     ax.set_yticklabels(["LONG", "SHORT"])
     ax.set_xlabel("Trial (continuous across sessions)")
     ax.set_ylabel("P(SHORT)")
-    ax.set_title(f"Subject {prep['subjid']} - model comparison")
-    ax.legend(loc="lower right", fontsize=7, ncol=2)
+    ax.set_title(f"{_subject_label(prep)} - model comparison")
+    ax.legend(loc="upper right", fontsize=7, ncol=2)
     fig.tight_layout()
     return fig
+
+
+def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int) -> Optional[dict]:
+    """Fit, print and plot one SHORT/LONG sequence -- a whole animal, or one A/B split of it.
+
+    Figures are built in the order they should be read: strategy, model comparison, posterior.
+    Returns None (after a message) when the sequence is too short to fit.
+    """
+    label = _subject_label(prep)
+    if prep["n_trials"] < 2:
+        print(f"[switchpoint] {label}: {prep['n_trials']} kept trial(s); skipping.")
+        return None
+
+    fit = fit_switchpoint(prep["s"])
+    comparison = compare_models(prep["s"])
+    tau = fit["tau"]
+    global_tau = int(prep["global_ids"][tau])
+    tau_session = prep["session_labels"][int(prep["session_index"][tau])]
+    hdi_lo, hdi_hi = fit["hdi"]
+    fwhm_lo, fwhm_hi = fit["fwhm"]
+    hdi_width, fwhm_width = hdi_hi - hdi_lo + 1, fwhm_hi - fwhm_lo + 1
+
+    print(f"\n[switchpoint] {label} ({prep['n_trials']} trials, "
+          f"{len(prep['session_labels'])} sessions)")
+    on_split = prep.get("ab_split") is not None
+    axis = f"tau (trial index) = {tau}" + (f", global trial id {global_tau}" if on_split else "")
+    print(f"  {axis}, in session {tau_session}")
+    print(f"  p1 = {fit['p1']:.3f} -> p2 = {fit['p2']:.3f}")
+    print(f"  95% HDI = [{hdi_lo}, {hdi_hi}], width = {hdi_width} trials")
+    print(f"  FWHM    = [{fwhm_lo}, {fwhm_hi}], width = {fwhm_width} trials")
+    print(f"  best model: AIC -> {comparison['best_aic']}, BIC -> {comparison['best_bic']}")
+
+    figures = {
+        "strategy": _plot_strategy(prep, rewarded_only),
+        "model_comparison": _plot_model_comparison(prep, comparison),
+        "posterior": _plot_posterior(prep, fit, likelihood_window),
+    }
+    return {
+        "tau": tau, "global_tau": global_tau, "tau_session": tau_session, "hdi": fit["hdi"],
+        "hdi_width": hdi_width, "fwhm": fit["fwhm"], "fwhm_width": fwhm_width,
+        "p1": fit["p1"], "p2": fit["p2"], "posterior": fit["posterior"], "comparison": comparison,
+        "session_ends": prep["session_ends"], "session_starts": prep["session_starts"],
+        "session_labels": prep["session_labels"], "n_trials": prep["n_trials"],
+        "ab_split": prep.get("ab_split"), "prep": prep, "figures": figures,
+    }
 
 
 def run_analysis(
@@ -305,14 +437,16 @@ def run_analysis(
     date_ranges: Optional[dict] = None,
     rewarded_only: bool = False,
     likelihood_window: int = 100,
+    split_ab: bool = False,
     show: bool = True,
 ) -> dict:
     """Fit and plot the strategy switch for each subject independently.
 
-    Produces three figures per animal: the binary SHORT/LONG strategy with sleep markers,
-    the switch-point posterior windowed around its peak, and the constant/switch/logistic
-    model comparison with AIC and BIC in-panel. The peak trial, its session, and the HDI
-    width are printed as well as annotated.
+    Produces three figures per animal, in this order: the binary SHORT/LONG strategy coloured
+    by reward identity, with sleep markers; the constant/switch/logistic model comparison with
+    AIC and BIC in-panel; and the switch-point posterior windowed around its peak. The peak
+    trial, its session, and the HDI width are printed as well as annotated. Figures are shown
+    one animal at a time, so an animal's plots stay together and in order.
 
     Parameters
     ----------
@@ -327,16 +461,24 @@ def run_analysis(
         Keep only ``response_time_category == "rewarded"`` trials (always excludes aborts).
     likelihood_window : int
         Half-width, in trials, of the posterior plot's window around the peak.
+    split_ab : bool
+        Analyse the A- and B-reward trials separately: each subset gets its own contiguous
+        trial axis, its own fits, and its own three figures. Trials whose reward identity is
+        unresolved fall into neither subset. When False (default) all trials are modelled as
+        one sequence and reward identity only colours the strategy plot.
     show : bool
-        Call ``plt.show()``. Set False in notebooks to hold the figures.
+        Call ``plt.show()`` after each animal. Set False in notebooks to hold the figures.
 
     Returns
     -------
     dict
-        Keyed by subjid: ``tau``, ``tau_session``, ``hdi``, ``hdi_width``, ``fwhm``,
-        ``fwhm_width``, ``p1``, ``p2``, ``comparison``, ``session_ends``,
-        ``session_starts``, ``session_labels``, ``n_trials``, ``prep``, and ``figures``
-        (``strategy``, ``posterior``, ``model_comparison``).
+        Keyed by subjid. Each value holds ``tau``, ``global_tau``, ``tau_session``, ``hdi``,
+        ``hdi_width``, ``fwhm``, ``fwhm_width``, ``p1``, ``p2``, ``comparison``,
+        ``session_ends``, ``session_starts``, ``session_labels``, ``n_trials``, ``ab_split``,
+        ``prep``, and ``figures`` (``strategy``, ``model_comparison``, ``posterior``).
+
+        With ``split_ab=True`` that value is instead nested one level deeper, keyed by reward
+        identity: ``results[subjid]["A"]`` and ``results[subjid]["B"]``.
     """
     subjids, date_ranges, dates_for = _normalize_subjids_dates(subjids, date_ranges)
     results = {}
@@ -344,41 +486,23 @@ def run_analysis(
     with plt.rc_context(nature_style()):
         for subjid in subjids:
             prep = _prepare_subject(subjid, dates_for(subjid), rewarded_only)
-            if prep["n_trials"] < 2:
-                print(f"[switchpoint] Subject {subjid}: {prep['n_trials']} kept trial(s); skipping.")
-                continue
-
-            fit = fit_switchpoint(prep["s"])
-            comparison = compare_models(prep["s"])
-            tau = fit["tau"]
-            tau_session = prep["session_labels"][int(prep["session_index"][tau])]
-            hdi_lo, hdi_hi = fit["hdi"]
-            fwhm_lo, fwhm_hi = fit["fwhm"]
-            hdi_width, fwhm_width = hdi_hi - hdi_lo + 1, fwhm_hi - fwhm_lo + 1
-
-            print(f"\n[switchpoint] Subject {subjid} ({prep['n_trials']} trials, "
-                  f"{len(prep['session_labels'])} sessions)")
-            print(f"  tau (global trial id) = {tau}, in session {tau_session}")
-            print(f"  p1 = {fit['p1']:.3f} -> p2 = {fit['p2']:.3f}")
-            print(f"  95% HDI = [{hdi_lo}, {hdi_hi}], width = {hdi_width} trials")
-            print(f"  FWHM    = [{fwhm_lo}, {fwhm_hi}], width = {fwhm_width} trials")
-            print(f"  best model: AIC -> {comparison['best_aic']}, BIC -> {comparison['best_bic']}")
-
-            figures = {
-                "strategy": _plot_strategy(prep, rewarded_only),
-                "posterior": _plot_posterior(prep, fit, likelihood_window),
-                "model_comparison": _plot_model_comparison(prep, comparison),
-            }
-            results[subjid] = {
-                "tau": tau, "tau_session": tau_session, "hdi": fit["hdi"], "hdi_width": hdi_width,
-                "fwhm": fit["fwhm"], "fwhm_width": fwhm_width, "p1": fit["p1"], "p2": fit["p2"],
-                "posterior": fit["posterior"], "comparison": comparison,
-                "session_ends": prep["session_ends"], "session_starts": prep["session_starts"],
-                "session_labels": prep["session_labels"], "n_trials": prep["n_trials"],
-                "prep": prep, "figures": figures,
-            }
-        if show:
-            plt.show()
+            if split_ab:
+                unresolved = int(np.sum(~np.isin(prep["ab"], list(_AB_COLORS))))
+                if unresolved:
+                    print(f"[switchpoint] Subject {subjid}: {unresolved} trial(s) of "
+                          f"{prep['n_trials']} have no reward identity; excluded from the split.")
+                splits = {letter: _analyse_sequence(_subset_by_ab(prep, letter), rewarded_only,
+                                                    likelihood_window)
+                          for letter in _AB_COLORS}
+                splits = {letter: r for letter, r in splits.items() if r is not None}
+                if splits:
+                    results[subjid] = splits
+            else:
+                result = _analyse_sequence(prep, rewarded_only, likelihood_window)
+                if result is not None:
+                    results[subjid] = result
+            if show:
+                plt.show()  # per animal, so its figures stay grouped and ordered
     return results
 
 
@@ -659,6 +783,8 @@ def main() -> int:
     _add_shared_args(analysis)
     analysis.add_argument("--likelihood-window", type=int, default=100,
                           help="half-width in trials of the posterior plot window (default: 100)")
+    analysis.add_argument("--split-ab", action="store_true",
+                          help="fit and plot the A- and B-reward trials separately")
 
     permutation = subparsers.add_parser("permutation", help="switch vs sleep-boundary alignment")
     _add_shared_args(permutation)
@@ -677,7 +803,7 @@ def main() -> int:
 
     if args.command == "analysis":
         run_analysis(subjids, date_ranges, rewarded_only=args.rewarded_only,
-                     likelihood_window=args.likelihood_window, show=True)
+                     likelihood_window=args.likelihood_window, split_ab=args.split_ab, show=True)
     else:
         run_permutation(subjids, date_ranges, rewarded_only=args.rewarded_only,
                         inclusion=args.inclusion, n_permutations=args.n_permutations,

@@ -19,6 +19,17 @@ s[i] = 1  if hidden_rule_success == True   (SHORT: left early, used the hidden r
 s[i] = 0  otherwise                        (LONG: waited out the full sequence)
 ```
 
+### Reward identity (A / B)
+
+Every trial also carries the identity of the reward it is associated with:
+
+```
+identity = first_supply_odor_identity        if it is "A" or "B"
+         = last_odor as a bare letter        if that is "A" or "B"
+         = "" (unresolved)                   otherwise
+```
+Colours are fixed: **A = `#E53935`** (red), **B = `#00796B`** (teal), unresolved = grey.
+
 ### The model
 
 `s[i] ~ Bernoulli(p_i)`, with three competing descriptions of `p_i`:
@@ -132,9 +143,13 @@ results = run_analysis(
     date_ranges={40: (20251201, 20251231), 45: None},
     rewarded_only=True,
     likelihood_window=100,
+    split_ab=False,      # True -> fit and plot the A- and B-reward trials separately
     show=False,          # keep the figures rather than displaying them
 )
 results[40]["tau"], results[40]["hdi_width"], results[40]["figures"]["posterior"]
+
+# with split_ab=True the per-subject value is nested by reward identity:
+#   results[40]["A"]["tau"], results[40]["B"]["figures"]["strategy"]
 
 perm = run_permutation(
     subjids=[40, 45, 48, 50],       # may be a different set of animals
@@ -154,14 +169,32 @@ date list, or `None` for all sessions. A `{subjid: date_range}` dict may be pass
 
 ### `run_analysis` — three figures per animal
 
-1. **Strategy** — SHORT/LONG per trial on the continuous trial axis, with a blue dotted
-   vertical line at each session end (sleep).
-2. **Posterior** — the switch-point posterior over *all* trials, plotted windowed to
-   ±`likelihood_window` trials around its peak. `tau`, its session, and the HDI width are
-   printed and annotated (HDI primary, FWHM secondary).
-3. **Model comparison** — the data with the constant, switch, and logistic fits overlaid,
+Shown in this order, one animal at a time, so an animal's figures stay together rather than
+interleaving with another's. **SHORT is the lower row, LONG the upper row** in the first two.
+
+1. **Strategy** — SHORT/LONG per trial on the continuous trial axis, each trial coloured by
+   its reward identity (A red, B teal, unresolved grey), with a blue dotted vertical line at
+   each session end (sleep).
+2. **Model comparison** — the data with the constant, switch, and logistic fits overlaid,
    plus an empirical 21-trial rolling mean, and AIC/BIC in-panel so *no switch / abrupt /
    gradual* can be read off directly.
+3. **Posterior** — the switch-point posterior over *all* trials, plotted windowed to
+   ±`likelihood_window` trials around its peak. `tau`, its session, and the HDI width are
+   printed and annotated (HDI primary, FWHM secondary).
+
+#### `split_ab`
+
+With `split_ab=True` the trials are split by reward identity and **each subset is modelled and
+plotted independently** — six figures per animal, the three above for A then the three for B.
+Each subset gets its own contiguous `0 .. m-1` trial axis, because the switch-point index must
+index the sequence being fitted; `tau` is therefore a position within that subset, and
+`global_tau` reports the same trial's position on the full, unsplit axis. Session boundaries
+are recomputed over the subset, and sessions holding no trial of that identity drop out.
+Unresolved trials belong to neither subset and are dropped, with a count printed.
+
+This matters when an animal adopts the SHORT strategy for one reward before the other — subject
+40 switches for B at global trial 1174 (session 20251208) but not for A until global trial 1623
+(20251212), a four-day gap the pooled fit averages away.
 
 Returns a dict keyed by subjid holding `tau`, `tau_session`, `hdi`, `hdi_width`, `fwhm`,
 `p1`, `p2`, `comparison`, `session_ends`, `session_starts`, and the `figures`.
@@ -189,6 +222,10 @@ python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 --likelih
 python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 45 \
     --date-range 20251201 20251231 --rewarded-only
 
+# fit the A- and B-reward trials separately
+python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 \
+    --date-range 20251125 20251231 --rewarded-only --split-ab
+
 # do switches align with sleep?
 python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 45 48 50 --rewarded-only
 
@@ -204,6 +241,7 @@ python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 45 48 
 | `--date-range START END` | both | Inclusive `YYYYMMDD` range (alternative to `--dates`). |
 | `--rewarded-only` | both | Keep only rewarded trials; aborts are always dropped. |
 | `--likelihood-window N` | `analysis` | Half-width of the posterior plot window (default 100). |
+| `--split-ab` | `analysis` | Fit and plot the A- and B-reward trials separately. |
 | `--inclusion RULE` | `permutation` | Which animals count as having switched (default `bic_switch_wins`). |
 | `--n-permutations N` | `permutation` | Permutations drawn for the null (default 10000). |
 | `--seed N` | `permutation` | RNG seed for a reproducible null (default 0). |
