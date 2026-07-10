@@ -34,7 +34,7 @@ from hypnose.visualization.pred_seq_utils import (
     _load_sorted_session,
     _parse_json_value,
     _last_position_entry,
-    _plot_box_with_points,
+    _plot_violins_with_stats,
     _plot_summary_rolling,
     _count_to_marker_size,
     _add_size_legend,
@@ -504,7 +504,7 @@ def FR_latency(
                 continue
             groups = {"False Response": fr_all, "Reward": rew_all}
             fig, ax = plt.subplots(figsize=(7, 5))
-            _plot_box_with_points(ax, groups, "Latency (ms)", "")
+            _plot_violin_with_stats(ax, groups, "Latency (ms)", "")
             ax.set_ylim(bottom=0)
             ax.set_title(f"Subjid {subjid} FR vs reward latency")
             fig.tight_layout()
