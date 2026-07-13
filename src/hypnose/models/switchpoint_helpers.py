@@ -16,6 +16,10 @@ the animal left via the SHORT sequence. Three descriptions of ``p_i`` are compar
 - ``logistic``: ``p_i = lo + (hi - lo) * sigmoid(slope * (i - midpoint))`` -- a graded
   change (4 parameters). ``slope`` is the abruptness: large ``slope`` approaches the step
   of the switch model, small ``slope`` is a slow drift.
+- ``switch2``: three regimes ``p1 | p2 | p3`` split by an ordered pair ``tau1 < tau2``
+  (5 parameters) -- e.g. an overshoot, or a change that arrives in two stages.
+- ``qlearning``: a mechanistic account, NOT YET IMPLEMENTED (see ``fit_qlearning``); it is
+  scored as ``-inf`` so it never wins.
 
 ``tau`` is the index of the FIRST trial of the post-switch regime, so it ranges over
 ``1 .. n-1``; a switch at ``0`` or ``n`` is just the constant model and is excluded.
@@ -55,6 +59,8 @@ __all__ = [
     "posterior_fwhm",
     "fit_constant",
     "fit_switchpoint",
+    "fit_switch2",
+    "fit_qlearning",
     "logistic_p",
     "logistic_start_points",
     "fit_logistic_multistart",
@@ -228,6 +234,110 @@ def fit_switchpoint(s: Sequence[int] | np.ndarray) -> dict:
             "k_params": 3}
 
 
+def _segment_loglik(k: np.ndarray | float, m: np.ndarray | float) -> np.ndarray | float:
+    """Maximized Bernoulli log-likelihood of a segment with ``k`` successes in ``m`` trials.
+
+    The ML rate of a segment is its mean ``k / m``, so the segment contributes
+    ``k*log(p) + (m-k)*log(1-p)`` at ``p = k/m``. Empty segments (``m == 0``) contribute 0.
+    Vectorized, so a whole scan of candidate splits is one call.
+    """
+    k = np.asarray(k, dtype=float)
+    m = np.asarray(m, dtype=float)
+    safe = np.where(m > 0, m, 1.0)
+    p = _clip_p(k / safe)
+    ll = k * np.log(p) + (m - k) * np.log1p(-p)
+    return np.where(m > 0, ll, 0.0)
+
+
+def fit_switch2(s: Sequence[int] | np.ndarray) -> dict:
+    """Fit the two-switch model: three Bernoulli regimes split by an ordered pair.
+
+    ``p1`` on ``[0, tau1)``, ``p2`` on ``[tau1, tau2)``, ``p3`` on ``[tau2, n)``, with
+    ``1 <= tau1 < tau2 <= n-1``. Every segment rate is profiled out analytically (each is its
+    segment mean), so the fit is an exhaustive maximization over the ordered pairs -- no
+    optimizer, no local optima.
+
+    The search is O(n^2) in candidate pairs but done in O(n) numpy calls: one loop over
+    ``tau1``, and for each, a single vectorized scan over all valid ``tau2`` built from the
+    same prefix sum ``switchpoint_loglik_profile`` uses.
+
+    It nests the single switch (``tau2 = n``, or ``p2 == p3``), so its loglik must be at least
+    ``fit_switchpoint``'s; a shortfall is warned about rather than returned silently.
+
+    Returns
+    -------
+    dict
+        ``tau1``, ``tau2`` (first trial of the 2nd and 3rd regime), ``p1``, ``p2``, ``p3``,
+        ``loglik``, ``k_params`` (5). Degenerate (``tau`` 0, NaN rates, ``-inf``) when
+        ``n < 3``, which cannot support three non-empty regimes.
+    """
+    s = _as_binary(s)
+    n = s.size
+    degenerate = {"tau1": 0, "tau2": 0, "p1": float("nan"), "p2": float("nan"),
+                  "p3": float("nan"), "loglik": float("-inf"), "k_params": 5}
+    if n < 3:
+        return degenerate
+
+    prefix = np.concatenate(([0], np.cumsum(s)))  # prefix[i] = successes in s[:i]
+    total = float(prefix[-1])
+    best = (-np.inf, 0, 0)
+    for tau1 in range(1, n - 1):
+        tau2 = np.arange(tau1 + 1, n)  # tau2 > tau1, and leaves a non-empty 3rd regime
+        ll1 = _segment_loglik(prefix[tau1], tau1)  # scalar: the 1st regime is fixed here
+        ll2 = _segment_loglik(prefix[tau2] - prefix[tau1], tau2 - tau1)
+        ll3 = _segment_loglik(total - prefix[tau2], n - tau2)
+        ll = ll1 + ll2 + ll3
+        j = int(np.argmax(ll))
+        if ll[j] > best[0]:
+            best = (float(ll[j]), tau1, int(tau2[j]))
+
+    loglik, tau1, tau2 = best
+    if not np.isfinite(loglik):
+        return degenerate
+    switch_loglik = fit_switchpoint(s)["loglik"]
+    if loglik < switch_loglik - _LOGLIK_TOL:
+        warnings.warn(
+            f"switch2 loglik {loglik:.6f} < switch loglik {switch_loglik:.6f} "
+            f"(shortfall {switch_loglik - loglik:.3e}). The two-switch model nests the single "
+            f"switch, so it cannot truly be worse: this is a search failure, not a real result.",
+            stacklevel=2)
+    return {"tau1": tau1, "tau2": tau2, "p1": float(s[:tau1].mean()),
+            "p2": float(s[tau1:tau2].mean()), "p3": float(s[tau2:].mean()),
+            "loglik": loglik, "k_params": 5}
+
+
+def fit_qlearning(s: Sequence[int] | np.ndarray) -> dict:
+    """Placeholder for a Q-learning account of the strategy change -- NOT IMPLEMENTED.
+
+    Returns the same dict shape as the other fits with ``loglik = -inf`` and
+    ``implemented = False``, so it slots into ``compare_models`` and the plots without
+    breaking them and is never selected as the best model.
+
+    Planned model
+    -------------
+    A per-trial value update rather than a descriptive curve: the animal holds a value for the
+    SHORT option, updates it after every trial with learning rate ``alpha``, and chooses via a
+    softmax with inverse temperature ``beta``. Fitted by maximum likelihood on the *same*
+    per-trial Bernoulli choices the other models use, so the logliks stay directly comparable
+    (``k_params = 2``, plus whatever initial value is fitted rather than fixed).
+
+    It must be fitted with a MULTI-START over a dispersed ``(alpha, beta)`` grid, exactly as
+    the logistic is: the likelihood surface in ``(alpha, beta)`` is not guaranteed unimodal
+    (small ``alpha`` with large ``beta`` can mimic large ``alpha`` with small ``beta``), and a
+    single start would under-fit it -- which would strawman the model against the descriptive
+    ones rather than test it.
+
+    Returns
+    -------
+    dict
+        ``alpha``, ``beta`` (NaN), ``loglik`` (``-inf``), ``k_params`` (2),
+        ``implemented`` (False).
+    """
+    _as_binary(s)  # validate the input the same way as the real fits, so callers fail early
+    return {"alpha": float("nan"), "beta": float("nan"), "loglik": float("-inf"),
+            "k_params": 2, "implemented": False}
+
+
 def logistic_p(x: np.ndarray, midpoint: float, slope: float, lo: float, hi: float) -> np.ndarray:
     """Per-trial success probability of the logistic model (asymptotes ``lo`` and ``hi``).
 
@@ -353,28 +463,44 @@ def fit_logistic(s: Sequence[int] | np.ndarray) -> dict:
 
 
 def compare_models(s: Sequence[int] | np.ndarray) -> dict:
-    """Fit all three models and score them with AIC and BIC (lower is better).
+    """Fit all five models and score them with AIC and BIC (lower is better).
 
-    ``AIC = 2k - 2 * loglik`` and ``BIC = k * ln(n) - 2 * loglik``. BIC penalizes the
-    extra parameters harder, so it is the stricter test of "there really was a switch".
+    The models, in increasing flexibility: ``constant`` (k=1), ``switch`` (k=3), ``logistic``
+    (k=4), ``switch2`` (k=5), and ``qlearning`` (a stub -- see ``fit_qlearning``). Two nesting
+    relations hold and are worth checking on any real fit:
+    ``constant <= switch <= switch2`` and ``switch <= logistic`` in loglik.
+
+    ``AIC = 2k - 2 * loglik`` and ``BIC = k * ln(n) - 2 * loglik``. BIC penalizes the extra
+    parameters harder, so it is the stricter test of "there really was a switch".
+
+    Models reporting ``implemented = False`` are scored (so they appear in the table) but are
+    never eligible to win.
+
+    Caveat -- the parameter counts understate the switch models' flexibility. ``switch``
+    searches ~n candidate split points and ``switch2`` ~n^2/2, but they are charged only k=3
+    and k=5, as if ``tau`` were an ordinary parameter. AIC and BIC are therefore *generous* to
+    them relative to the logistic, and more so to ``switch2`` than to ``switch``. Treat a
+    narrow BIC win for a switch model as suggestive, not decisive. The planned fix is a
+    cross-validated predictive likelihood, which prices the search honestly; not done yet.
 
     Returns
     -------
     dict
-        ``constant`` / ``switch`` / ``logistic``, each ``{loglik, k_params, aic, bic}``;
-        ``best_aic`` and ``best_bic`` (the winning model name); and ``fits``, the full
-        fit dict of each model.
+        One entry per model name, each ``{loglik, k_params, aic, bic}``; ``best_aic`` and
+        ``best_bic`` (the winning implemented model); and ``fits``, the full fit dict of each.
     """
     s = _as_binary(s)
     n = max(s.size, 1)
-    fits = {"constant": fit_constant(s), "switch": fit_switchpoint(s), "logistic": fit_logistic(s)}
+    fits = {"constant": fit_constant(s), "switch": fit_switchpoint(s),
+            "logistic": fit_logistic(s), "switch2": fit_switch2(s), "qlearning": fit_qlearning(s)}
     scores = {}
     for name, fit in fits.items():
         k, loglik = fit["k_params"], fit["loglik"]
         scores[name] = {"loglik": loglik, "k_params": k,
                         "aic": 2 * k - 2 * loglik, "bic": k * np.log(n) - 2 * loglik}
-    scores["best_aic"] = min(fits, key=lambda m: scores[m]["aic"])
-    scores["best_bic"] = min(fits, key=lambda m: scores[m]["bic"])
+    eligible = [name for name, fit in fits.items() if fit.get("implemented", True)]
+    scores["best_aic"] = min(eligible, key=lambda m: scores[m]["aic"])
+    scores["best_bic"] = min(eligible, key=lambda m: scores[m]["bic"])
     scores["fits"] = fits
     return scores
 

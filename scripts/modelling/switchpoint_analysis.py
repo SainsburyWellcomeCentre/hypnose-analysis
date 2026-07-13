@@ -62,8 +62,13 @@ _HR_TRUE = ("true", "1", "1.0")
 _SESSION_LINE_COLOR = "tab:blue"
 _CONSTANT_COLOR = "#3C5488"
 _SWITCH_COLOR = "#E64B35"
+_SWITCH2_COLOR = "#8491B4"
 _LOGISTIC_COLOR = "#00A087"
 _DATA_COLOR = "#2b2b2b"
+
+# Models in increasing flexibility, for the comparison table and the printed logliks. The
+# nesting chain constant <= switch <= switch2 and switch <= logistic should hold along it.
+_MODEL_ORDER = ("constant", "switch", "logistic", "switch2", "qlearning")
 
 # Reward identity of a trial. Trials whose identity cannot be resolved are drawn in grey and
 # are dropped entirely when split_ab is on.
@@ -355,13 +360,15 @@ def _plot_posterior(prep: dict, fit: dict, likelihood_window: int):
 
 
 def _plot_model_comparison(prep: dict, comparison: dict):
-    """Overlay the constant, switch, and logistic fits on the data, with AIC/BIC in-panel.
+    """Overlay every fitted model on the data, with the five-row AIC/BIC table in-panel.
 
     SHORT is the lower row, matching the strategy plot: the y axis is inverted, so the fitted
-    P(SHORT) curves rise downward.
+    P(SHORT) curves rise downward. Unimplemented models (``qlearning``) appear in the table
+    but have no curve to draw.
     """
     s, x, n = prep["s"], prep["trial_ids"], prep["n_trials"]
-    constant, switch, logistic = (comparison["fits"][m] for m in ("constant", "switch", "logistic"))
+    constant, switch, switch2, logistic = (comparison["fits"][m] for m in
+                                           ("constant", "switch", "switch2", "logistic"))
 
     fig, ax = plt.subplots(figsize=(11, 4.2))
     ax.plot(x, s, marker="|", linestyle="none", markersize=6, color=_DATA_COLOR, alpha=0.35, zorder=2)
@@ -374,16 +381,28 @@ def _plot_model_comparison(prep: dict, comparison: dict):
     ax.step([0, switch["tau"], n - 1], [switch["p1"], switch["p2"], switch["p2"]], where="post",
             color=_SWITCH_COLOR, linewidth=1.8, zorder=5,
             label=f"Switch: tau = {switch['tau']}, {switch['p1']:.2f} -> {switch['p2']:.2f}")
+    if np.isfinite(switch2["loglik"]):
+        ax.step([0, switch2["tau1"], switch2["tau2"], n - 1],
+                [switch2["p1"], switch2["p2"], switch2["p3"], switch2["p3"]], where="post",
+                color=_SWITCH2_COLOR, linewidth=1.8, linestyle=":", zorder=6,
+                label=f"Switch2: tau = ({switch2['tau1']}, {switch2['tau2']}), "
+                      f"{switch2['p1']:.2f} -> {switch2['p2']:.2f} -> {switch2['p3']:.2f}")
     grid = np.linspace(0, max(n - 1, 1), 500)
     ax.plot(grid, logistic_p(grid, logistic["midpoint"], logistic["slope"], logistic["lo"], logistic["hi"]),
-            color=_LOGISTIC_COLOR, linewidth=1.8, linestyle="--", zorder=6,
+            color=_LOGISTIC_COLOR, linewidth=1.8, linestyle="--", zorder=7,
             label=f"Logistic: slope = {logistic['slope']:.3f}")
     _mark_sessions(ax, prep["session_ends"])
 
-    rows = [f"{'model':<9}{'AIC':>10}{'BIC':>10}"]
-    rows += [f"{m:<9}{comparison[m]['aic']:>10.1f}{comparison[m]['bic']:>10.1f}"
-             for m in ("constant", "switch", "logistic")]
-    rows.append(f"best: AIC {comparison['best_aic']}, BIC {comparison['best_bic']}")
+    best_bic = comparison["best_bic"]
+    rows = [f"{'model':<10}{'k':>3}{'AIC':>10}{'BIC':>10}"]
+    for m in _MODEL_ORDER:
+        fit, score = comparison["fits"][m], comparison[m]
+        mark = " <- BIC" if m == best_bic else ""
+        if not fit.get("implemented", True):
+            rows.append(f"{m:<10}{score['k_params']:>3}{'n/a':>10}{'n/a':>10}  (not impl.)")
+        else:
+            rows.append(f"{m:<10}{score['k_params']:>3}{score['aic']:>10.1f}{score['bic']:>10.1f}{mark}")
+    rows.append(f"best: AIC {comparison['best_aic']}, BIC {best_bic}")
     # Bottom-left: the SHORT row before the switch, which is empty by construction.
     ax.text(0.015, 0.03, "\n".join(rows), transform=ax.transAxes, va="bottom", ha="left",
             family="monospace", fontsize=7,
@@ -399,6 +418,54 @@ def _plot_model_comparison(prep: dict, comparison: dict):
     ax.legend(loc="upper right", fontsize=7, ncol=2)
     fig.tight_layout()
     return fig
+
+
+def _describe_fit(name: str, fit: dict) -> str:
+    """The fitted parameters of one model, as a short human-readable line."""
+    if name == "constant":
+        return f"p = {fit['p']:.3f}"
+    if name == "switch":
+        return f"tau = {fit['tau']}, p1 = {fit['p1']:.3f} -> p2 = {fit['p2']:.3f}"
+    if name == "switch2":
+        return (f"tau1 = {fit['tau1']}, tau2 = {fit['tau2']}, "
+                f"p1 = {fit['p1']:.3f} -> p2 = {fit['p2']:.3f} -> p3 = {fit['p3']:.3f}")
+    if name == "logistic":
+        return (f"midpoint = {fit['midpoint']:.1f}, slope = {fit['slope']:.4g}, "
+                f"lo = {fit['lo']:.3f}, hi = {fit['hi']:.3f}")
+    return "not implemented"
+
+
+def _print_model_table(comparison: dict) -> None:
+    """Print every model's loglik / AIC / BIC, the winner's parameters, and the nesting check.
+
+    The nesting chain (``constant <= switch <= switch2`` and ``switch <= logistic``) is a
+    property of the models, not of the data: a violation means a fit failed to find its
+    optimum, so it is called out rather than left to be spotted in the numbers.
+    """
+    print(f"  {'model':<10}{'k':>3}{'loglik':>12}{'AIC':>11}{'BIC':>11}")
+    for name in _MODEL_ORDER:
+        fit, score = comparison["fits"][name], comparison[name]
+        if not fit.get("implemented", True):
+            print(f"  {name:<10}{score['k_params']:>3}{'n/a':>12}{'n/a':>11}{'n/a':>11}"
+                  f"  (not implemented)")
+            continue
+        tags = " ".join(t for t, on in (("<-AIC", name == comparison["best_aic"]),
+                                        ("<-BIC", name == comparison["best_bic"])) if on)
+        print(f"  {name:<10}{score['k_params']:>3}{score['loglik']:>12.3f}{score['aic']:>11.1f}"
+              f"{score['bic']:>11.1f}  {tags}")
+
+    ll = {name: comparison[name]["loglik"] for name in ("constant", "switch", "switch2", "logistic")}
+    violations = [msg for msg, ok in (
+        ("constant <= switch", ll["constant"] <= ll["switch"] + _LOGLIK_REPORT_TOL),
+        ("switch <= switch2", ll["switch"] <= ll["switch2"] + _LOGLIK_REPORT_TOL),
+        ("switch <= logistic", ll["switch"] <= ll["logistic"] + _LOGLIK_REPORT_TOL)) if not ok]
+    if violations:
+        print(f"  nesting: VIOLATED -> {'; '.join(violations)} (a fit failed to find its optimum)")
+    else:
+        print("  nesting: OK (constant <= switch <= switch2, switch <= logistic)")
+
+    best = comparison["best_bic"]
+    print(f"  best model (BIC): {best} -- {_describe_fit(best, comparison['fits'][best])}")
 
 
 def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int) -> Optional[dict]:
@@ -429,7 +496,7 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int) -
     print(f"  p1 = {fit['p1']:.3f} -> p2 = {fit['p2']:.3f}")
     print(f"  95% HDI = [{hdi_lo}, {hdi_hi}], width = {hdi_width} trials")
     print(f"  FWHM    = [{fwhm_lo}, {fwhm_hi}], width = {fwhm_width} trials")
-    print(f"  best model: AIC -> {comparison['best_aic']}, BIC -> {comparison['best_bic']}")
+    _print_model_table(comparison)
 
     figures = {
         "strategy": _plot_strategy(prep, rewarded_only),
@@ -831,12 +898,21 @@ def run_permutation(
                   f"(BIC winner: {comparison['best_bic']}); excluded.")
             excluded.append(subjid)
             continue
+        # The test keys on the SINGLE-switch tau, always. An animal may now be best described
+        # by switch2, but pooling two f values per animal would weight it double and change
+        # what the statistic means, so its first switch (tau1) is used and the choice is logged.
+        switch2_best = comparison["best_bic"] == "switch2"
         tau = comparison["fits"]["switch"]["tau"]
+        if switch2_best:
+            fit2 = comparison["fits"]["switch2"]
+            print(f"[permutation] Subject {subjid}: BIC winner is switch2 "
+                  f"(tau1 = {fit2['tau1']}, tau2 = {fit2['tau2']}); using the single-switch "
+                  f"tau = {tau} for f, and contributing one value only.")
         per_subject[subjid] = {
             "tau": tau, "session_starts": prep["session_starts"],
             "f": distance_to_session_start(tau, prep["session_starts"]),
             "comparison": comparison, "n_trials": prep["n_trials"],
-            "last_trial": prep["n_trials"] - 1,
+            "last_trial": prep["n_trials"] - 1, "switch2_best": switch2_best,
         }
 
     candidates = list(per_subject)

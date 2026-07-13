@@ -30,23 +30,50 @@ identity = first_supply_odor_identity        if it is "A" or "B"
 ```
 Colours are fixed: **A = `#E53935`** (red), **B = `#00796B`** (teal), unresolved = grey.
 
-### The model
+### The models
 
-`s[i] ~ Bernoulli(p_i)`, with three competing descriptions of `p_i`:
+`s[i] ~ Bernoulli(p_i)`, with five competing descriptions of `p_i`:
 
 | Model | `p_i` | Params | Meaning |
 | --- | --- | --- | --- |
 | `constant` | `p` | 1 | No strategy change |
 | `switch` | `p1` if `i < tau` else `p2` | 3 | One abrupt change at trial `tau` |
 | `logistic` | `lo + (hi - lo) · sigmoid(slope · (i - midpoint))` | 4 | A graded change |
+| `switch2` | `p1` \| `p2` \| `p3` split by `tau1 < tau2` | 5 | Two abrupt changes — an overshoot, or a change arriving in two stages |
+| `qlearning` | — | 2 | **Not implemented** (stub); scored `-inf`, so it never wins |
 
 `tau` is the index of the **first trial of the post-switch regime** (so `1 ≤ tau ≤ n-1`; a
 switch at 0 is just the constant model). The primary hypothesis is one directional switch,
 `p1` low → `p2` high.
 
+`switch2` maximizes **exhaustively** over all ordered pairs `tau1 < tau2`
+
+
+#### `qlearning` (planned)
+
 The `logistic` model **nests** the `switch` model as `slope → ∞`, which is what makes
 `slope` a direct read-out of **abruptness**: a large fitted slope is a step, a small one is
 a slow drift.
+
+### How the logistic is fitted (multi-start)
+
+The logistic likelihood surface has **more than one basin**, and which one Nelder-Mead settles
+in is decided mostly by the *initial slope*.
+
+`fit_logistic` minimizes from **16 dispersed initial conditions** and keeps the best:
+
+- the switch-point warm start (`midpoint = tau`, asymptotes at `p1`/`p2`), and
+- a 5 × 3 grid — midpoints at the 10/30/50/70/90% quantiles of the trial axis, both asymptotes
+  at the global SHORT rate, and initial slopes `0.05` / `0.5` / `5.0` (shallow-gradual through
+  steep-near-step).
+
+The start set lives in **one place**, `logistic_start_points()` — `fit_logistic`,
+`fit_logistic_multistart` and the diagnostic all replay that same list, so what is plotted is
+what is fitted. Add a start there and nowhere else.
+
+Because the logistic nests the step, its optimum **must** be at least as good as the switch
+model's. `fit_logistic` warns if it is not: that means every start got stuck, and it is an
+optimization failure rather than a finding.
 
 ### How `tau` is estimated (no MCMC)
 
@@ -77,7 +104,9 @@ abrupt change.
 
 `AIC = 2k − 2·loglik` and `BIC = k·ln(n) − 2·loglik`; lower is better. BIC penalizes the
 extra parameters harder, so it is the stricter test that a switch happened at all. Reading
-the winner: `constant` → no switch; `switch` → abrupt; `logistic` → gradual.
+the winner: `constant` → no switch; `switch` → one abrupt change; `logistic` → gradual;
+`switch2` → two changes (an overshoot, or a change in two stages). `qlearning` is scored but,
+being a stub, is never eligible to win. Read the caveat above before leaning on a narrow win.
 
 ### The sleep test (`run_permutation`)
 
@@ -123,7 +152,7 @@ Only animals that actually switched are included. The rule is the `inclusion` pa
 
 | `inclusion` | Keeps an animal when |
 | --- | --- |
-| `bic_switch_wins` *(default)* | The switch model has the lowest BIC of the three — the change is real **and** abrupt |
+| `bic_switch_wins` *(default)* | The single-switch model has the lowest BIC of all — the change is real **and** abrupt. Note `switch2` now competes, so an animal best described by two changes is *excluded* by this rule |
 | `bic_beats_constant` | The switch model beats the constant model on BIC; a gradual fit may still be better |
 | `aic_switch_wins` | As the default, under the milder AIC penalty |
 | `all` | No filtering |
@@ -175,9 +204,11 @@ interleaving with another's. **SHORT is the lower row, LONG the upper row** in t
 1. **Strategy** — SHORT/LONG per trial on the continuous trial axis, each trial coloured by
    its reward identity (A red, B teal, unresolved grey), with a blue dotted vertical line at
    each session end (sleep).
-2. **Model comparison** — the data with the constant, switch, and logistic fits overlaid,
-   plus an empirical 21-trial rolling mean, and AIC/BIC in-panel so *no switch / abrupt /
-   gradual* can be read off directly.
+2. **Model comparison** — the data with every fitted model overlaid (constant line, switch
+   step, switch2 two-step, logistic curve), plus an empirical 21-trial rolling mean, and the
+   five-row AIC/BIC table in-panel with the BIC winner marked, so *no switch / abrupt /
+   gradual / two-stage* can be read off directly. The printed table adds each model's loglik,
+   the nesting check, and the winner's fitted parameters.
 3. **Posterior** — the switch-point posterior over *all* trials, plotted windowed to
    ±`likelihood_window` trials around its peak. `tau`, its session, and the HDI width are
    printed and annotated (HDI primary, FWHM secondary).
@@ -198,6 +229,31 @@ This matters when an animal adopts the SHORT strategy for one reward before the 
 
 Returns a dict keyed by subjid holding `tau`, `tau_session`, `hdi`, `hdi_width`, `fwhm`,
 `p1`, `p2`, `comparison`, `session_ends`, `session_starts`, and the `figures`.
+
+### `run_logistic_diagnostic` — is the logistic fit trustworthy?
+
+A **standalone** diagnostic; `run_analysis` does not call it. Per animal it replays the shipped
+start set and shows where each initial condition ends up, so you can see whether the starts
+funnel into one optimum or split into basins:
+
+- every converged sigmoid overlaid on the data, one colour per start — **winner bold**, the
+  switch-point warm start **dashed**;
+- in the margin above the data, each start's **initial** midpoint (▽) joined by a faint
+  connector to where it **converged** (○), in that start's colour;
+- a printed per-start table: initial midpoint → converged midpoint, converged slope, converged
+  loglik, with `[best]` / `[warm]` tags, the number of distinct basins, and a note when a
+  dispersed start beat the warm start.
+
+```python
+from switchpoint_analysis import run_logistic_diagnostic
+
+diag = run_logistic_diagnostic([40], {40: (20251125, 20251231)}, rewarded_only=True,
+                               split_ab=True, show=False)
+diag[40]["A"]["best_label"], diag[40]["A"]["n_basins"], diag[40]["A"]["fig"]
+```
+
+Honours `split_ab` with the same A/B partition `run_analysis` uses, producing a table and a
+figure per reward identity, with the reward type in every title and header.
 
 ### `run_permutation` — one two-panel figure
 
@@ -226,6 +282,9 @@ python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 45 \
 python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 \
     --date-range 20251125 20251231 --rewarded-only --split-ab
 
+# where does each logistic multi-start initial condition converge?
+python scripts/modelling/switchpoint_analysis.py diagnostic --subjids 40 --rewarded-only --split-ab
+
 # do switches align with sleep?
 python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 45 48 50 --rewarded-only
 
@@ -241,7 +300,7 @@ python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 45 48 
 | `--date-range START END` | both | Inclusive `YYYYMMDD` range (alternative to `--dates`). |
 | `--rewarded-only` | both | Keep only rewarded trials; aborts are always dropped. |
 | `--likelihood-window N` | `analysis` | Half-width of the posterior plot window (default 100). |
-| `--split-ab` | `analysis` | Fit and plot the A- and B-reward trials separately. |
+| `--split-ab` | `analysis`, `diagnostic` | Fit and plot the A- and B-reward trials separately. |
 | `--inclusion RULE` | `permutation` | Which animals count as having switched (default `bic_switch_wins`). |
 | `--n-permutations N` | `permutation` | Permutations drawn for the null (default 10000). |
 | `--seed N` | `permutation` | RNG seed for a reproducible null (default 0). |
