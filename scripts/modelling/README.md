@@ -39,7 +39,7 @@ Colours are fixed: **A = `#E53935`** (red), **B = `#00796B`** (teal), unresolved
 | `constant` | `p` | 1 | No strategy change |
 | `switch` | `p1` if `i < tau` else `p2` | 3 | One abrupt change at trial `tau` |
 | `logistic` | `lo + (hi - lo) · sigmoid(slope · (i - midpoint))` | 4 | A graded change |
-| `switch2` | `p1` \| `p2` \| `p3` split by `tau1 < tau2` | 5 | Two abrupt changes — an overshoot, or a change arriving in two stages |
+| `switch2` | `p1` \| `p2` \| `p3` split by `tau1 < tau2`, gated `p1 ≤ p2 ≤ p3` | 5 | A change arriving in two stages (non-decreasing) |
 | `qlearning` | — | 2 | **Not implemented** (stub); scored `-inf`, so it never wins |
 
 `tau` is the index of the **first trial of the post-switch regime** (so `1 ≤ tau ≤ n-1`; a

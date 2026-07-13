@@ -67,7 +67,8 @@ _LOGISTIC_COLOR = "#00A087"
 _DATA_COLOR = "#2b2b2b"
 
 # Models in increasing flexibility, for the comparison table and the printed logliks. The
-# nesting chain constant <= switch <= switch2 and switch <= logistic should hold along it.
+# nesting relations constant <= switch and switch <= logistic should hold along it; switch2 is
+# a monotone-gated (p1 <= p2 <= p3) special case that need not nest the single switch.
 _MODEL_ORDER = ("constant", "switch", "logistic", "switch2", "qlearning")
 
 # Reward identity of a trial. Trials whose identity cannot be resolved are drawn in grey and
@@ -390,7 +391,8 @@ def _plot_model_comparison(prep: dict, comparison: dict):
     grid = np.linspace(0, max(n - 1, 1), 500)
     ax.plot(grid, logistic_p(grid, logistic["midpoint"], logistic["slope"], logistic["lo"], logistic["hi"]),
             color=_LOGISTIC_COLOR, linewidth=1.8, linestyle="--", zorder=7,
-            label=f"Logistic: slope = {logistic['slope']:.3f}")
+            label=f"Logistic: slope = {logistic['slope']:.3f} "
+                  f"(start {logistic.get('start_label', '?')})")
     _mark_sessions(ax, prep["session_ends"])
 
     best_bic = comparison["best_bic"]
@@ -430,17 +432,18 @@ def _describe_fit(name: str, fit: dict) -> str:
         return (f"tau1 = {fit['tau1']}, tau2 = {fit['tau2']}, "
                 f"p1 = {fit['p1']:.3f} -> p2 = {fit['p2']:.3f} -> p3 = {fit['p3']:.3f}")
     if name == "logistic":
-        return (f"midpoint = {fit['midpoint']:.1f}, slope = {fit['slope']:.4g}, "
-                f"lo = {fit['lo']:.3f}, hi = {fit['hi']:.3f}")
+        return (f"start = {fit.get('start_label', '?')}, midpoint = {fit['midpoint']:.1f}, "
+                f"slope = {fit['slope']:.4g}, lo = {fit['lo']:.3f}, hi = {fit['hi']:.3f}")
     return "not implemented"
 
 
 def _print_model_table(comparison: dict) -> None:
     """Print every model's loglik / AIC / BIC, the winner's parameters, and the nesting check.
 
-    The nesting chain (``constant <= switch <= switch2`` and ``switch <= logistic``) is a
-    property of the models, not of the data: a violation means a fit failed to find its
-    optimum, so it is called out rather than left to be spotted in the numbers.
+    The nesting relations (``constant <= switch`` and ``switch <= logistic``) are a property of
+    the models, not of the data: a violation means a fit failed to find its optimum, so it is
+    called out rather than left to be spotted in the numbers. ``switch2`` is monotone-gated and
+    does not nest the single switch, so it is not part of the check.
     """
     print(f"  {'model':<10}{'k':>3}{'loglik':>12}{'AIC':>11}{'BIC':>11}")
     for name in _MODEL_ORDER:
@@ -451,18 +454,20 @@ def _print_model_table(comparison: dict) -> None:
             continue
         tags = " ".join(t for t, on in (("<-AIC", name == comparison["best_aic"]),
                                         ("<-BIC", name == comparison["best_bic"])) if on)
+        # For the logistic, name the multi-start that won, so the chosen fit is unambiguous.
+        if name == "logistic" and fit.get("start_label"):
+            tags = f"{tags}  (start {fit['start_label']})".lstrip()
         print(f"  {name:<10}{score['k_params']:>3}{score['loglik']:>12.3f}{score['aic']:>11.1f}"
               f"{score['bic']:>11.1f}  {tags}")
 
-    ll = {name: comparison[name]["loglik"] for name in ("constant", "switch", "switch2", "logistic")}
+    ll = {name: comparison[name]["loglik"] for name in ("constant", "switch", "logistic")}
     violations = [msg for msg, ok in (
         ("constant <= switch", ll["constant"] <= ll["switch"] + _LOGLIK_REPORT_TOL),
-        ("switch <= switch2", ll["switch"] <= ll["switch2"] + _LOGLIK_REPORT_TOL),
         ("switch <= logistic", ll["switch"] <= ll["logistic"] + _LOGLIK_REPORT_TOL)) if not ok]
     if violations:
         print(f"  nesting: VIOLATED -> {'; '.join(violations)} (a fit failed to find its optimum)")
     else:
-        print("  nesting: OK (constant <= switch <= switch2, switch <= logistic)")
+        print("  nesting: OK (constant <= switch <= logistic; switch2 monotone-gated)")
 
     best = comparison["best_bic"]
     print(f"  best model (BIC): {best} -- {_describe_fit(best, comparison['fits'][best])}")

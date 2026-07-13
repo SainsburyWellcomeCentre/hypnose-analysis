@@ -17,7 +17,10 @@ the animal left via the SHORT sequence. Three descriptions of ``p_i`` are compar
   change (4 parameters). ``slope`` is the abruptness: large ``slope`` approaches the step
   of the switch model, small ``slope`` is a slow drift.
 - ``switch2``: three regimes ``p1 | p2 | p3`` split by an ordered pair ``tau1 < tau2``
-  (5 parameters) -- e.g. an overshoot, or a change that arrives in two stages.
+  (5 parameters) -- a change that arrives in two stages. Constrained non-decreasing
+  (``p1 <= p2 <= p3``) so it describes a staged progression toward SHORT rather than a
+  transient spike (e.g. ``0 -> 1 -> 0`` over a few trials, which would otherwise let it
+  beat the constant on noise).
 - ``qlearning``: a mechanistic account, NOT YET IMPLEMENTED (see ``fit_qlearning``); it is
   scored as ``-inf`` so it never wins.
 
@@ -261,15 +264,20 @@ def fit_switch2(s: Sequence[int] | np.ndarray) -> dict:
     ``tau1``, and for each, a single vectorized scan over all valid ``tau2`` built from the
     same prefix sum ``switchpoint_loglik_profile`` uses.
 
-    It nests the single switch (``tau2 = n``, or ``p2 == p3``), so its loglik must be at least
-    ``fit_switchpoint``'s; a shortfall is warned about rather than returned silently.
+    The regimes are gated non-decreasing (``p1 <= p2 <= p3``): pairs whose segment means are
+    not monotone are excluded from the search, so a win reflects a staged progression toward
+    SHORT rather than a transient spike (e.g. ``0 -> 1 -> 0`` over a few trials). This makes
+    switch2 a *constrained* model: unlike the unconstrained version it no longer nests the
+    single switch or the constant, and when no monotone split exists (e.g. a strictly
+    decreasing sequence) it is degenerate (``-inf``) and cannot win -- both intended.
 
     Returns
     -------
     dict
-        ``tau1``, ``tau2`` (first trial of the 2nd and 3rd regime), ``p1``, ``p2``, ``p3``,
-        ``loglik``, ``k_params`` (5). Degenerate (``tau`` 0, NaN rates, ``-inf``) when
-        ``n < 3``, which cannot support three non-empty regimes.
+        ``tau1``, ``tau2`` (first trial of the 2nd and 3rd regime), ``p1``, ``p2``, ``p3``
+        (with ``p1 <= p2 <= p3``), ``loglik``, ``k_params`` (5). Degenerate (``tau`` 0, NaN
+        rates, ``-inf``) when ``n < 3`` (too few trials for three non-empty regimes) or when no
+        monotone split exists.
     """
     s = _as_binary(s)
     n = s.size
@@ -283,24 +291,21 @@ def fit_switch2(s: Sequence[int] | np.ndarray) -> dict:
     best = (-np.inf, 0, 0)
     for tau1 in range(1, n - 1):
         tau2 = np.arange(tau1 + 1, n)  # tau2 > tau1, and leaves a non-empty 3rd regime
-        ll1 = _segment_loglik(prefix[tau1], tau1)  # scalar: the 1st regime is fixed here
-        ll2 = _segment_loglik(prefix[tau2] - prefix[tau1], tau2 - tau1)
-        ll3 = _segment_loglik(total - prefix[tau2], n - tau2)
-        ll = ll1 + ll2 + ll3
+        m1, m2, m3 = tau1, tau2 - tau1, n - tau2  # regime sizes (m1 scalar, m2/m3 arrays)
+        k1, k2, k3 = prefix[tau1], prefix[tau2] - prefix[tau1], total - prefix[tau2]
+        p1, p2, p3 = k1 / m1, k2 / m2, k3 / m3  # segment ML rates, for the loglik and the gate
+        ll = _segment_loglik(k1, m1) + _segment_loglik(k2, m2) + _segment_loglik(k3, m3)
+        # Monotonicity gate: keep only non-decreasing regimes p1 <= p2 <= p3, so a win reflects
+        # a staged progression toward SHORT and not a transient spike (e.g. 0 -> 1 -> 0 over a
+        # few trials) that would otherwise let switch2 beat the constant on noise.
+        ll = np.where((p1 <= p2) & (p2 <= p3), ll, -np.inf)
         j = int(np.argmax(ll))
         if ll[j] > best[0]:
             best = (float(ll[j]), tau1, int(tau2[j]))
 
     loglik, tau1, tau2 = best
-    if not np.isfinite(loglik):
+    if not np.isfinite(loglik):  # no monotone split exists (or n < 3): switch2 cannot win
         return degenerate
-    switch_loglik = fit_switchpoint(s)["loglik"]
-    if loglik < switch_loglik - _LOGLIK_TOL:
-        warnings.warn(
-            f"switch2 loglik {loglik:.6f} < switch loglik {switch_loglik:.6f} "
-            f"(shortfall {switch_loglik - loglik:.3e}). The two-switch model nests the single "
-            f"switch, so it cannot truly be worse: this is a search failure, not a real result.",
-            stacklevel=2)
     return {"tau1": tau1, "tau2": tau2, "p1": float(s[:tau1].mean()),
             "p2": float(s[tau1:tau2].mean()), "p3": float(s[tau2:].mean()),
             "loglik": loglik, "k_params": 5}
@@ -442,12 +447,16 @@ def fit_logistic(s: Sequence[int] | np.ndarray) -> dict:
     dict
         ``midpoint``, ``slope`` (abruptness; negative means SHORT was abandoned), ``lo``,
         ``hi``, ``loglik``, ``k_params`` (4), ``converged`` (True iff at least one start
-        converged).
+        converged), and -- identifying which multi-start actually won -- ``start_label`` (the
+        ``logistic_start_points`` label, e.g. ``"switchpoint"`` or ``"q30/slope0.5"``),
+        ``initial_midpoint`` and ``initial_slope`` (that start's initial conditions).
     """
     s = _as_binary(s)
     if s.size < 2:
         return {"midpoint": 0.0, "slope": 0.0, "lo": 0.5, "hi": 0.5,
-                "loglik": float("-inf"), "k_params": 4, "converged": False}
+                "loglik": float("-inf"), "k_params": 4, "converged": False,
+                "start_label": None, "initial_midpoint": float("nan"),
+                "initial_slope": float("nan")}
     fits = fit_logistic_multistart(s)
     best = max(fits, key=lambda fit: fit["loglik"])
     switch_loglik = fit_switchpoint(s)["loglik"]
@@ -459,7 +468,9 @@ def fit_logistic(s: Sequence[int] | np.ndarray) -> dict:
             f"not a real result.", stacklevel=2)
     return {"midpoint": best["midpoint"], "slope": best["slope"], "lo": best["lo"],
             "hi": best["hi"], "loglik": best["loglik"], "k_params": 4,
-            "converged": any(fit["converged"] for fit in fits)}
+            "converged": any(fit["converged"] for fit in fits),
+            "start_label": best["label"], "initial_midpoint": best["initial_midpoint"],
+            "initial_slope": best["initial_slope"]}
 
 
 def compare_models(s: Sequence[int] | np.ndarray) -> dict:
@@ -467,8 +478,9 @@ def compare_models(s: Sequence[int] | np.ndarray) -> dict:
 
     The models, in increasing flexibility: ``constant`` (k=1), ``switch`` (k=3), ``logistic``
     (k=4), ``switch2`` (k=5), and ``qlearning`` (a stub -- see ``fit_qlearning``). Two nesting
-    relations hold and are worth checking on any real fit:
-    ``constant <= switch <= switch2`` and ``switch <= logistic`` in loglik.
+    relations hold and are worth checking on any real fit: ``constant <= switch`` and
+    ``switch <= logistic`` in loglik. ``switch2`` is monotone-gated (``p1 <= p2 <= p3``), so
+    it does *not* nest the single switch and may be ``-inf`` when no monotone split exists.
 
     ``AIC = 2k - 2 * loglik`` and ``BIC = k * ln(n) - 2 * loglik``. BIC penalizes the extra
     parameters harder, so it is the stricter test of "there really was a switch".
