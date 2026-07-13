@@ -8,6 +8,9 @@ figure handles back) or from the terminal via the argparse wrapper at the bottom
 - ``run_permutation`` -- do switches sit closer to *real* sleep boundaries than to other
   animals' donated ones?
 
+plus a standalone diagnostic, ``run_logistic_diagnostic``, which shows where each of the
+logistic's multi-start initial conditions converges (nothing else depends on it).
+
 Neither depends on the other having run; both build their trial sequences through the same
 ``_prepare_subject`` helper. All data access, filtering, and plotting live here; the numeric
 model is in ``hypnose.models.switchpoint_helpers``.
@@ -24,6 +27,7 @@ Examples
   python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 --likelihood-window 100
   python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 41 --date-range 20251201 20251231 --rewarded-only
   python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 41 42 --rewarded-only
+  python scripts/modelling/switchpoint_analysis.py diagnostic --subjids 40 --rewarded-only --split-ab
 """
 from __future__ import annotations
 
@@ -43,6 +47,7 @@ from hypnose.io.save import nature_style
 from hypnose.models.switchpoint_helpers import (
     compare_models,
     distance_to_session_start,
+    fit_logistic_multistart,
     fit_switchpoint,
     logistic_p,
 )
@@ -72,6 +77,15 @@ _ROLLING_WINDOW = 21
 # Attempts to build a without-replacement donor assignment before allowing replacement.
 _ASSIGNMENT_TRIES = 20
 
+# Multi-start diagnostic: y positions of the initial/converged midpoint strip, in data
+# coordinates above the LONG row (the axis is inverted, so these are negative).
+_MS_Y_INIT = -0.16
+_MS_Y_CONV = -0.30
+# Label of the switch-point warm start, as emitted by logistic_start_points.
+_WARM_START_LABEL = "switchpoint"
+# Report a start beating the warm start only when the loglik gain is worth reading.
+_LOGLIK_REPORT_TOL = 1e-3
+
 # Which animals count as "has a switch" in run_permutation. Keys are the `inclusion` values.
 _INCLUSION_RULES = {
     # Strictest: the 3-parameter switch beats BOTH the constant and the 4-parameter
@@ -85,7 +99,7 @@ _INCLUSION_RULES = {
     "all": lambda c: True,
 }
 
-__all__ = ["run_analysis", "run_permutation"]
+__all__ = ["run_analysis", "run_permutation", "run_logistic_diagnostic"]
 
 
 def _normalize_subjids_dates(subjids, dates):
@@ -506,6 +520,148 @@ def run_analysis(
     return results
 
 
+def _plot_multistart(prep: dict, fits: list[dict], best: int, warm: int):
+    """Data plus every converged sigmoid, one colour per multi-start initial condition.
+
+    The winner (highest loglik) is drawn bold and the switch-point warm start dashed -- both,
+    if the warm start won. In the margin above the data each start's INITIAL midpoint (down
+    triangle) is joined by a faint connector to where it CONVERGED (circle), so starts that
+    funnel into one optimum are visibly distinct from starts that split into basins.
+    """
+    s, x, n = prep["s"], prep["trial_ids"], prep["n_trials"]
+    colors = plt.get_cmap("tab20")(np.linspace(0, 1, max(len(fits), 2))[:len(fits)])
+    grid = np.linspace(0, max(n - 1, 1), 600)
+
+    fig, ax = plt.subplots(figsize=(13, 5.0))
+    ax.plot(x, s, marker="|", linestyle="none", markersize=6, color=_DATA_COLOR, alpha=0.30, zorder=2)
+    roll_x, roll_y = _rolling_mean(s)
+    if roll_x.size:
+        ax.plot(roll_x, roll_y, color="#999999", linewidth=1.0, zorder=3,
+                label=f"Empirical P(SHORT), {_ROLLING_WINDOW}-trial mean")
+
+    for i, (fit, color) in enumerate(zip(fits, colors)):
+        is_best, is_warm = i == best, i == warm
+        ax.plot(grid, logistic_p(grid, fit["midpoint"], fit["slope"], fit["lo"], fit["hi"]),
+                color=color, linewidth=2.6 if is_best else 1.2,
+                linestyle="--" if is_warm else "-", alpha=1.0 if is_best else 0.75,
+                zorder=6 if is_best else 4,
+                label=f"{fit['label']}{' [best]' if is_best else ''}{' [warm]' if is_warm else ''}"
+                      f"  LL={fit['loglik']:.1f}, slope={fit['slope']:.3g}")
+        # Margin above the data: initial midpoint -> converged midpoint.
+        ax.plot([fit["initial_midpoint"], fit["midpoint"]], [_MS_Y_INIT, _MS_Y_CONV],
+                color=color, linewidth=0.7, alpha=0.45, zorder=5)
+        ax.plot(fit["initial_midpoint"], _MS_Y_INIT, marker="v", markersize=5, color=color,
+                alpha=0.9, zorder=6)
+        ax.plot(fit["midpoint"], _MS_Y_CONV, marker="o", markersize=5.5, color=color,
+                markeredgecolor="white", markeredgewidth=0.5, zorder=7)
+
+    _mark_sessions(ax, prep["session_ends"])
+    ax.text(0.002, _MS_Y_INIT, "start ", transform=ax.get_yaxis_transform(), va="center",
+            ha="right", fontsize=6, color="#666666")
+    ax.text(0.002, _MS_Y_CONV, "converged ", transform=ax.get_yaxis_transform(), va="center",
+            ha="right", fontsize=6, color="#666666")
+    ax.set_ylim(1.45, _MS_Y_CONV - 0.08)  # inverted, with headroom for the midpoint strip
+    ax.set_xlim(-1, max(n, 1))
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["LONG", "SHORT"])
+    ax.set_xlabel("Trial (continuous across sessions)")
+    ax.set_ylabel("P(SHORT)")
+    ax.set_title(f"{_subject_label(prep)} - logistic multi-start diagnostic "
+                 f"({len(fits)} initial conditions)")
+    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=6, frameon=False)
+    fig.tight_layout()
+    return fig
+
+
+def _diagnose_sequence(prep: dict) -> Optional[dict]:
+    """Fit one sequence from every multi-start initial condition; print the table, plot it."""
+    label = _subject_label(prep)
+    if prep["n_trials"] < 2:
+        print(f"[multistart] {label}: {prep['n_trials']} kept trial(s); skipping.")
+        return None
+
+    fits = fit_logistic_multistart(prep["s"])
+    best = int(np.argmax([fit["loglik"] for fit in fits]))
+    warm = next(i for i, fit in enumerate(fits) if fit["label"] == _WARM_START_LABEL)
+    switch_loglik = fit_switchpoint(prep["s"])["loglik"]
+
+    print(f"\n[multistart] {label} ({prep['n_trials']} trials, {len(fits)} initial conditions)")
+    print(f"  switch-model loglik = {switch_loglik:.3f} (the logistic must reach at least this)")
+    print(f"  {'start':<14}{'init mid':>10}{'->':^4}{'conv mid':>10}{'conv slope':>12}"
+          f"{'loglik':>11}  {'':<4}")
+    for i, fit in enumerate(fits):
+        tag = " ".join(t for t, on in (("[best]", i == best), ("[warm]", i == warm)) if on)
+        conv = "" if fit["converged"] else " (no conv.)"
+        print(f"  {fit['label']:<14}{fit['initial_midpoint']:>10.1f}{'->':^4}{fit['midpoint']:>10.1f}"
+              f"{fit['slope']:>12.4g}{fit['loglik']:>11.3f}  {tag}{conv}")
+
+    basins = len({round(fit["midpoint"], 1) for fit in fits})
+    spread = max(fit["loglik"] for fit in fits) - min(fit["loglik"] for fit in fits)
+    print(f"  {basins} distinct converged midpoint(s); loglik spread across starts = {spread:.3f}")
+    if fits[best]["loglik"] > fits[warm]["loglik"] + _LOGLIK_REPORT_TOL:
+        print(f"  NOTE: a dispersed start beat the warm start by "
+              f"{fits[best]['loglik'] - fits[warm]['loglik']:.3f} loglik -- "
+              f"the warm start alone would have found a local optimum.")
+
+    return {"fits": fits, "best": best, "best_label": fits[best]["label"],
+            "warm": warm, "switch_loglik": switch_loglik, "n_basins": basins,
+            "ab_split": prep.get("ab_split"), "prep": prep,
+            "fig": _plot_multistart(prep, fits, best, warm)}
+
+
+def run_logistic_diagnostic(
+    subjids: Union[int, Iterable[int], dict],
+    date_ranges: Optional[dict] = None,
+    rewarded_only: bool = False,
+    split_ab: bool = False,
+    show: bool = True,
+) -> dict:
+    """Show where every logistic multi-start initial condition converges, per animal.
+
+    A standalone diagnostic -- ``run_analysis`` does not call it. It replays the exact start
+    set that ``fit_logistic`` ships with (``logistic_start_points``, via
+    ``fit_logistic_multistart``), so what is plotted is what is fitted.
+
+    Per animal it prints a per-start table (initial midpoint -> converged midpoint, converged
+    slope, converged loglik) and draws one figure: the raw SHORT/LONG trials with the
+    empirical rolling P(SHORT), every converged sigmoid in its start's colour (winner bold,
+    warm start dashed), and each start's initial and converged midpoint marked in the margin
+    and joined -- so it is obvious whether the starts funnel to one optimum or split.
+
+    Parameters
+    ----------
+    subjids, date_ranges, rewarded_only, split_ab, show
+        As in ``run_analysis``. With ``split_ab`` the A and B trials are partitioned by the
+        same rule ``run_analysis`` uses, and each gets its own table and figure.
+
+    Returns
+    -------
+    dict
+        Keyed by subjid (nested by ``"A"`` / ``"B"`` when ``split_ab``): ``fits`` (one entry
+        per start), ``best`` / ``best_label``, ``warm``, ``switch_loglik``, ``n_basins``,
+        ``ab_split``, ``prep``, and ``fig``.
+    """
+    subjids, date_ranges, dates_for = _normalize_subjids_dates(subjids, date_ranges)
+    results = {}
+
+    with plt.rc_context(nature_style()):
+        for subjid in subjids:
+            prep = _prepare_subject(subjid, dates_for(subjid), rewarded_only)
+            if split_ab:
+                splits = {letter: _diagnose_sequence(_subset_by_ab(prep, letter))
+                          for letter in _AB_COLORS}
+                splits = {letter: r for letter, r in splits.items() if r is not None}
+                if splits:
+                    results[subjid] = splits
+            else:
+                result = _diagnose_sequence(prep)
+                if result is not None:
+                    results[subjid] = result
+            if show:
+                plt.show()
+    return results
+
+
 def _plot_box_with_points(ax, groups: dict) -> None:
     """One box per group with its individual points jittered on top."""
     labels = list(groups.keys())
@@ -786,6 +942,12 @@ def main() -> int:
     analysis.add_argument("--split-ab", action="store_true",
                           help="fit and plot the A- and B-reward trials separately")
 
+    diagnostic = subparsers.add_parser("diagnostic",
+                                       help="logistic multi-start diagnostic (standalone)")
+    _add_shared_args(diagnostic)
+    diagnostic.add_argument("--split-ab", action="store_true",
+                            help="diagnose the A- and B-reward trials separately")
+
     permutation = subparsers.add_parser("permutation", help="switch vs sleep-boundary alignment")
     _add_shared_args(permutation)
     permutation.add_argument("--inclusion", default="bic_switch_wins", choices=sorted(_INCLUSION_RULES),
@@ -804,6 +966,9 @@ def main() -> int:
     if args.command == "analysis":
         run_analysis(subjids, date_ranges, rewarded_only=args.rewarded_only,
                      likelihood_window=args.likelihood_window, split_ab=args.split_ab, show=True)
+    elif args.command == "diagnostic":
+        run_logistic_diagnostic(subjids, date_ranges, rewarded_only=args.rewarded_only,
+                                split_ab=args.split_ab, show=True)
     else:
         run_permutation(subjids, date_ranges, rewarded_only=args.rewarded_only,
                         inclusion=args.inclusion, n_permutations=args.n_permutations,

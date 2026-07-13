@@ -25,6 +25,7 @@ segment is all zeros or all ones.
 """
 from __future__ import annotations
 
+import warnings
 from typing import Sequence
 
 import numpy as np
@@ -37,6 +38,15 @@ _EPS = 1e-12
 # Clamp the logistic argument before exp() so a large fitted slope cannot overflow.
 _Z_MAX = 500.0
 
+# Logistic multi-start grid (see logistic_start_points). Midpoints as fractions of the trial
+# axis, and initial slopes from shallow-gradual to steep-near-step.
+_LOGISTIC_MIDPOINT_QUANTILES = (0.10, 0.30, 0.50, 0.70, 0.90)
+_LOGISTIC_INITIAL_SLOPES = (0.05, 0.5, 5.0)
+
+# A logistic loglik shortfall below the switch model larger than this is flagged as an
+# optimization failure (the logistic nests the step, so it cannot truly be worse).
+_LOGLIK_TOL = 1e-6
+
 __all__ = [
     "bernoulli_loglik",
     "switchpoint_loglik_profile",
@@ -46,6 +56,8 @@ __all__ = [
     "fit_constant",
     "fit_switchpoint",
     "logistic_p",
+    "logistic_start_points",
+    "fit_logistic_multistart",
     "fit_logistic",
     "compare_models",
     "distance_to_session_start",
@@ -225,30 +237,48 @@ def logistic_p(x: np.ndarray, midpoint: float, slope: float, lo: float, hi: floa
     return lo + (hi - lo) * expit(z)
 
 
-def fit_logistic(s: Sequence[int] | np.ndarray) -> dict:
-    """Fit the graded-change model by maximum likelihood (Nelder-Mead).
+def logistic_start_points(s: Sequence[int] | np.ndarray) -> list[dict]:
+    """The initial conditions the logistic is fitted from -- the single source of truth.
 
-    ``p_i = lo + (hi - lo) * sigmoid(slope * (i - midpoint))``. The asymptotes are fitted
-    rather than fixed at 0/1, so the model nests the switch model (as ``slope -> inf``)
-    and ``slope`` is directly interpretable as abruptness. Initialized from the
-    switch-point fit, which keeps the optimizer off the flat parts of the surface.
+    The likelihood surface has flat regions (any ``slope`` looks the same once the asymptotes
+    collapse) and more than one basin, so a single warm start can settle in a local optimum.
+    The set is therefore:
+
+    - the switch-point warm start (``midpoint = tau``, asymptotes at ``p1`` / ``p2``), kept
+      first so callers can identify it;
+    - a grid of dispersed starts: midpoints at the 10/30/50/70/90% quantiles of the trial
+      axis, both asymptotes at the global SHORT rate, and initial slopes spanning
+      shallow-gradual to steep-near-step.
+
+    ``fit_logistic`` minimizes from every one of these, and the multi-start diagnostic replays
+    exactly the same set -- define new starts here and nowhere else.
 
     Returns
     -------
-    dict
-        ``midpoint``, ``slope`` (abruptness; negative means SHORT was abandoned), ``lo``,
-        ``hi``, ``loglik``, ``k_params`` (4), ``converged``.
+    list[dict]
+        One dict per start: ``label``, ``midpoint``, ``slope``, ``lo``, ``hi``, and ``theta``
+        (the packed ``[midpoint, slope, logit(lo), logit(hi)]`` the optimizer takes).
     """
     s = _as_binary(s)
-    n = s.size
-    if n < 2:
-        return {"midpoint": 0.0, "slope": 0.0, "lo": 0.5, "hi": 0.5,
-                "loglik": float("-inf"), "k_params": 4, "converged": False}
-    x = np.arange(n, dtype=float)
+    n = max(s.size, 1)
+    rate = float(_clip_p(s.mean())) if s.size else 0.5
     switch = fit_switchpoint(s)
-    lo0, hi0 = _clip_p(switch["p1"]), _clip_p(switch["p2"])
-    theta0 = np.array([float(switch["tau"]), 1.0, logit(lo0), logit(hi0)])
+    lo0 = float(_clip_p(switch["p1"])) if np.isfinite(switch["p1"]) else rate
+    hi0 = float(_clip_p(switch["p2"])) if np.isfinite(switch["p2"]) else rate
 
+    starts = [{"label": "switchpoint", "midpoint": float(switch["tau"]), "slope": 1.0,
+               "lo": lo0, "hi": hi0}]
+    starts += [{"label": f"q{int(q * 100):02d}/slope{slope:g}", "midpoint": float(q * (n - 1)),
+                "slope": float(slope), "lo": rate, "hi": rate}
+               for q in _LOGISTIC_MIDPOINT_QUANTILES for slope in _LOGISTIC_INITIAL_SLOPES]
+    for start in starts:
+        start["theta"] = np.array([start["midpoint"], start["slope"],
+                                   logit(start["lo"]), logit(start["hi"])])
+    return starts
+
+
+def _fit_logistic_from(s: np.ndarray, x: np.ndarray, theta0: np.ndarray) -> dict:
+    """Run one Nelder-Mead minimization of the logistic negative log-likelihood."""
     def negative_loglik(theta: np.ndarray) -> float:
         p = logistic_p(x, theta[0], theta[1], expit(theta[2]), expit(theta[3]))
         return -bernoulli_loglik(s, p)
@@ -257,8 +287,69 @@ def fit_logistic(s: Sequence[int] | np.ndarray) -> dict:
                       options={"maxiter": 4000, "xatol": 1e-6, "fatol": 1e-8})
     midpoint, slope, lo_raw, hi_raw = result.x
     return {"midpoint": float(midpoint), "slope": float(slope), "lo": float(expit(lo_raw)),
-            "hi": float(expit(hi_raw)), "loglik": float(-result.fun), "k_params": 4,
+            "hi": float(expit(hi_raw)), "loglik": float(-result.fun),
             "converged": bool(result.success)}
+
+
+def fit_logistic_multistart(s: Sequence[int] | np.ndarray) -> list[dict]:
+    """Fit the logistic from every start in ``logistic_start_points``, keeping them all.
+
+    ``fit_logistic`` returns only the winner; this keeps the whole picture, so a caller can
+    see whether the starts funnel into one optimum or split into basins.
+
+    Returns
+    -------
+    list[dict]
+        One dict per start, in the order of ``logistic_start_points``: the start's ``label``,
+        ``initial_midpoint``, ``initial_slope``, ``initial_lo``, ``initial_hi``, plus the
+        converged ``midpoint``, ``slope``, ``lo``, ``hi``, ``loglik``, ``converged``.
+        Empty when ``n < 2``.
+    """
+    s = _as_binary(s)
+    if s.size < 2:
+        return []
+    x = np.arange(s.size, dtype=float)
+    return [{"label": start["label"], "initial_midpoint": start["midpoint"],
+             "initial_slope": start["slope"], "initial_lo": start["lo"], "initial_hi": start["hi"],
+             **_fit_logistic_from(s, x, start["theta"])}
+            for start in logistic_start_points(s)]
+
+
+def fit_logistic(s: Sequence[int] | np.ndarray) -> dict:
+    """Fit the graded-change model by maximum likelihood, multi-start Nelder-Mead.
+
+    ``p_i = lo + (hi - lo) * sigmoid(slope * (i - midpoint))``. The asymptotes are fitted
+    rather than fixed at 0/1, so the model nests the switch model (as ``slope -> inf``) and
+    ``slope`` is directly interpretable as abruptness. Minimized from every start in
+    ``logistic_start_points``; the fit with the highest log-likelihood wins.
+
+    Because the logistic nests the step, its optimum must be at least as good as the switch
+    model's. A shortfall means every start got stuck, so it is warned about rather than
+    returned silently -- it is an optimization failure, not a finding.
+
+    Returns
+    -------
+    dict
+        ``midpoint``, ``slope`` (abruptness; negative means SHORT was abandoned), ``lo``,
+        ``hi``, ``loglik``, ``k_params`` (4), ``converged`` (True iff at least one start
+        converged).
+    """
+    s = _as_binary(s)
+    if s.size < 2:
+        return {"midpoint": 0.0, "slope": 0.0, "lo": 0.5, "hi": 0.5,
+                "loglik": float("-inf"), "k_params": 4, "converged": False}
+    fits = fit_logistic_multistart(s)
+    best = max(fits, key=lambda fit: fit["loglik"])
+    switch_loglik = fit_switchpoint(s)["loglik"]
+    if best["loglik"] < switch_loglik - _LOGLIK_TOL:
+        warnings.warn(
+            f"logistic loglik {best['loglik']:.6f} < switch loglik {switch_loglik:.6f} "
+            f"(shortfall {switch_loglik - best['loglik']:.3e}). The logistic nests the step "
+            f"model, so every multi-start attempt got stuck: this is an optimization failure, "
+            f"not a real result.", stacklevel=2)
+    return {"midpoint": best["midpoint"], "slope": best["slope"], "lo": best["lo"],
+            "hi": best["hi"], "loglik": best["loglik"], "k_params": 4,
+            "converged": any(fit["converged"] for fit in fits)}
 
 
 def compare_models(s: Sequence[int] | np.ndarray) -> dict:
