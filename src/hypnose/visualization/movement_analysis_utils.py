@@ -32,13 +32,12 @@ from hypnose.utils.helpers import (
 )
 from hypnose.visualization.visualization_utils import (
     _clean_graph,
-    _load_table_with_trial_data,
-    _load_trial_views,
     _extract_metric_value,
     _load_protocol_from_summary,
     _ensure_metrics_json,
     load_tracking_with_behavior,
 )
+from hypnose.io.loaders import _load_table_with_trial_data, _load_trial_views
 from hypnose.io.save import save_figure
 import re
 import numpy as np

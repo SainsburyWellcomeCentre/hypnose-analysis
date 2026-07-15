@@ -1,14 +1,21 @@
-"""Bernoulli switch-point model for a binary strategy sequence.
+"""Bernoulli switch-point model family for a binary strategy sequence.
 
 Closed-form, O(n) profile likelihood over the candidate switch trials -- no MCMC and no
 change-point package. Everything here is pure numeric (numpy + scipy): numpy arrays in,
-numpy arrays and plain dicts out. No file I/O, no plotting, no pandas, no path handling;
-those live in ``scripts/modelling/switchpoint_analysis.py``.
+numpy arrays and plain dicts out. No file I/O, no plotting, no pandas, no path handling.
+
+This module holds the descriptive switch-point family and its Bernoulli primitives. The
+sibling models and the machinery that scores them live alongside it:
+
+- ``qlearning.py``   -- the mechanistic Q-learning account (currently a stub).
+- ``compare.py``     -- ``compare_models`` (AIC/BIC over every model) and the per-trial
+  fitted-P reconstruction.
+- ``permutation.py`` -- ``distance_to_session_start`` and the sleep-alignment test.
 
 Model
 -----
 Each solved trial ``i`` is a Bernoulli draw ``s[i] ~ Bern(p_i)``, where ``s[i] == 1`` means
-the animal left via the SHORT sequence. Three descriptions of ``p_i`` are compared:
+the animal left via the SHORT sequence. The descriptions of ``p_i`` compared here:
 
 - ``constant``: ``p_i = p`` -- no strategy change (1 parameter).
 - ``switch``: ``p_i = p1`` for ``i < tau`` and ``p2`` for ``i >= tau`` -- one abrupt,
@@ -21,8 +28,6 @@ the animal left via the SHORT sequence. Three descriptions of ``p_i`` are compar
   (``p1 <= p2 <= p3``) so it describes a staged progression toward SHORT rather than a
   transient spike (e.g. ``0 -> 1 -> 0`` over a few trials, which would otherwise let it
   beat the constant on noise).
-- ``qlearning``: a mechanistic account, NOT YET IMPLEMENTED (see ``fit_qlearning``); it is
-  scored as ``-inf`` so it never wins.
 
 ``tau`` is the index of the FIRST trial of the post-switch regime, so it ranges over
 ``1 .. n-1``; a switch at ``0`` or ``n`` is just the constant model and is excluded.
@@ -54,6 +59,10 @@ _LOGISTIC_INITIAL_SLOPES = (0.05, 0.5, 5.0)
 # optimization failure (the logistic nests the step, so it cannot truly be worse).
 _LOGLIK_TOL = 1e-6
 
+# Label of the switch-point warm start in logistic_start_points -- the single source of truth,
+# so callers (fit_logistic, the multi-start diagnostic) can identify it without hardcoding.
+WARM_START_LABEL = "switchpoint"
+
 __all__ = [
     "bernoulli_loglik",
     "switchpoint_loglik_profile",
@@ -63,13 +72,11 @@ __all__ = [
     "fit_constant",
     "fit_switchpoint",
     "fit_switch2",
-    "fit_qlearning",
     "logistic_p",
     "logistic_start_points",
     "fit_logistic_multistart",
     "fit_logistic",
-    "compare_models",
-    "distance_to_session_start",
+    "WARM_START_LABEL",
 ]
 
 
@@ -311,38 +318,6 @@ def fit_switch2(s: Sequence[int] | np.ndarray) -> dict:
             "loglik": loglik, "k_params": 5}
 
 
-def fit_qlearning(s: Sequence[int] | np.ndarray) -> dict:
-    """Placeholder for a Q-learning account of the strategy change -- NOT IMPLEMENTED.
-
-    Returns the same dict shape as the other fits with ``loglik = -inf`` and
-    ``implemented = False``, so it slots into ``compare_models`` and the plots without
-    breaking them and is never selected as the best model.
-
-    Planned model
-    -------------
-    A per-trial value update rather than a descriptive curve: the animal holds a value for the
-    SHORT option, updates it after every trial with learning rate ``alpha``, and chooses via a
-    softmax with inverse temperature ``beta``. Fitted by maximum likelihood on the *same*
-    per-trial Bernoulli choices the other models use, so the logliks stay directly comparable
-    (``k_params = 2``, plus whatever initial value is fitted rather than fixed).
-
-    It must be fitted with a MULTI-START over a dispersed ``(alpha, beta)`` grid, exactly as
-    the logistic is: the likelihood surface in ``(alpha, beta)`` is not guaranteed unimodal
-    (small ``alpha`` with large ``beta`` can mimic large ``alpha`` with small ``beta``), and a
-    single start would under-fit it -- which would strawman the model against the descriptive
-    ones rather than test it.
-
-    Returns
-    -------
-    dict
-        ``alpha``, ``beta`` (NaN), ``loglik`` (``-inf``), ``k_params`` (2),
-        ``implemented`` (False).
-    """
-    _as_binary(s)  # validate the input the same way as the real fits, so callers fail early
-    return {"alpha": float("nan"), "beta": float("nan"), "loglik": float("-inf"),
-            "k_params": 2, "implemented": False}
-
-
 def logistic_p(x: np.ndarray, midpoint: float, slope: float, lo: float, hi: float) -> np.ndarray:
     """Per-trial success probability of the logistic model (asymptotes ``lo`` and ``hi``).
 
@@ -360,7 +335,7 @@ def logistic_start_points(s: Sequence[int] | np.ndarray) -> list[dict]:
     The set is therefore:
 
     - the switch-point warm start (``midpoint = tau``, asymptotes at ``p1`` / ``p2``), kept
-      first so callers can identify it;
+      first so callers can identify it (its label is ``WARM_START_LABEL``);
     - a grid of dispersed starts: midpoints at the 10/30/50/70/90% quantiles of the trial
       axis, both asymptotes at the global SHORT rate, and initial slopes spanning
       shallow-gradual to steep-near-step.
@@ -381,7 +356,7 @@ def logistic_start_points(s: Sequence[int] | np.ndarray) -> list[dict]:
     lo0 = float(_clip_p(switch["p1"])) if np.isfinite(switch["p1"]) else rate
     hi0 = float(_clip_p(switch["p2"])) if np.isfinite(switch["p2"]) else rate
 
-    starts = [{"label": "switchpoint", "midpoint": float(switch["tau"]), "slope": 1.0,
+    starts = [{"label": WARM_START_LABEL, "midpoint": float(switch["tau"]), "slope": 1.0,
                "lo": lo0, "hi": hi0}]
     starts += [{"label": f"q{int(q * 100):02d}/slope{slope:g}", "midpoint": float(q * (n - 1)),
                 "slope": float(slope), "lo": rate, "hi": rate}
@@ -448,7 +423,7 @@ def fit_logistic(s: Sequence[int] | np.ndarray) -> dict:
         ``midpoint``, ``slope`` (abruptness; negative means SHORT was abandoned), ``lo``,
         ``hi``, ``loglik``, ``k_params`` (4), ``converged`` (True iff at least one start
         converged), and -- identifying which multi-start actually won -- ``start_label`` (the
-        ``logistic_start_points`` label, e.g. ``"switchpoint"`` or ``"q30/slope0.5"``),
+        ``logistic_start_points`` label, e.g. ``WARM_START_LABEL`` or ``"q30/slope0.5"``),
         ``initial_midpoint`` and ``initial_slope`` (that start's initial conditions).
     """
     s = _as_binary(s)
@@ -471,74 +446,3 @@ def fit_logistic(s: Sequence[int] | np.ndarray) -> dict:
             "converged": any(fit["converged"] for fit in fits),
             "start_label": best["label"], "initial_midpoint": best["initial_midpoint"],
             "initial_slope": best["initial_slope"]}
-
-
-def compare_models(s: Sequence[int] | np.ndarray) -> dict:
-    """Fit all five models and score them with AIC and BIC (lower is better).
-
-    The models, in increasing flexibility: ``constant`` (k=1), ``switch`` (k=3), ``logistic``
-    (k=4), ``switch2`` (k=5), and ``qlearning`` (a stub -- see ``fit_qlearning``). Two nesting
-    relations hold and are worth checking on any real fit: ``constant <= switch`` and
-    ``switch <= logistic`` in loglik. ``switch2`` is monotone-gated (``p1 <= p2 <= p3``), so
-    it does *not* nest the single switch and may be ``-inf`` when no monotone split exists.
-
-    ``AIC = 2k - 2 * loglik`` and ``BIC = k * ln(n) - 2 * loglik``. BIC penalizes the extra
-    parameters harder, so it is the stricter test of "there really was a switch".
-
-    Models reporting ``implemented = False`` are scored (so they appear in the table) but are
-    never eligible to win.
-
-    Caveat -- the parameter counts understate the switch models' flexibility. ``switch``
-    searches ~n candidate split points and ``switch2`` ~n^2/2, but they are charged only k=3
-    and k=5, as if ``tau`` were an ordinary parameter. AIC and BIC are therefore *generous* to
-    them relative to the logistic, and more so to ``switch2`` than to ``switch``. Treat a
-    narrow BIC win for a switch model as suggestive, not decisive. The planned fix is a
-    cross-validated predictive likelihood, which prices the search honestly; not done yet.
-
-    Returns
-    -------
-    dict
-        One entry per model name, each ``{loglik, k_params, aic, bic}``; ``best_aic`` and
-        ``best_bic`` (the winning implemented model); and ``fits``, the full fit dict of each.
-    """
-    s = _as_binary(s)
-    n = max(s.size, 1)
-    fits = {"constant": fit_constant(s), "switch": fit_switchpoint(s),
-            "logistic": fit_logistic(s), "switch2": fit_switch2(s), "qlearning": fit_qlearning(s)}
-    scores = {}
-    for name, fit in fits.items():
-        k, loglik = fit["k_params"], fit["loglik"]
-        scores[name] = {"loglik": loglik, "k_params": k,
-                        "aic": 2 * k - 2 * loglik, "bic": k * np.log(n) - 2 * loglik}
-    eligible = [name for name, fit in fits.items() if fit.get("implemented", True)]
-    scores["best_aic"] = min(eligible, key=lambda m: scores[m]["aic"])
-    scores["best_bic"] = min(eligible, key=lambda m: scores[m]["bic"])
-    scores["fits"] = fits
-    return scores
-
-
-def distance_to_session_start(tau: float, boundaries: Sequence[float] | np.ndarray) -> float:
-    """Trials from the start of the session containing ``tau`` to ``tau`` itself.
-
-    ``boundaries`` are the ordered global trial ids on which sessions *start* (a session
-    start is the trial after a sleep period). The containing session is the one with the
-    greatest start at or before ``tau``, so ``f = tau - that_start``. Small ``f`` means
-    the switch happened soon after sleep.
-
-    ``tau`` at or after the last boundary falls in the final session and is handled by
-    the same rule. ``tau`` before the first boundary belongs to no session and returns
-    NaN, as does an empty ``boundaries`` -- both are undefined rather than zero, so a
-    caller cannot silently average them in.
-
-    Returns
-    -------
-    float
-        Non-negative trial count, or NaN when ``tau`` precedes every session start.
-    """
-    starts = np.sort(np.asarray(boundaries, dtype=float).ravel())
-    if starts.size == 0:
-        return float("nan")
-    index = int(np.searchsorted(starts, float(tau), side="right")) - 1
-    if index < 0:
-        return float("nan")
-    return float(tau) - float(starts[index])

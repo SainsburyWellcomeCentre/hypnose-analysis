@@ -23,7 +23,7 @@ import aeon.io.api as api
 
 import hypnose.trial_classification.detect_settings as detect_settings
 from hypnose.io.paths import get_rawdata_root, get_derivatives_root, get_server_root
-from hypnose.utils.helpers import vprint
+from hypnose.utils.helpers import vprint, _get_from_cache, _update_cache
 
 SCHEMA_DIR = files("hypnose.resources.device_schemas")
 BEHAVIOR_SCHEMA_PATH = SCHEMA_DIR / "behavior.yml"
@@ -776,4 +776,131 @@ def load_odor_mapping(root, *, data=None, verbose: bool = True, **kwargs):
             'valve_to_odor': {},
             'olfactometer_to_odors': {0: [], 1: []}
         }
-    
+
+
+# --- trial-data table loaders (moved from visualization/visualization_utils.py) -----------
+# High-level readers over a session's ``saved_analysis_results`` directory. They live in io so
+# the modelling and visualization layers each depend on io for their data, rather than on one
+# another. ``_odor_to_letter`` decodes a stored odor token and travels with them because the
+# same callers use it alongside the views.
+
+
+def _load_table_with_trial_data(results_dir: Path, name: str) -> pd.DataFrame:
+    """Load trial_data (parquet->csv) or a saved CSV table by name, using cache if available."""
+    # Try cache for trial_data only
+    if name == "trial_data":
+        # Extract subjid and date from results_dir path
+        # Expect path: .../sub-XXX_id-YYY/ses-*_date-ZZZZ/saved_analysis_results
+        parts = results_dir.parts
+        try:
+            subj_part = [p for p in parts if p.startswith("sub-")][0]
+            subjid = int(subj_part.split("-")[1])
+            ses_part = [p for p in parts if p.startswith("ses-")][0]
+            date_str = ses_part.split("_date-")[-1]
+            date = int(date_str) if date_str.isdigit() else date_str
+        except Exception:
+            subjid = None
+            date = None
+        if subjid is not None and date is not None:
+            cached_td = _get_from_cache(subjid, date, kind="trial_data")
+            if cached_td is not None:
+                print(f"[CACHE HIT] trial_data for {subjid}, {date}")
+                return cached_td
+        # Fallback to disk and cache once loaded
+        df = None
+        pq = results_dir / "trial_data.parquet"
+        if pq.exists():
+            try:
+                df = pd.read_parquet(pq)
+            except Exception:
+                df = None
+        if df is None:
+            tcsv = results_dir / "trial_data.csv"
+            if tcsv.exists():
+                try:
+                    df = pd.read_csv(tcsv)
+                except Exception:
+                    df = None
+        if df is None:
+            return pd.DataFrame()
+        if subjid is not None and date is not None:
+            _update_cache(subjid, [date], {date: df}, kind="trial_data")
+        return df
+
+    # Only allow the three non-initiated tables to be loaded from CSV
+    allowed_csv = {"non_initiated_sequences", "non_initiated_odor1_attempts", "non_initiated_FA"}
+    if name in allowed_csv:
+        csv_path = results_dir / f"{name}.csv"
+        if csv_path.exists():
+            try:
+                return pd.read_csv(csv_path)
+            except Exception:
+                pass
+    return pd.DataFrame()
+
+
+def _load_trial_views(results_dir: Path) -> dict[str, pd.DataFrame]:
+    """Load trial_data once and derive commonly used slices for plots.
+
+    Returns keys:
+      - trial_data: full table
+      - completed: is_aborted == False
+      - rewarded / unrewarded / timeout: completed filtered by response_time_category
+      - aborted: is_aborted == True
+      - aborted_fa: aborted with fa_label != nFA (case-insensitive)
+      - aborted_hr: aborted with hit_hidden_rule == True
+    """
+    td = _load_table_with_trial_data(results_dir, "trial_data")
+    if td.empty:
+        return {
+            "trial_data": pd.DataFrame(),
+            "completed": pd.DataFrame(),
+            "rewarded": pd.DataFrame(),
+            "unrewarded": pd.DataFrame(),
+            "timeout": pd.DataFrame(),
+            "aborted": pd.DataFrame(),
+            "aborted_fa": pd.DataFrame(),
+            "aborted_hr": pd.DataFrame(),
+        }
+
+    td = td.copy()
+    # Normalize datetime columns we rely on
+    for col in ["sequence_start", "sequence_end", "timestamp", "initiation_sequence_time", "abortion_time", "fa_time", "await_reward_time", "first_supply_time", "poke_window_end"]:
+        if col in td.columns:
+            td[col] = pd.to_datetime(td[col], errors="coerce")
+
+    td["is_aborted"] = td.get("is_aborted", False).fillna(False)
+    td["response_time_category"] = td.get("response_time_category", "").astype(str)
+
+    completed = td[~td["is_aborted"]].copy()
+    aborted = td[td["is_aborted"]].copy()
+
+    rewarded = completed[completed["response_time_category"] == "rewarded"].copy()
+    unrewarded = completed[completed["response_time_category"] == "unrewarded"].copy()
+    timeout = completed[completed["response_time_category"] == "timeout_delayed"].copy()
+
+    fa_mask = aborted.get("fa_label").astype(str).str.lower().ne("nfa") if "fa_label" in aborted.columns else pd.Series(False, index=aborted.index)
+    aborted_fa = aborted[fa_mask].copy()
+
+    aborted_hr = aborted[aborted.get("hit_hidden_rule", False) == True].copy()
+
+    return {
+        "trial_data": td,
+        "completed": completed,
+        "rewarded": rewarded,
+        "unrewarded": unrewarded,
+        "timeout": timeout,
+        "aborted": aborted,
+        "aborted_fa": aborted_fa,
+        "aborted_hr": aborted_hr,
+    }
+
+
+def _odor_to_letter(value) -> str:
+    """Normalize a stored odor token ('OdorC' / '"OdorC"' / 'odor c' / 'C') to a
+    bare upper-case letter."""
+    s = str(value).strip().strip('[]"\'').strip()
+    if s.lower().startswith("odor"):
+        s = s[4:].strip()
+    return s.upper()
+

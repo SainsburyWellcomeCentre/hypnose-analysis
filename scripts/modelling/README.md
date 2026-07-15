@@ -1,13 +1,22 @@
 # scripts/modelling
 
-Model fits to behavioural trial sequences. Like the other `scripts/`, these are entry
-points over functions in `src/hypnose/`; the numeric model lives in
-[`hypnose.models.switchpoint_helpers`](../../src/hypnose/models/switchpoint_helpers.py). Run from the repo root in the project conda environment; the scripts add `src/` to the path, so no install is required.
+Model fits to behavioural trial sequences. Like the other `scripts/`, these are thin entry
+points — this script holds only the `run_*` functions, the printed tables, and the CLI. All
+the maths and figures live in `src/hypnose/`:
+
+- **numeric core** — [`hypnose.modelling.switchpoint`](../../src/hypnose/modelling/switchpoint/),
+  one module per role: `data` (build the sequence), `switch` (the switch-point model family),
+  `qlearning` (stub), `compare` (AIC/BIC), `permutation` (the sleep test), `autocorr` (the
+  residual check), `bootstrap` (planned).
+- **figures** — [`hypnose.visualization.modelling.switchpoint.plots`](../../src/hypnose/visualization/modelling/switchpoint/plots.py).
+
+Run from the repo root in the project conda environment; the script adds `src/` to the path, so
+no install is required.
 
 
 | Script | What it does |
 | --- | --- |
-| `switchpoint_analysis.py` | Detects the LONG → SHORT strategy switch per animal, and tests whether switches align with sleep |
+| `switchpoint_analysis.py` | Detects the LONG → SHORT strategy switch per animal, tests whether switches align with sleep, and provides two model diagnostics (logistic multi-start, residual autocorrelation) |
 
 
 ### The sequence being modelled
@@ -285,6 +294,9 @@ python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 \
 # where does each logistic multi-start initial condition converge?
 python scripts/modelling/switchpoint_analysis.py diagnostic --subjids 40 --rewarded-only --split-ab
 
+# is the fitted model's residual serially independent? (the bootstrap's i.i.d. assumption)
+python scripts/modelling/switchpoint_analysis.py autocorr --subjids 40 --rewarded-only
+
 # do switches align with sleep?
 python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 45 48 50 --rewarded-only
 
@@ -295,12 +307,13 @@ python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 45 48 
 
 | Argument | Subcommand | Meaning |
 | --- | --- | --- |
-| `--subjids ID [ID ...]` | both | Subject id(s). Required. |
-| `--dates D [D ...]` | both | Specific dates `YYYYMMDD`. |
-| `--date-range START END` | both | Inclusive `YYYYMMDD` range (alternative to `--dates`). |
-| `--rewarded-only` | both | Keep only rewarded trials; aborts are always dropped. |
+| `--subjids ID [ID ...]` | all | Subject id(s). Required. |
+| `--dates D [D ...]` | all | Specific dates `YYYYMMDD`. |
+| `--date-range START END` | all | Inclusive `YYYYMMDD` range (alternative to `--dates`). |
+| `--rewarded-only` | all | Keep only rewarded trials; aborts are always dropped. |
 | `--likelihood-window N` | `analysis` | Half-width of the posterior plot window (default 100). |
-| `--split-ab` | `analysis`, `diagnostic` | Fit and plot the A- and B-reward trials separately. |
+| `--split-ab` | `analysis`, `diagnostic`, `autocorr` | Fit and plot the A- and B-reward trials separately. |
+| `--max-lag N` | `autocorr` | Largest lag reported, clamped to n-1 (default 50). |
 | `--inclusion RULE` | `permutation` | Which animals count as having switched (default `bic_switch_wins`). |
 | `--n-permutations N` | `permutation` | Permutations drawn for the null (default 10000). |
 | `--seed N` | `permutation` | RNG seed for a reproducible null (default 0). |

@@ -1,26 +1,29 @@
 #!/usr/bin/env python
 """Switch-point analysis of the LONG -> SHORT strategy change, per animal.
 
-Two independent entry points, each callable from a notebook (import, call, get results and
-figure handles back) or from the terminal via the argparse wrapper at the bottom:
+Entry points and CLI only -- the numeric models, stats and figures live in ``src/``:
 
-- ``run_analysis``    -- per-animal switch-point fit, posterior, and model comparison.
-- ``run_permutation`` -- do switches sit closer to *real* sleep boundaries than to other
-  animals' donated ones?
+- ``hypnose.modelling.switchpoint``                 -- data prep, model fits, comparison,
+  permutation and autocorrelation maths (numpy in, dicts out).
+- ``hypnose.visualization.modelling.switchpoint``   -- every figure.
 
-plus a standalone diagnostic, ``run_logistic_diagnostic``, which shows where each of the
-logistic's multi-start initial conditions converges (nothing else depends on it).
+This module wires those together: it selects subjects, fits, prints the tables, builds the
+figures, and exposes four entry points, each callable from a notebook (import, call, get
+results and figure handles back) or from the terminal via the argparse wrapper at the bottom:
 
-Neither depends on the other having run; both build their trial sequences through the same
-``_prepare_subject`` helper. All data access, filtering, and plotting live here; the numeric
-model is in ``hypnose.models.switchpoint_helpers``.
+- ``run_analysis``                -- per-animal switch-point fit, posterior, and model comparison.
+- ``run_permutation``             -- do switches sit closer to *real* sleep boundaries than to
+  other animals' donated ones?
+- ``run_logistic_diagnostic``     -- where each of the logistic's multi-start initial conditions
+  converges (standalone; nothing else depends on it).
+- ``run_residual_autocorrelation``-- the i.i.d.-Bernoulli check behind the planned bootstrap.
 
-Trials are read from the ``trial_data.parquet`` written by trial classification, so run that
-first. A trial is kept when ``is_aborted == False`` (and, with ``rewarded_only``, when
-``response_time_category == "rewarded"``), and it scores 1 (SHORT) when
-``hidden_rule_success`` is truthy, else 0 (LONG). Kept trials are re-indexed 0..n-1
-continuously across sessions -- note ``trial_data``'s own ``global_trial_id`` restarts at 0
-each session, so it is used only to order trials *within* a session.
+None of them depends on the others having run; all build their trial sequences through
+``prepare_subject``. Trials are read from the ``trial_data.parquet`` written by trial
+classification, so run that first. A trial is kept when ``is_aborted == False`` (and, with
+``rewarded_only``, when ``response_time_category == "rewarded"``), and it scores 1 (SHORT) when
+``hidden_rule_success`` is truthy, else 0 (LONG). Kept trials are re-indexed 0..n-1 continuously
+across sessions.
 
 Examples
 --------
@@ -28,6 +31,7 @@ Examples
   python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 41 --date-range 20251201 20251231 --rewarded-only
   python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 41 42 --rewarded-only
   python scripts/modelling/switchpoint_analysis.py diagnostic --subjids 40 --rewarded-only --split-ab
+  python scripts/modelling/switchpoint_analysis.py autocorr --subjids 40 --rewarded-only
 """
 from __future__ import annotations
 
@@ -39,57 +43,41 @@ from typing import Iterable, Optional, Sequence, Union
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 
-from hypnose.io.paths import get_derivatives_root
 from hypnose.io.save import nature_style
-from hypnose.models.switchpoint_helpers import (
+from hypnose.qc.validate import validate_subject
+from hypnose.modelling.switchpoint import (
+    ACF_MATERIAL_THRESHOLD,
+    ACF_MAX_LAG,
+    AB_LETTERS,
+    MODEL_ORDER,
+    WARM_START_LABEL,
+    acf_bounds,
     compare_models,
     distance_to_session_start,
     fit_logistic_multistart,
     fit_switchpoint,
-    logistic_p,
+    model_fitted_p,
+    normalize_subjids_dates,
+    pairwise_f,
+    permutation_null_means,
+    prepare_subject,
+    residual_acf,
+    subject_label,
+    subset_by_ab,
 )
-from hypnose.qc.validate import validate_subject
-from hypnose.utils.helpers import _filter_session_dirs, _iter_subject_dirs
-from hypnose.visualization.visualization_utils import _load_trial_views, _odor_to_letter
+from hypnose.visualization.modelling.switchpoint.plots import (
+    plot_model_comparison,
+    plot_multistart,
+    plot_permutation,
+    plot_posterior,
+    plot_residual_autocorr,
+    plot_strategy,
+)
 
-# Truthy spellings of hidden_rule_success: bool in parquet, str via the CSV fallback.
-# Mirrors the coercion the visualization helpers use.
-_HR_TRUE = ("true", "1", "1.0")
-
-_SESSION_LINE_COLOR = "tab:blue"
-_CONSTANT_COLOR = "#3C5488"
-_SWITCH_COLOR = "#E64B35"
-_SWITCH2_COLOR = "#8491B4"
-_LOGISTIC_COLOR = "#00A087"
-_DATA_COLOR = "#2b2b2b"
-
-# Models in increasing flexibility, for the comparison table and the printed logliks. The
-# nesting relations constant <= switch and switch <= logistic should hold along it; switch2 is
-# a monotone-gated (p1 <= p2 <= p3) special case that need not nest the single switch.
-_MODEL_ORDER = ("constant", "switch", "logistic", "switch2", "qlearning")
-
-# Reward identity of a trial. Trials whose identity cannot be resolved are drawn in grey and
-# are dropped entirely when split_ab is on.
-_AB_COLORS = {"A": "#E53935", "B": "#00796B"}
-_AB_UNKNOWN_COLOR = "#BDBDBD"
-_AB_UNKNOWN = ""
-
-# Trials per bin of the empirical P(SHORT) trace drawn under the model fits.
-_ROLLING_WINDOW = 21
-
-# Attempts to build a without-replacement donor assignment before allowing replacement.
-_ASSIGNMENT_TRIES = 20
-
-# Multi-start diagnostic: y positions of the initial/converged midpoint strip, in data
-# coordinates above the LONG row (the axis is inverted, so these are negative).
-_MS_Y_INIT = -0.16
-_MS_Y_CONV = -0.30
-# Label of the switch-point warm start, as emitted by logistic_start_points.
-_WARM_START_LABEL = "switchpoint"
-# Report a start beating the warm start only when the loglik gain is worth reading.
+# Report a start beating the warm start, or a nesting violation, only when the loglik gain is
+# worth reading.
 _LOGLIK_REPORT_TOL = 1e-3
 
 # Which animals count as "has a switch" in run_permutation. Keys are the `inclusion` values.
@@ -105,321 +93,11 @@ _INCLUSION_RULES = {
     "all": lambda c: True,
 }
 
-__all__ = ["run_analysis", "run_permutation", "run_logistic_diagnostic"]
+__all__ = ["run_analysis", "run_permutation", "run_logistic_diagnostic",
+           "run_residual_autocorrelation"]
 
 
-def _normalize_subjids_dates(subjids, dates):
-    """Normalize the ``(subjids, date_ranges)`` inputs, supporting a ``{subjid: date_range}``
-    dict passed as ``subjids``.
-
-    Reimplements ``hypnose.visualization.sing_rew._normalize_subjids_dates`` (that module
-    currently fails to import; see this script's README).
-    """
-    if isinstance(subjids, dict):
-        dates = subjids if (dates is None or not isinstance(dates, dict)) else dates
-        subjids = list(subjids.keys())
-    elif isinstance(subjids, set):
-        subjids = sorted(subjids)
-    elif not isinstance(subjids, (list, tuple)):
-        subjids = [subjids]
-
-    def dates_for(subjid):
-        if not isinstance(dates, dict):
-            return dates
-        if subjid in dates:
-            return dates[subjid]
-        try:
-            if int(subjid) in dates:
-                return dates[int(subjid)]
-        except (TypeError, ValueError):
-            pass
-        return dates.get(str(subjid))
-
-    return subjids, dates, dates_for
-
-
-def _short_mask(td: pd.DataFrame) -> pd.Series:
-    """Boolean mask of SHORT-sequence trials (``hidden_rule_success`` truthy)."""
-    if "hidden_rule_success" not in td.columns:
-        return pd.Series(False, index=td.index)
-    return td["hidden_rule_success"].astype(str).str.lower().isin(_HR_TRUE)
-
-
-def _ab_label(td: pd.DataFrame) -> pd.Series:
-    """Reward identity of each trial: ``"A"``, ``"B"``, or ``""`` when unresolved.
-
-    ``first_supply_odor_identity`` is the reward the trial actually delivered, so it is
-    authoritative -- but it is null whenever nothing was supplied (every unrewarded/timeout
-    trial, and a few rewarded ones), and a handful of early sessions lack the column.
-    ``last_odor`` then resolves LONG trials, where the animal ran to the end of the sequence
-    and the final odor *is* the reward odor. It cannot resolve SHORT trials, whose last odor
-    is the hidden-rule odor rather than A or B, so those stay unresolved.
-    """
-    if "first_supply_odor_identity" in td.columns:
-        supply = td["first_supply_odor_identity"].astype(str)
-        letters = supply.where(supply.isin(_AB_COLORS), _AB_UNKNOWN)
-    else:
-        letters = pd.Series(_AB_UNKNOWN, index=td.index, dtype=object)
-    if "last_odor" in td.columns:
-        fallback = td["last_odor"].map(_odor_to_letter)
-        letters = letters.mask(letters == _AB_UNKNOWN, fallback.where(fallback.isin(_AB_COLORS), _AB_UNKNOWN))
-    return letters
-
-
-def _prepare_subject(
-    subjid: int,
-    date_range: Optional[Union[Sequence[Union[int, str]], tuple]] = None,
-    rewarded_only: bool = False,
-    derivatives_dir: Optional[Path] = None,
-) -> dict:
-    """Build one animal's continuous SHORT/LONG trial sequence and its sleep markers.
-
-    Concatenates the kept trials of every session in ``date_range``, in date order, and
-    re-indexes them 0..n-1 so the trial axis is continuous across sessions. Shared by both
-    entry points -- all filtering lives here.
-
-    Parameters
-    ----------
-    subjid : int
-        Subject id.
-    date_range : None | tuple[start, end] | iterable of dates
-        Inclusive ``YYYYMMDD`` range or explicit date list. ``None`` = all sessions.
-    rewarded_only : bool
-        Additionally require ``response_time_category == "rewarded"``.
-    derivatives_dir : Path | None
-        Derivatives root; defaults to the resolved project root.
-
-    Returns
-    -------
-    dict
-        ``subjid``, ``trial_ids`` (0..n-1), ``global_ids`` (position on the full trial axis;
-        equal to ``trial_ids`` here, and meaningful after ``_subset_by_ab``), ``s``
-        (1 = SHORT, 0 = LONG), ``ab`` (reward identity per trial), ``session_ends`` (global
-        trial id of the LAST kept trial of each session -- the sleep markers),
-        ``session_starts`` (the trial after each sleep period; always starts at 0),
-        ``session_labels`` (dates), ``session_index`` (session of each trial),
-        ``session_sizes``, ``n_trials``, ``ab_split`` (None), ``subject_dir``.
-
-    Raises
-    ------
-    FileNotFoundError
-        No derivatives directory for ``subjid``.
-    """
-    subj_dirs = [d for _, d in _iter_subject_dirs(derivatives_dir, [subjid])]
-    if not subj_dirs:
-        raise FileNotFoundError(f"No derivatives directory for subject {subjid}")
-    subj_dir = subj_dirs[0]
-
-    segments, ab_segments, labels, sizes = [], [], [], []
-    for ses_dir in _filter_session_dirs(subj_dir, date_range):
-        results_dir = ses_dir / "saved_analysis_results"
-        if not results_dir.exists():
-            continue
-        views = _load_trial_views(results_dir)
-        td = views["rewarded"] if rewarded_only else views["completed"]
-        if td.empty:
-            continue
-        if "global_trial_id" in td.columns:
-            td = td.sort_values("global_trial_id")
-        segments.append(_short_mask(td).to_numpy(dtype=np.int8))
-        ab_segments.append(_ab_label(td).to_numpy(dtype="<U1"))
-        labels.append(ses_dir.name.split("_date-")[-1])
-        sizes.append(len(td))
-
-    s = np.concatenate(segments) if segments else np.zeros(0, dtype=np.int8)
-    ab = np.concatenate(ab_segments) if ab_segments else np.zeros(0, dtype="<U1")
-    sizes_arr = np.asarray(sizes, dtype=int)
-    session_ends = np.cumsum(sizes_arr) - 1 if sizes_arr.size else np.zeros(0, dtype=int)
-    session_starts = np.concatenate(([0], session_ends[:-1] + 1)) if sizes_arr.size else np.zeros(0, dtype=int)
-    return {
-        "subjid": subjid,
-        "trial_ids": np.arange(s.size),
-        "global_ids": np.arange(s.size),
-        "s": s,
-        "ab": ab,
-        "session_ends": session_ends,
-        "session_starts": session_starts,
-        "session_labels": labels,
-        "session_index": np.repeat(np.arange(sizes_arr.size), sizes_arr),
-        "session_sizes": sizes_arr,
-        "n_trials": int(s.size),
-        "ab_split": None,
-        "subject_dir": subj_dir,
-    }
-
-
-def _subset_by_ab(prep: dict, letter: str) -> dict:
-    """Restrict a prepared subject to its A- or B-reward trials, re-indexing the trial axis.
-
-    The subset gets its own contiguous ``0..m-1`` modelling axis, because the switch-point
-    index must index the sequence being fitted. ``global_ids`` keeps each trial's position on
-    the full, unsplit axis so a ``tau`` can be reported in both. Sessions holding no trial of
-    this identity drop out, so the sleep markers stay on real trials. Trials whose reward
-    identity is unresolved belong to neither subset and are dropped.
-    """
-    mask = prep["ab"] == letter
-    sizes = np.bincount(prep["session_index"][mask], minlength=len(prep["session_labels"]))
-    kept_sessions = sizes > 0
-    sizes = sizes[kept_sessions]
-    ends = np.cumsum(sizes) - 1 if sizes.size else np.zeros(0, dtype=int)
-    starts = np.concatenate(([0], ends[:-1] + 1)) if sizes.size else np.zeros(0, dtype=int)
-    return {**prep,
-            "trial_ids": np.arange(int(mask.sum())),
-            "global_ids": prep["trial_ids"][mask],
-            "s": prep["s"][mask],
-            "ab": prep["ab"][mask],
-            "session_ends": ends,
-            "session_starts": starts,
-            "session_labels": [lab for lab, keep in zip(prep["session_labels"], kept_sessions) if keep],
-            "session_index": np.repeat(np.arange(sizes.size), sizes),
-            "session_sizes": sizes,
-            "n_trials": int(mask.sum()),
-            "ab_split": letter}
-
-
-def _subject_label(prep: dict) -> str:
-    """``"Subject 40"``, or ``"Subject 40 | reward A"`` for an A/B split."""
-    suffix = f" | reward {prep['ab_split']}" if prep.get("ab_split") else ""
-    return f"Subject {prep['subjid']}{suffix}"
-
-
-def _rolling_mean(s: np.ndarray, window: int = _ROLLING_WINDOW) -> tuple[np.ndarray, np.ndarray]:
-    """Centred moving average of ``s``; returns ``(x, y)``, both empty if ``s`` is too short."""
-    if s.size < window:
-        return np.zeros(0), np.zeros(0)
-    y = np.convolve(s.astype(float), np.ones(window) / window, mode="valid")
-    return np.arange(window // 2, window // 2 + y.size), y
-
-
-def _mark_sessions(ax, session_ends: np.ndarray, label: bool = True) -> None:
-    """Draw a blue dotted vertical line at the last trial of each session (a sleep marker)."""
-    for i, end in enumerate(session_ends):
-        ax.axvline(end, color=_SESSION_LINE_COLOR, linestyle=":", linewidth=0.9, alpha=0.8,
-                   zorder=1, label="Session end (sleep)" if (label and i == 0) else None)
-
-
-def _plot_strategy(prep: dict, rewarded_only: bool):
-    """Binary SHORT/LONG strategy across the continuous trial axis, coloured by reward identity.
-
-    SHORT is the lower row and LONG the upper row (the y axis is inverted). Every trial --
-    SHORT or LONG -- takes the colour of the reward it is associated with.
-    """
-    fig, ax = plt.subplots(figsize=(11, 2.8))
-    ab, trials, s = prep["ab"], prep["trial_ids"], prep["s"]
-    for letter, color in _AB_COLORS.items():
-        mask = ab == letter
-        if mask.any():
-            ax.scatter(trials[mask], s[mask], marker="|", s=44, linewidths=0.9, color=color,
-                       alpha=0.8, zorder=2, label=f"reward {letter} ({int(mask.sum())})")
-    unresolved = ~np.isin(ab, list(_AB_COLORS))
-    if unresolved.any():
-        ax.scatter(trials[unresolved], s[unresolved], marker="|", s=44, linewidths=0.9,
-                   color=_AB_UNKNOWN_COLOR, alpha=0.8, zorder=2,
-                   label=f"unresolved ({int(unresolved.sum())})")
-    _mark_sessions(ax, prep["session_ends"])
-    ax.set_yticks([0, 1])
-    ax.set_yticklabels(["LONG", "SHORT"])
-    ax.set_ylim(1.35, -0.35)  # inverted: SHORT on the lower row, LONG on the upper row
-    ax.set_xlim(-1, max(prep["n_trials"], 1))
-    ax.set_xlabel("Trial (continuous across sessions)")
-    kept = "rewarded" if rewarded_only else "completed"
-    ax.set_title(f"{_subject_label(prep)} - strategy per {kept} trial "
-                 f"({prep['n_trials']} trials, {len(prep['session_labels'])} sessions)")
-    ax.legend(loc="lower left", fontsize=7, ncol=3)
-    fig.tight_layout()
-    return fig
-
-
-def _plot_posterior(prep: dict, fit: dict, likelihood_window: int):
-    """Switch-point posterior, windowed to +/- ``likelihood_window`` trials around the peak."""
-    posterior, tau, n = fit["posterior"], fit["tau"], prep["n_trials"]
-    hdi_lo, hdi_hi = fit["hdi"]
-    fwhm_lo, fwhm_hi = fit["fwhm"]
-    lo, hi = max(0, tau - likelihood_window), min(n, tau + likelihood_window + 1)
-    x = np.arange(lo, hi)
-
-    fig, ax = plt.subplots(figsize=(8, 3.4))
-    ax.fill_between(x, posterior[lo:hi], color=_SWITCH_COLOR, alpha=0.25, zorder=2)
-    ax.plot(x, posterior[lo:hi], color=_SWITCH_COLOR, linewidth=1.2, zorder=3)
-    ax.axvspan(hdi_lo, hdi_hi, color=_SWITCH_COLOR, alpha=0.10, zorder=1,
-               label=f"95% HDI [{hdi_lo}, {hdi_hi}], width {hdi_hi - hdi_lo + 1} trials")
-    ax.axvline(tau, color=_DATA_COLOR, linestyle="--", linewidth=1.0, zorder=4,
-               label=f"tau = {tau}")
-    ax.plot([fwhm_lo, fwhm_hi], [0.5 * posterior.max()] * 2, color=_LOGISTIC_COLOR,
-            linewidth=1.6, zorder=4,
-            label=f"FWHM [{fwhm_lo}, {fwhm_hi}], width {fwhm_hi - fwhm_lo + 1} trials")
-    _mark_sessions(ax, prep["session_ends"], label=False)
-    ax.set_xlim(lo - 0.5, hi - 0.5)
-    ax.set_ylim(bottom=0)
-    ax.set_xlabel("Trial (continuous across sessions)")
-    ax.set_ylabel("Posterior P(tau)")
-    ax.set_title(f"{_subject_label(prep)} - switch-point posterior "
-                 f"(+/-{likelihood_window} trials around peak)")
-    ax.legend(loc="upper right", fontsize=7)
-    fig.tight_layout()
-    return fig
-
-
-def _plot_model_comparison(prep: dict, comparison: dict):
-    """Overlay every fitted model on the data, with the five-row AIC/BIC table in-panel.
-
-    SHORT is the lower row, matching the strategy plot: the y axis is inverted, so the fitted
-    P(SHORT) curves rise downward. Unimplemented models (``qlearning``) appear in the table
-    but have no curve to draw.
-    """
-    s, x, n = prep["s"], prep["trial_ids"], prep["n_trials"]
-    constant, switch, switch2, logistic = (comparison["fits"][m] for m in
-                                           ("constant", "switch", "switch2", "logistic"))
-
-    fig, ax = plt.subplots(figsize=(11, 4.2))
-    ax.plot(x, s, marker="|", linestyle="none", markersize=6, color=_DATA_COLOR, alpha=0.35, zorder=2)
-    roll_x, roll_y = _rolling_mean(s)
-    if roll_x.size:
-        ax.plot(roll_x, roll_y, color="#999999", linewidth=1.0, zorder=3,
-                label=f"Empirical P(SHORT), {_ROLLING_WINDOW}-trial mean")
-    ax.axhline(constant["p"], color=_CONSTANT_COLOR, linewidth=1.6, zorder=4,
-               label=f"Constant: p = {constant['p']:.2f}")
-    ax.step([0, switch["tau"], n - 1], [switch["p1"], switch["p2"], switch["p2"]], where="post",
-            color=_SWITCH_COLOR, linewidth=1.8, zorder=5,
-            label=f"Switch: tau = {switch['tau']}, {switch['p1']:.2f} -> {switch['p2']:.2f}")
-    if np.isfinite(switch2["loglik"]):
-        ax.step([0, switch2["tau1"], switch2["tau2"], n - 1],
-                [switch2["p1"], switch2["p2"], switch2["p3"], switch2["p3"]], where="post",
-                color=_SWITCH2_COLOR, linewidth=1.8, linestyle=":", zorder=6,
-                label=f"Switch2: tau = ({switch2['tau1']}, {switch2['tau2']}), "
-                      f"{switch2['p1']:.2f} -> {switch2['p2']:.2f} -> {switch2['p3']:.2f}")
-    grid = np.linspace(0, max(n - 1, 1), 500)
-    ax.plot(grid, logistic_p(grid, logistic["midpoint"], logistic["slope"], logistic["lo"], logistic["hi"]),
-            color=_LOGISTIC_COLOR, linewidth=1.8, linestyle="--", zorder=7,
-            label=f"Logistic: slope = {logistic['slope']:.3f} "
-                  f"(start {logistic.get('start_label', '?')})")
-    _mark_sessions(ax, prep["session_ends"])
-
-    best_bic = comparison["best_bic"]
-    rows = [f"{'model':<10}{'k':>3}{'AIC':>10}{'BIC':>10}"]
-    for m in _MODEL_ORDER:
-        fit, score = comparison["fits"][m], comparison[m]
-        mark = " <- BIC" if m == best_bic else ""
-        if not fit.get("implemented", True):
-            rows.append(f"{m:<10}{score['k_params']:>3}{'n/a':>10}{'n/a':>10}  (not impl.)")
-        else:
-            rows.append(f"{m:<10}{score['k_params']:>3}{score['aic']:>10.1f}{score['bic']:>10.1f}{mark}")
-    rows.append(f"best: AIC {comparison['best_aic']}, BIC {best_bic}")
-    # Bottom-left: the SHORT row before the switch, which is empty by construction.
-    ax.text(0.015, 0.03, "\n".join(rows), transform=ax.transAxes, va="bottom", ha="left",
-            family="monospace", fontsize=7,
-            bbox=dict(boxstyle="round", facecolor="white", edgecolor="#cccccc", alpha=0.9))
-
-    ax.set_ylim(1.45, -0.35)  # inverted: SHORT on the lower row, LONG on the upper row
-    ax.set_xlim(-1, max(n, 1))
-    ax.set_yticks([0, 1])
-    ax.set_yticklabels(["LONG", "SHORT"])
-    ax.set_xlabel("Trial (continuous across sessions)")
-    ax.set_ylabel("P(SHORT)")
-    ax.set_title(f"{_subject_label(prep)} - model comparison")
-    ax.legend(loc="upper right", fontsize=7, ncol=2)
-    fig.tight_layout()
-    return fig
+# --- per-animal switch-point fit ----------------------------------------------------------
 
 
 def _describe_fit(name: str, fit: dict) -> str:
@@ -446,7 +124,7 @@ def _print_model_table(comparison: dict) -> None:
     does not nest the single switch, so it is not part of the check.
     """
     print(f"  {'model':<10}{'k':>3}{'loglik':>12}{'AIC':>11}{'BIC':>11}")
-    for name in _MODEL_ORDER:
+    for name in MODEL_ORDER:
         fit, score = comparison["fits"][name], comparison[name]
         if not fit.get("implemented", True):
             print(f"  {name:<10}{score['k_params']:>3}{'n/a':>12}{'n/a':>11}{'n/a':>11}"
@@ -479,7 +157,7 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int) -
     Figures are built in the order they should be read: strategy, model comparison, posterior.
     Returns None (after a message) when the sequence is too short to fit.
     """
-    label = _subject_label(prep)
+    label = subject_label(prep)
     if prep["n_trials"] < 2:
         print(f"[switchpoint] {label}: {prep['n_trials']} kept trial(s); skipping.")
         return None
@@ -504,9 +182,9 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int) -
     _print_model_table(comparison)
 
     figures = {
-        "strategy": _plot_strategy(prep, rewarded_only),
-        "model_comparison": _plot_model_comparison(prep, comparison),
-        "posterior": _plot_posterior(prep, fit, likelihood_window),
+        "strategy": plot_strategy(prep, rewarded_only),
+        "model_comparison": plot_model_comparison(prep, comparison),
+        "posterior": plot_posterior(prep, fit, likelihood_window),
     }
     return {
         "tau": tau, "global_tau": global_tau, "tau_session": tau_session, "hdi": fit["hdi"],
@@ -566,20 +244,20 @@ def run_analysis(
         With ``split_ab=True`` that value is instead nested one level deeper, keyed by reward
         identity: ``results[subjid]["A"]`` and ``results[subjid]["B"]``.
     """
-    subjids, date_ranges, dates_for = _normalize_subjids_dates(subjids, date_ranges)
+    subjids, date_ranges, dates_for = normalize_subjids_dates(subjids, date_ranges)
     results = {}
 
     with plt.rc_context(nature_style()):
         for subjid in subjids:
-            prep = _prepare_subject(subjid, dates_for(subjid), rewarded_only)
+            prep = prepare_subject(subjid, dates_for(subjid), rewarded_only)
             if split_ab:
-                unresolved = int(np.sum(~np.isin(prep["ab"], list(_AB_COLORS))))
+                unresolved = int(np.sum(~np.isin(prep["ab"], list(AB_LETTERS))))
                 if unresolved:
                     print(f"[switchpoint] Subject {subjid}: {unresolved} trial(s) of "
                           f"{prep['n_trials']} have no reward identity; excluded from the split.")
-                splits = {letter: _analyse_sequence(_subset_by_ab(prep, letter), rewarded_only,
+                splits = {letter: _analyse_sequence(subset_by_ab(prep, letter), rewarded_only,
                                                     likelihood_window)
-                          for letter in _AB_COLORS}
+                          for letter in AB_LETTERS}
                 splits = {letter: r for letter, r in splits.items() if r is not None}
                 if splits:
                     results[subjid] = splits
@@ -592,69 +270,19 @@ def run_analysis(
     return results
 
 
-def _plot_multistart(prep: dict, fits: list[dict], best: int, warm: int):
-    """Data plus every converged sigmoid, one colour per multi-start initial condition.
-
-    The winner (highest loglik) is drawn bold and the switch-point warm start dashed -- both,
-    if the warm start won. In the margin above the data each start's INITIAL midpoint (down
-    triangle) is joined by a faint connector to where it CONVERGED (circle), so starts that
-    funnel into one optimum are visibly distinct from starts that split into basins.
-    """
-    s, x, n = prep["s"], prep["trial_ids"], prep["n_trials"]
-    colors = plt.get_cmap("tab20")(np.linspace(0, 1, max(len(fits), 2))[:len(fits)])
-    grid = np.linspace(0, max(n - 1, 1), 600)
-
-    fig, ax = plt.subplots(figsize=(13, 5.0))
-    ax.plot(x, s, marker="|", linestyle="none", markersize=6, color=_DATA_COLOR, alpha=0.30, zorder=2)
-    roll_x, roll_y = _rolling_mean(s)
-    if roll_x.size:
-        ax.plot(roll_x, roll_y, color="#999999", linewidth=1.0, zorder=3,
-                label=f"Empirical P(SHORT), {_ROLLING_WINDOW}-trial mean")
-
-    for i, (fit, color) in enumerate(zip(fits, colors)):
-        is_best, is_warm = i == best, i == warm
-        ax.plot(grid, logistic_p(grid, fit["midpoint"], fit["slope"], fit["lo"], fit["hi"]),
-                color=color, linewidth=2.6 if is_best else 1.2,
-                linestyle="--" if is_warm else "-", alpha=1.0 if is_best else 0.75,
-                zorder=6 if is_best else 4,
-                label=f"{fit['label']}{' [best]' if is_best else ''}{' [warm]' if is_warm else ''}"
-                      f"  LL={fit['loglik']:.1f}, slope={fit['slope']:.3g}")
-        # Margin above the data: initial midpoint -> converged midpoint.
-        ax.plot([fit["initial_midpoint"], fit["midpoint"]], [_MS_Y_INIT, _MS_Y_CONV],
-                color=color, linewidth=0.7, alpha=0.45, zorder=5)
-        ax.plot(fit["initial_midpoint"], _MS_Y_INIT, marker="v", markersize=5, color=color,
-                alpha=0.9, zorder=6)
-        ax.plot(fit["midpoint"], _MS_Y_CONV, marker="o", markersize=5.5, color=color,
-                markeredgecolor="white", markeredgewidth=0.5, zorder=7)
-
-    _mark_sessions(ax, prep["session_ends"])
-    ax.text(0.002, _MS_Y_INIT, "start ", transform=ax.get_yaxis_transform(), va="center",
-            ha="right", fontsize=6, color="#666666")
-    ax.text(0.002, _MS_Y_CONV, "converged ", transform=ax.get_yaxis_transform(), va="center",
-            ha="right", fontsize=6, color="#666666")
-    ax.set_ylim(1.45, _MS_Y_CONV - 0.08)  # inverted, with headroom for the midpoint strip
-    ax.set_xlim(-1, max(n, 1))
-    ax.set_yticks([0, 1])
-    ax.set_yticklabels(["LONG", "SHORT"])
-    ax.set_xlabel("Trial (continuous across sessions)")
-    ax.set_ylabel("P(SHORT)")
-    ax.set_title(f"{_subject_label(prep)} - logistic multi-start diagnostic "
-                 f"({len(fits)} initial conditions)")
-    ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=6, frameon=False)
-    fig.tight_layout()
-    return fig
+# --- logistic multi-start diagnostic (standalone) -----------------------------------------
 
 
 def _diagnose_sequence(prep: dict) -> Optional[dict]:
     """Fit one sequence from every multi-start initial condition; print the table, plot it."""
-    label = _subject_label(prep)
+    label = subject_label(prep)
     if prep["n_trials"] < 2:
         print(f"[multistart] {label}: {prep['n_trials']} kept trial(s); skipping.")
         return None
 
     fits = fit_logistic_multistart(prep["s"])
     best = int(np.argmax([fit["loglik"] for fit in fits]))
-    warm = next(i for i, fit in enumerate(fits) if fit["label"] == _WARM_START_LABEL)
+    warm = next(i for i, fit in enumerate(fits) if fit["label"] == WARM_START_LABEL)
     switch_loglik = fit_switchpoint(prep["s"])["loglik"]
 
     print(f"\n[multistart] {label} ({prep['n_trials']} trials, {len(fits)} initial conditions)")
@@ -678,7 +306,7 @@ def _diagnose_sequence(prep: dict) -> Optional[dict]:
     return {"fits": fits, "best": best, "best_label": fits[best]["label"],
             "warm": warm, "switch_loglik": switch_loglik, "n_basins": basins,
             "ab_split": prep.get("ab_split"), "prep": prep,
-            "fig": _plot_multistart(prep, fits, best, warm)}
+            "fig": plot_multistart(prep, fits, best, warm)}
 
 
 def run_logistic_diagnostic(
@@ -713,15 +341,15 @@ def run_logistic_diagnostic(
         per start), ``best`` / ``best_label``, ``warm``, ``switch_loglik``, ``n_basins``,
         ``ab_split``, ``prep``, and ``fig``.
     """
-    subjids, date_ranges, dates_for = _normalize_subjids_dates(subjids, date_ranges)
+    subjids, date_ranges, dates_for = normalize_subjids_dates(subjids, date_ranges)
     results = {}
 
     with plt.rc_context(nature_style()):
         for subjid in subjids:
-            prep = _prepare_subject(subjid, dates_for(subjid), rewarded_only)
+            prep = prepare_subject(subjid, dates_for(subjid), rewarded_only)
             if split_ab:
-                splits = {letter: _diagnose_sequence(_subset_by_ab(prep, letter))
-                          for letter in _AB_COLORS}
+                splits = {letter: _diagnose_sequence(subset_by_ab(prep, letter))
+                          for letter in AB_LETTERS}
                 splits = {letter: r for letter, r in splits.items() if r is not None}
                 if splits:
                     results[subjid] = splits
@@ -734,109 +362,13 @@ def run_logistic_diagnostic(
     return results
 
 
-# --- residual autocorrelation diagnostic (standalone; nothing else calls it) --------------
+# --- residual autocorrelation diagnostic (standalone) -------------------------------------
 #
-# The planned parametric bootstrap null redraws each animal's sequence as independent
-# Bernoulli trials from the fitted model. That is only valid if the *residuals* of the fitted
-# model are serially independent -- if consecutive trials still co-vary once the strategy
-# curve is removed, the bootstrap will understate the null's spread and inflate significance.
-# This checks that assumption per animal, and never touches the fitting code above.
-
-_ACF_MAX_LAG = 50
-_ACF_Z = 1.96  # ~95% band multiplier, i.e. the standard +/- 1.96 / sqrt(N) autocorrelation band
-_ACF_MATERIAL_THRESHOLD = 0.1  # a significant lag-1 below this |r| is still treated as immaterial
-
-
-def _model_fitted_p(name: str, fit: dict, n: int) -> Optional[np.ndarray]:
-    """Per-trial fitted P(SHORT) of a fitted model over the continuous ``0..n-1`` trial axis.
-
-    Rebuilds the step / curve each model implies at every trial, matching exactly the shapes
-    ``_plot_model_comparison`` draws. Returns ``None`` for a model with no per-trial curve (the
-    unimplemented ``qlearning`` stub), so a caller can skip it.
-    """
-    x = np.arange(n)
-    if name == "constant":
-        return np.full(n, fit["p"], dtype=float)
-    if name == "switch":
-        return np.where(x < fit["tau"], fit["p1"], fit["p2"]).astype(float)
-    if name == "switch2":
-        p = np.full(n, fit["p3"], dtype=float)
-        p[x < fit["tau2"]] = fit["p2"]
-        p[x < fit["tau1"]] = fit["p1"]
-        return p
-    if name == "logistic":
-        return logistic_p(x.astype(float), fit["midpoint"], fit["slope"], fit["lo"], fit["hi"])
-    return None
-
-
-def _residual_acf(resid: np.ndarray, lags: np.ndarray,
-                  session_index: Optional[np.ndarray] = None) -> tuple[np.ndarray, np.ndarray]:
-    """Lag-wise autocorrelation of residuals, as a Pearson correlation per lag.
-
-    For each lag ``k`` the value is ``sum(d_t d_{t+k}) / sqrt(sum(d_t^2) sum(d_{t+k}^2))`` over
-    the included ``(t, t+k)`` pairs, with ``d`` the mean-centred residuals -- bounded in
-    ``[-1, 1]`` so full and within-session versions share a scale.
-
-    With ``session_index`` given, only pairs whose two trials fall in the same session are
-    kept: the sleep gaps between sessions make a cross-session lag meaningless, and the strategy
-    shift across a gap would otherwise masquerade as trial-to-trial dependence.
-
-    Returns ``(acf, n_pairs)``; ``acf`` is NaN for any lag with no usable pair.
-    """
-    d = resid - resid.mean()
-    n = d.size
-    acf = np.full(lags.size, np.nan)
-    n_pairs = np.zeros(lags.size, dtype=int)
-    for i, k in enumerate(lags):
-        if k >= n:
-            continue
-        a, b = d[:-k], d[k:]
-        if session_index is not None:
-            same = session_index[:-k] == session_index[k:]
-            a, b = a[same], b[same]
-        n_pairs[i] = a.size
-        denom = float(np.sqrt(np.dot(a, a) * np.dot(b, b)))
-        if a.size and denom > 0:
-            acf[i] = float(np.dot(a, b) / denom)
-    return acf, n_pairs
-
-
-def _acf_bounds(n_pairs: np.ndarray) -> np.ndarray:
-    """Per-lag ``+/- 1.96 / sqrt(N)`` significance bound, NaN where a lag has no pair."""
-    with np.errstate(divide="ignore"):
-        return np.where(n_pairs > 0, _ACF_Z / np.sqrt(n_pairs), np.nan)
-
-
-def _plot_acf_panel(ax, lags: np.ndarray, acf: np.ndarray, bound: np.ndarray, color: str,
-                    title: str) -> None:
-    """Stem plot of one ACF with its (per-lag) significance band shaded."""
-    finite = np.isfinite(acf)
-    ax.fill_between(lags, -bound, bound, color=color, alpha=0.15, linewidth=0,
-                    label="~95% band (+/-1.96/sqrt(N))")
-    ax.vlines(lags[finite], 0, acf[finite], color=color, linewidth=1.1, zorder=3)
-    ax.plot(lags[finite], acf[finite], marker="o", linestyle="none", markersize=3.5,
-            color=color, zorder=4)
-    ax.axhline(0, color=_DATA_COLOR, linewidth=0.8, zorder=2)
-    ax.set_ylabel("Residual ACF")
-    ax.set_title(title, fontsize=8)
-    ax.legend(loc="upper right", fontsize=7)
-
-
-def _plot_residual_autocorr(prep: dict, best_name: str, lags: np.ndarray, acf_full: np.ndarray,
-                            bound_full: np.ndarray, acf_within: np.ndarray,
-                            bound_within: np.ndarray):
-    """Two stacked ACF panels: all trial pairs, then within-session pairs only."""
-    fig, (ax_full, ax_within) = plt.subplots(2, 1, figsize=(9.5, 6.0), sharex=True)
-    _plot_acf_panel(ax_full, lags, acf_full, bound_full, _SWITCH_COLOR,
-                    f"All trial pairs (residuals from {best_name})")
-    _plot_acf_panel(ax_within, lags, acf_within, bound_within, _LOGISTIC_COLOR,
-                    "Within-session pairs only (cross-session lags dropped)")
-    ax_within.set_xlabel("Lag (trials)")
-    ax_within.set_xlim(0, lags[-1] + 1)
-    fig.suptitle(f"{_subject_label(prep)} - residual autocorrelation "
-                 f"(BIC-best model: {best_name})", fontsize=9)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    return fig
+# The planned parametric bootstrap null redraws each animal's sequence as independent Bernoulli
+# trials from the fitted model. That is only valid if the *residuals* of the fitted model are
+# serially independent -- if consecutive trials still co-vary once the strategy curve is
+# removed, the bootstrap will understate the null's spread and inflate significance. This checks
+# that assumption per animal. The maths is in ``hypnose.modelling.switchpoint.autocorr``.
 
 
 def _autocorr_sequence(prep: dict, max_lag: int) -> Optional[dict]:
@@ -846,7 +378,7 @@ def _autocorr_sequence(prep: dict, max_lag: int) -> Optional[dict]:
     serial structure the *chosen* description leaves behind. Returns None (after a message)
     when the sequence is too short, or when the best model has no per-trial curve.
     """
-    label = _subject_label(prep)
+    label = subject_label(prep)
     n = prep["n_trials"]
     if n < 3:
         print(f"[residual-acf] {label}: {n} kept trial(s); skipping.")
@@ -854,16 +386,16 @@ def _autocorr_sequence(prep: dict, max_lag: int) -> Optional[dict]:
 
     comparison = compare_models(prep["s"])
     best = comparison["best_bic"]
-    fitted = _model_fitted_p(best, comparison["fits"][best], n)
+    fitted = model_fitted_p(best, comparison["fits"][best], n)
     if fitted is None:
         print(f"[residual-acf] {label}: BIC-best model '{best}' has no per-trial curve; skipping.")
         return None
     resid = prep["s"].astype(float) - fitted
 
     lags = np.arange(1, int(min(max_lag, n - 1)) + 1)
-    acf_full, npairs_full = _residual_acf(resid, lags)
-    acf_within, npairs_within = _residual_acf(resid, lags, session_index=prep["session_index"])
-    bound_full, bound_within = _acf_bounds(npairs_full), _acf_bounds(npairs_within)
+    acf_full, npairs_full = residual_acf(resid, lags)
+    acf_within, npairs_within = residual_acf(resid, lags, session_index=prep["session_index"])
+    bound_full, bound_within = acf_bounds(npairs_full), acf_bounds(npairs_within)
 
     exceed_full = int(np.sum(np.isfinite(acf_full) & (np.abs(acf_full) > bound_full)))
     exceed_within = int(np.sum(np.isfinite(acf_within) & (np.abs(acf_within) > bound_within)))
@@ -872,7 +404,7 @@ def _autocorr_sequence(prep: dict, max_lag: int) -> Optional[dict]:
     r1_within, b1_within = acf_within[0], bound_within[0]
 
     sig_within = bool(np.isfinite(r1_within) and abs(r1_within) > b1_within)
-    material = bool(sig_within and abs(r1_within) >= _ACF_MATERIAL_THRESHOLD)
+    material = bool(sig_within and abs(r1_within) >= ACF_MATERIAL_THRESHOLD)
 
     print(f"\n[residual-acf] {label} ({n} trials, BIC-best model: {best})")
     print(f"  residuals = observed - fitted P(SHORT); mean = {resid.mean():+.4f}, "
@@ -888,11 +420,11 @@ def _autocorr_sequence(prep: dict, max_lag: int) -> Optional[dict]:
 
     if material:
         verdict = (f"MATERIAL -- within-session lag-1 = {r1_within:+.3f} clears both the band "
-                   f"(+/-{b1_within:.3f}) and |r| >= {_ACF_MATERIAL_THRESHOLD:g}; the i.i.d. "
+                   f"(+/-{b1_within:.3f}) and |r| >= {ACF_MATERIAL_THRESHOLD:g}; the i.i.d. "
                    f"Bernoulli bootstrap null is questionable for this animal.")
     elif sig_within:
         verdict = (f"not material -- within-session lag-1 = {r1_within:+.3f} is significant but "
-                   f"|r| < {_ACF_MATERIAL_THRESHOLD:g}; i.i.d. bootstrap is broadly defensible.")
+                   f"|r| < {ACF_MATERIAL_THRESHOLD:g}; i.i.d. bootstrap is broadly defensible.")
     elif np.isfinite(r1_within):
         verdict = (f"not material -- within-session lag-1 = {r1_within:+.3f} sits inside the "
                    f"+/-{b1_within:.3f} band; no evidence against i.i.d.")
@@ -900,7 +432,7 @@ def _autocorr_sequence(prep: dict, max_lag: int) -> Optional[dict]:
         verdict = "inconclusive -- too little within-session data to judge trial-to-trial dependence."
     print(f"  VERDICT: {verdict}")
 
-    fig = _plot_residual_autocorr(prep, best, lags, acf_full, bound_full, acf_within, bound_within)
+    fig = plot_residual_autocorr(prep, best, lags, acf_full, bound_full, acf_within, bound_within)
     return {
         "best_model": best, "residuals": resid, "fitted": fitted, "lags": lags,
         "acf_full": acf_full, "bound_full": bound_full, "n_pairs_full": npairs_full,
@@ -917,7 +449,7 @@ def run_residual_autocorrelation(
     subjids: Union[int, Iterable[int], dict],
     date_ranges: Optional[dict] = None,
     rewarded_only: bool = False,
-    max_lag: int = _ACF_MAX_LAG,
+    max_lag: int = ACF_MAX_LAG,
     split_ab: bool = False,
     show: bool = True,
 ) -> dict:
@@ -954,15 +486,15 @@ def run_residual_autocorrelation(
         ``n_exceed_full``, ``n_exceed_within``, ``sig_within``, ``material``, ``ab_split``,
         ``prep``, and ``fig``.
     """
-    subjids, date_ranges, dates_for = _normalize_subjids_dates(subjids, date_ranges)
+    subjids, date_ranges, dates_for = normalize_subjids_dates(subjids, date_ranges)
     results = {}
 
     with plt.rc_context(nature_style()):
         for subjid in subjids:
-            prep = _prepare_subject(subjid, dates_for(subjid), rewarded_only)
+            prep = prepare_subject(subjid, dates_for(subjid), rewarded_only)
             if split_ab:
-                splits = {letter: _autocorr_sequence(_subset_by_ab(prep, letter), max_lag)
-                          for letter in _AB_COLORS}
+                splits = {letter: _autocorr_sequence(subset_by_ab(prep, letter), max_lag)
+                          for letter in AB_LETTERS}
                 splits = {letter: r for letter, r in splits.items() if r is not None}
                 if splits:
                     results[subjid] = splits
@@ -975,86 +507,7 @@ def run_residual_autocorrelation(
     return results
 
 
-def _plot_box_with_points(ax, groups: dict) -> None:
-    """One box per group with its individual points jittered on top."""
-    labels = list(groups.keys())
-    data = [np.asarray(groups[label], dtype=float) for label in labels]
-    ax.boxplot(data, positions=range(1, len(labels) + 1), widths=0.5, showfliers=False,
-               medianprops=dict(color=_SWITCH_COLOR, linewidth=1.6),
-               boxprops=dict(color=_DATA_COLOR), whiskerprops=dict(color=_DATA_COLOR),
-               capprops=dict(color=_DATA_COLOR))
-    rng = np.random.default_rng(0)  # jitter only; no effect on the values plotted
-    for i, values in enumerate(data, start=1):
-        if values.size:
-            ax.scatter(i + rng.uniform(-0.11, 0.11, values.size), values, s=22,
-                       facecolor=_SESSION_LINE_COLOR, edgecolors=_DATA_COLOR, linewidths=0.6,
-                       alpha=0.75, zorder=4)
-    ax.set_xlim(0.5, len(labels) + 0.5)
-    ax.set_xticks(range(1, len(labels) + 1))
-    ax.set_xticklabels(labels)
-
-
-def _plot_null_distribution(ax, null_means: np.ndarray, observed_mean: float, p_value: float) -> None:
-    """Null distribution of the permutation mean, with the observed mean marked."""
-    ax.hist(null_means, bins=40, color=_SESSION_LINE_COLOR, alpha=0.65, edgecolor="white", linewidth=0.4)
-    ax.axvline(observed_mean, color=_SWITCH_COLOR, linewidth=1.8,
-               label=f"observed {observed_mean:.1f}\np = {p_value:.4f}")
-    ax.set_xlabel("Mean f (donated)")
-    ax.set_ylabel("Permutations")
-    ax.legend(loc="upper right", fontsize=7)
-
-
-def _pairwise_f(per_subject: dict, candidates: list) -> np.ndarray:
-    """``f`` for every ordered (recipient, donor) pair, NaN where the pair is invalid.
-
-    A pair is invalid on the diagonal, and when the recipient's ``tau`` falls beyond the
-    donor's trial axis (``tau > donor last trial``). Scoring such a pair would measure ``f``
-    from the donor's final session start -- an arbitrarily inflated value that biases the
-    null -- so it is dropped. Note the donor's last *session start* is not the cutoff: a
-    ``tau`` between it and the donor's last trial still lands inside a real donated session.
-    """
-    n = len(candidates)
-    f = np.full((n, n), np.nan)
-    for i, recipient in enumerate(candidates):
-        tau = per_subject[recipient]["tau"]
-        for j, donor in enumerate(candidates):
-            if i == j or tau > per_subject[donor]["last_trial"]:
-                continue
-            f[i, j] = distance_to_session_start(tau, per_subject[donor]["session_starts"])
-    return f
-
-
-def _sample_assignment(rng: np.random.Generator, recipients: list, valid_donors: dict) -> list:
-    """Assign each recipient one span-valid donor, without replacement where possible.
-
-    Recipients are filled in random order, each taking a donor not yet used. A greedy pass
-    can strand a later recipient whose only valid donors are all taken, so the whole
-    assignment is resampled; after ``_ASSIGNMENT_TRIES`` failures the sampler falls back to
-    drawing with replacement, which always succeeds because every recipient here has at
-    least one valid donor.
-    """
-    for _ in range(_ASSIGNMENT_TRIES):
-        used, donors = set(), {}
-        for i in rng.permutation(recipients):
-            choices = [d for d in valid_donors[int(i)] if d not in used]
-            if not choices:
-                break
-            donors[int(i)] = int(rng.choice(choices))
-            used.add(donors[int(i)])
-        if len(donors) == len(recipients):
-            return [donors[i] for i in recipients]
-    return [int(rng.choice(valid_donors[i])) for i in recipients]
-
-
-def _permutation_null_means(f_matrix: np.ndarray, recipients: list, valid_donors: dict,
-                            n_permutations: int, seed: int) -> np.ndarray:
-    """Null distribution of the mean ``f`` when every recipient gets one donated boundary set."""
-    rng = np.random.default_rng(seed)
-    null_means = np.empty(n_permutations, dtype=float)
-    for k in range(n_permutations):
-        donors = _sample_assignment(rng, recipients, valid_donors)
-        null_means[k] = np.mean([f_matrix[i, j] for i, j in zip(recipients, donors)])
-    return null_means
+# --- sleep-alignment permutation test -----------------------------------------------------
 
 
 def run_permutation(
@@ -1088,7 +541,7 @@ def run_permutation(
     strictly positive. A small ``p`` means real ``f`` is smaller than donated ``f``.
 
     Pairs whose donor trial axis does not reach the recipient's ``tau`` are dropped rather
-    than scored (see ``_pairwise_f``), both from the null and from the plotted pool.
+    than scored (see ``pairwise_f``), both from the null and from the plotted pool.
 
     Selects its own subjects and recomputes every fit, so it never depends on
     ``run_analysis`` having been called.
@@ -1128,12 +581,12 @@ def run_permutation(
     """
     if inclusion not in _INCLUSION_RULES:
         raise ValueError(f"inclusion must be one of {sorted(_INCLUSION_RULES)}, got {inclusion!r}")
-    subjids, date_ranges, dates_for = _normalize_subjids_dates(subjids, date_ranges)
+    subjids, date_ranges, dates_for = normalize_subjids_dates(subjids, date_ranges)
     keep = _INCLUSION_RULES[inclusion]
 
     per_subject, excluded = {}, []
     for subjid in subjids:
-        prep = _prepare_subject(subjid, dates_for(subjid), rewarded_only)
+        prep = prepare_subject(subjid, dates_for(subjid), rewarded_only)
         if prep["n_trials"] < 2:
             print(f"[permutation] Subject {subjid}: {prep['n_trials']} kept trial(s); excluded.")
             excluded.append(subjid)
@@ -1169,7 +622,7 @@ def run_permutation(
     # Span guard: drop (recipient, donor) pairs whose donor axis is too short for the
     # recipient's tau. A recipient left with no valid donor cannot enter the test, but it
     # still donates its own boundaries to the others.
-    f_matrix = _pairwise_f(per_subject, candidates)
+    f_matrix = pairwise_f(per_subject, candidates)
     valid_donors = {i: np.flatnonzero(np.isfinite(f_matrix[i])) for i in range(len(candidates))}
     recipients = [i for i in valid_donors if valid_donors[i].size]
     excluded_no_donor = [candidates[i] for i in valid_donors if not valid_donors[i].size]
@@ -1183,7 +636,7 @@ def run_permutation(
     real_f = np.array([per_subject[s]["f"] for s in included], dtype=float)
     shuffled_f = f_matrix[np.isfinite(f_matrix)]
     observed_mean = float(np.mean(real_f))
-    null_means = _permutation_null_means(f_matrix, recipients, valid_donors, n_permutations, seed)
+    null_means = permutation_null_means(f_matrix, recipients, valid_donors, n_permutations, seed)
     p_value = float((1 + np.sum(null_means <= observed_mean)) / (n_permutations + 1))
 
     print(f"\n[permutation] included {len(included)} animals ({inclusion}): {included}")
@@ -1202,16 +655,8 @@ def run_permutation(
     print(f"  one-sided p (real f closer to sleep than chance) = {p_value:.4f}")
 
     with plt.rc_context(nature_style()):
-        fig, (ax_box, ax_null) = plt.subplots(1, 2, figsize=(10.5, 4.5))
-        _plot_box_with_points(ax_box, {"f": real_f, "Shuffled f": shuffled_f})
-        ax_box.set_ylabel("Trials from session start (f)")
-        ax_box.set_title(f"observed mean f = {observed_mean:.1f}\np = {p_value:.4f} (one-sided)",
-                         fontsize=8)
-        _plot_null_distribution(ax_null, null_means, observed_mean, p_value)
-        ax_null.set_title(f"Paired-permutation null\n({n_permutations} permutations)", fontsize=8)
-        fig.suptitle(f"Switch alignment to sleep (n = {len(included)} animals, "
-                     f"inclusion: {inclusion})", fontsize=9)
-        fig.tight_layout(rect=(0, 0, 1, 0.95))
+        fig = plot_permutation(real_f, shuffled_f, null_means, observed_mean, p_value,
+                               n_permutations, len(included), inclusion)
         if show:
             plt.show()
 
@@ -1222,7 +667,7 @@ def run_permutation(
             "per_subject": per_subject, "fig": fig}
 
 
-# --- terminal wrappers (parsing only; all logic stays in the functions above) ------------
+# --- terminal wrappers (parsing only; all logic stays in the functions above) -------------
 
 
 def _resolve_dates(args) -> Optional[Union[tuple, list]]:
@@ -1270,6 +715,14 @@ def main() -> int:
     diagnostic.add_argument("--split-ab", action="store_true",
                             help="diagnose the A- and B-reward trials separately")
 
+    autocorr = subparsers.add_parser("autocorr",
+                                     help="residual-autocorrelation check for the bootstrap null")
+    _add_shared_args(autocorr)
+    autocorr.add_argument("--max-lag", type=int, default=ACF_MAX_LAG,
+                          help=f"largest lag reported, clamped to n-1 (default: {ACF_MAX_LAG})")
+    autocorr.add_argument("--split-ab", action="store_true",
+                          help="check the A- and B-reward trials separately")
+
     permutation = subparsers.add_parser("permutation", help="switch vs sleep-boundary alignment")
     _add_shared_args(permutation)
     permutation.add_argument("--inclusion", default="bic_switch_wins", choices=sorted(_INCLUSION_RULES),
@@ -1291,6 +744,9 @@ def main() -> int:
     elif args.command == "diagnostic":
         run_logistic_diagnostic(subjids, date_ranges, rewarded_only=args.rewarded_only,
                                 split_ab=args.split_ab, show=True)
+    elif args.command == "autocorr":
+        run_residual_autocorrelation(subjids, date_ranges, rewarded_only=args.rewarded_only,
+                                     max_lag=args.max_lag, split_ab=args.split_ab, show=True)
     else:
         run_permutation(subjids, date_ranges, rewarded_only=args.rewarded_only,
                         inclusion=args.inclusion, n_permutations=args.n_permutations,
