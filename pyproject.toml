@@ -23,7 +23,7 @@ dependencies = [
     "ipympl",
     "pyyaml",
     "moviepy",
-    "swc-aeon",
+    "swc-aeon==0.1.0",
     "harp-python",
 ]
 
