@@ -734,6 +734,247 @@ def run_logistic_diagnostic(
     return results
 
 
+# --- residual autocorrelation diagnostic (standalone; nothing else calls it) --------------
+#
+# The planned parametric bootstrap null redraws each animal's sequence as independent
+# Bernoulli trials from the fitted model. That is only valid if the *residuals* of the fitted
+# model are serially independent -- if consecutive trials still co-vary once the strategy
+# curve is removed, the bootstrap will understate the null's spread and inflate significance.
+# This checks that assumption per animal, and never touches the fitting code above.
+
+_ACF_MAX_LAG = 50
+_ACF_Z = 1.96  # ~95% band multiplier, i.e. the standard +/- 1.96 / sqrt(N) autocorrelation band
+_ACF_MATERIAL_THRESHOLD = 0.1  # a significant lag-1 below this |r| is still treated as immaterial
+
+
+def _model_fitted_p(name: str, fit: dict, n: int) -> Optional[np.ndarray]:
+    """Per-trial fitted P(SHORT) of a fitted model over the continuous ``0..n-1`` trial axis.
+
+    Rebuilds the step / curve each model implies at every trial, matching exactly the shapes
+    ``_plot_model_comparison`` draws. Returns ``None`` for a model with no per-trial curve (the
+    unimplemented ``qlearning`` stub), so a caller can skip it.
+    """
+    x = np.arange(n)
+    if name == "constant":
+        return np.full(n, fit["p"], dtype=float)
+    if name == "switch":
+        return np.where(x < fit["tau"], fit["p1"], fit["p2"]).astype(float)
+    if name == "switch2":
+        p = np.full(n, fit["p3"], dtype=float)
+        p[x < fit["tau2"]] = fit["p2"]
+        p[x < fit["tau1"]] = fit["p1"]
+        return p
+    if name == "logistic":
+        return logistic_p(x.astype(float), fit["midpoint"], fit["slope"], fit["lo"], fit["hi"])
+    return None
+
+
+def _residual_acf(resid: np.ndarray, lags: np.ndarray,
+                  session_index: Optional[np.ndarray] = None) -> tuple[np.ndarray, np.ndarray]:
+    """Lag-wise autocorrelation of residuals, as a Pearson correlation per lag.
+
+    For each lag ``k`` the value is ``sum(d_t d_{t+k}) / sqrt(sum(d_t^2) sum(d_{t+k}^2))`` over
+    the included ``(t, t+k)`` pairs, with ``d`` the mean-centred residuals -- bounded in
+    ``[-1, 1]`` so full and within-session versions share a scale.
+
+    With ``session_index`` given, only pairs whose two trials fall in the same session are
+    kept: the sleep gaps between sessions make a cross-session lag meaningless, and the strategy
+    shift across a gap would otherwise masquerade as trial-to-trial dependence.
+
+    Returns ``(acf, n_pairs)``; ``acf`` is NaN for any lag with no usable pair.
+    """
+    d = resid - resid.mean()
+    n = d.size
+    acf = np.full(lags.size, np.nan)
+    n_pairs = np.zeros(lags.size, dtype=int)
+    for i, k in enumerate(lags):
+        if k >= n:
+            continue
+        a, b = d[:-k], d[k:]
+        if session_index is not None:
+            same = session_index[:-k] == session_index[k:]
+            a, b = a[same], b[same]
+        n_pairs[i] = a.size
+        denom = float(np.sqrt(np.dot(a, a) * np.dot(b, b)))
+        if a.size and denom > 0:
+            acf[i] = float(np.dot(a, b) / denom)
+    return acf, n_pairs
+
+
+def _acf_bounds(n_pairs: np.ndarray) -> np.ndarray:
+    """Per-lag ``+/- 1.96 / sqrt(N)`` significance bound, NaN where a lag has no pair."""
+    with np.errstate(divide="ignore"):
+        return np.where(n_pairs > 0, _ACF_Z / np.sqrt(n_pairs), np.nan)
+
+
+def _plot_acf_panel(ax, lags: np.ndarray, acf: np.ndarray, bound: np.ndarray, color: str,
+                    title: str) -> None:
+    """Stem plot of one ACF with its (per-lag) significance band shaded."""
+    finite = np.isfinite(acf)
+    ax.fill_between(lags, -bound, bound, color=color, alpha=0.15, linewidth=0,
+                    label="~95% band (+/-1.96/sqrt(N))")
+    ax.vlines(lags[finite], 0, acf[finite], color=color, linewidth=1.1, zorder=3)
+    ax.plot(lags[finite], acf[finite], marker="o", linestyle="none", markersize=3.5,
+            color=color, zorder=4)
+    ax.axhline(0, color=_DATA_COLOR, linewidth=0.8, zorder=2)
+    ax.set_ylabel("Residual ACF")
+    ax.set_title(title, fontsize=8)
+    ax.legend(loc="upper right", fontsize=7)
+
+
+def _plot_residual_autocorr(prep: dict, best_name: str, lags: np.ndarray, acf_full: np.ndarray,
+                            bound_full: np.ndarray, acf_within: np.ndarray,
+                            bound_within: np.ndarray):
+    """Two stacked ACF panels: all trial pairs, then within-session pairs only."""
+    fig, (ax_full, ax_within) = plt.subplots(2, 1, figsize=(9.5, 6.0), sharex=True)
+    _plot_acf_panel(ax_full, lags, acf_full, bound_full, _SWITCH_COLOR,
+                    f"All trial pairs (residuals from {best_name})")
+    _plot_acf_panel(ax_within, lags, acf_within, bound_within, _LOGISTIC_COLOR,
+                    "Within-session pairs only (cross-session lags dropped)")
+    ax_within.set_xlabel("Lag (trials)")
+    ax_within.set_xlim(0, lags[-1] + 1)
+    fig.suptitle(f"{_subject_label(prep)} - residual autocorrelation "
+                 f"(BIC-best model: {best_name})", fontsize=9)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    return fig
+
+
+def _autocorr_sequence(prep: dict, max_lag: int) -> Optional[dict]:
+    """Residual-ACF diagnostic for one sequence: fit-best residuals, print, plot.
+
+    Uses the BIC-best model's per-trial P(SHORT) as the fit, so the residuals carry whatever
+    serial structure the *chosen* description leaves behind. Returns None (after a message)
+    when the sequence is too short, or when the best model has no per-trial curve.
+    """
+    label = _subject_label(prep)
+    n = prep["n_trials"]
+    if n < 3:
+        print(f"[residual-acf] {label}: {n} kept trial(s); skipping.")
+        return None
+
+    comparison = compare_models(prep["s"])
+    best = comparison["best_bic"]
+    fitted = _model_fitted_p(best, comparison["fits"][best], n)
+    if fitted is None:
+        print(f"[residual-acf] {label}: BIC-best model '{best}' has no per-trial curve; skipping.")
+        return None
+    resid = prep["s"].astype(float) - fitted
+
+    lags = np.arange(1, int(min(max_lag, n - 1)) + 1)
+    acf_full, npairs_full = _residual_acf(resid, lags)
+    acf_within, npairs_within = _residual_acf(resid, lags, session_index=prep["session_index"])
+    bound_full, bound_within = _acf_bounds(npairs_full), _acf_bounds(npairs_within)
+
+    exceed_full = int(np.sum(np.isfinite(acf_full) & (np.abs(acf_full) > bound_full)))
+    exceed_within = int(np.sum(np.isfinite(acf_within) & (np.abs(acf_within) > bound_within)))
+    usable_within = int(np.sum(npairs_within > 0))
+    r1_full, b1_full = acf_full[0], bound_full[0]
+    r1_within, b1_within = acf_within[0], bound_within[0]
+
+    sig_within = bool(np.isfinite(r1_within) and abs(r1_within) > b1_within)
+    material = bool(sig_within and abs(r1_within) >= _ACF_MATERIAL_THRESHOLD)
+
+    print(f"\n[residual-acf] {label} ({n} trials, BIC-best model: {best})")
+    print(f"  residuals = observed - fitted P(SHORT); mean = {resid.mean():+.4f}, "
+          f"sd = {resid.std():.4f}")
+    print(f"  full ACF          : lag-1 = {r1_full:+.3f} (band +/-{b1_full:.3f}); "
+          f"{exceed_full} of {lags.size} lags exceed the band")
+    if np.isfinite(r1_within):
+        print(f"  within-session ACF: lag-1 = {r1_within:+.3f} (band +/-{b1_within:.3f}, "
+              f"{npairs_within[0]} pairs); {exceed_within} of {usable_within} usable lags "
+              f"exceed the band")
+    else:
+        print("  within-session ACF: no within-session lag-1 pair (sessions too short)")
+
+    if material:
+        verdict = (f"MATERIAL -- within-session lag-1 = {r1_within:+.3f} clears both the band "
+                   f"(+/-{b1_within:.3f}) and |r| >= {_ACF_MATERIAL_THRESHOLD:g}; the i.i.d. "
+                   f"Bernoulli bootstrap null is questionable for this animal.")
+    elif sig_within:
+        verdict = (f"not material -- within-session lag-1 = {r1_within:+.3f} is significant but "
+                   f"|r| < {_ACF_MATERIAL_THRESHOLD:g}; i.i.d. bootstrap is broadly defensible.")
+    elif np.isfinite(r1_within):
+        verdict = (f"not material -- within-session lag-1 = {r1_within:+.3f} sits inside the "
+                   f"+/-{b1_within:.3f} band; no evidence against i.i.d.")
+    else:
+        verdict = "inconclusive -- too little within-session data to judge trial-to-trial dependence."
+    print(f"  VERDICT: {verdict}")
+
+    fig = _plot_residual_autocorr(prep, best, lags, acf_full, bound_full, acf_within, bound_within)
+    return {
+        "best_model": best, "residuals": resid, "fitted": fitted, "lags": lags,
+        "acf_full": acf_full, "bound_full": bound_full, "n_pairs_full": npairs_full,
+        "acf_within": acf_within, "bound_within": bound_within, "n_pairs_within": npairs_within,
+        "lag1_full": float(r1_full),
+        "lag1_within": float(r1_within) if np.isfinite(r1_within) else float("nan"),
+        "n_exceed_full": exceed_full, "n_exceed_within": exceed_within,
+        "sig_within": sig_within, "material": material,
+        "ab_split": prep.get("ab_split"), "prep": prep, "fig": fig,
+    }
+
+
+def run_residual_autocorrelation(
+    subjids: Union[int, Iterable[int], dict],
+    date_ranges: Optional[dict] = None,
+    rewarded_only: bool = False,
+    max_lag: int = _ACF_MAX_LAG,
+    split_ab: bool = False,
+    show: bool = True,
+) -> dict:
+    """Check the i.i.d.-Bernoulli assumption behind the planned parametric bootstrap null.
+
+    Standalone -- ``run_analysis`` does not call it. For each animal it takes the BIC-best
+    model's fitted per-trial P(SHORT), forms the residuals ``observed - fitted``, and reports
+    their autocorrelation, so any serial dependence the fitted strategy curve fails to absorb
+    is made visible. If residuals are serially correlated, redrawing trials independently from
+    the fitted model would understate the null's spread.
+
+    Per animal it prints the lag-1 residual autocorrelation and how many lags (1..``max_lag``)
+    exceed the ``+/-1.96/sqrt(N)`` band, both over all trial pairs and over within-session
+    pairs only, and a one-line verdict on whether lag-1 dependence is material. It draws one
+    figure with two stacked ACF panels (all pairs; within-session pairs). The within-session
+    version drops cross-session lag pairs, whose apparent correlation comes from the sleep gap
+    and the strategy shift around it rather than from trial-to-trial dependence.
+
+    Parameters
+    ----------
+    subjids, date_ranges, rewarded_only, split_ab, show
+        As in ``run_analysis``. With ``split_ab`` the A- and B-reward trials are partitioned by
+        the same rule and each gets its own residuals, table, verdict, and figure; titles and
+        prints carry the reward tag.
+    max_lag : int
+        Largest lag reported (clamped to ``n - 1``). Default 50.
+
+    Returns
+    -------
+    dict
+        Keyed by subjid (nested by ``"A"`` / ``"B"`` when ``split_ab``): ``best_model``,
+        ``residuals``, ``fitted``, ``lags``, ``acf_full`` / ``bound_full`` / ``n_pairs_full``,
+        ``acf_within`` / ``bound_within`` / ``n_pairs_within``, ``lag1_full``, ``lag1_within``,
+        ``n_exceed_full``, ``n_exceed_within``, ``sig_within``, ``material``, ``ab_split``,
+        ``prep``, and ``fig``.
+    """
+    subjids, date_ranges, dates_for = _normalize_subjids_dates(subjids, date_ranges)
+    results = {}
+
+    with plt.rc_context(nature_style()):
+        for subjid in subjids:
+            prep = _prepare_subject(subjid, dates_for(subjid), rewarded_only)
+            if split_ab:
+                splits = {letter: _autocorr_sequence(_subset_by_ab(prep, letter), max_lag)
+                          for letter in _AB_COLORS}
+                splits = {letter: r for letter, r in splits.items() if r is not None}
+                if splits:
+                    results[subjid] = splits
+            else:
+                result = _autocorr_sequence(prep, max_lag)
+                if result is not None:
+                    results[subjid] = result
+            if show:
+                plt.show()
+    return results
+
+
 def _plot_box_with_points(ax, groups: dict) -> None:
     """One box per group with its individual points jittered on top."""
     labels = list(groups.keys())
