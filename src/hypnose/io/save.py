@@ -163,9 +163,9 @@ def poster_style() -> dict:
     }
 
 
-# Distinctive rcParam values that identify the presentations style at save time
+# Distinctive rcParam values that identify the presentation style at save time
 # (used so the y-tick cap works no matter how the style was applied — via
-# use_presentations_style() OR a bare mpl.rcParams.update(presentations_style())).
+# use_presentation_style() OR a bare mpl.rcParams.update(presentation_style())).
 _PRES_AXES_LABELSIZE = 24
 _PRES_TICK_LABELSIZE = 18
 _PRES_AXES_LINEWIDTH = 2.0
@@ -173,19 +173,19 @@ _PRES_AXES_LINEWIDTH = 2.0
 # are the most important thing to read). Applied by save_figure(boxplot=True).
 _PRES_XTICK_BOXPLOT_LABELSIZE = 28
 
-# Number of y-ticks the presentations style caps to (no rcParam exists for tick
+# Number of y-ticks the presentation style caps to (no rcParam exists for tick
 # count, so save_figure enforces it per-axes). Configurable via
-# use_presentations_style(max_yticks=...).
+# use_presentation_style(max_yticks=...).
 _PRESENTATION_MAX_YTICKS = 4
 # Same idea for x-ticks: cap a numeric x-axis to a few nicely rounded values
 # (5, 10, 15, ... rather than 7, 14, 21). Categorical x-axes (explicit string
 # tick labels, e.g. boxplot/violin/position plots) are left untouched.
-# Configurable via use_presentations_style(max_xticks=...).
+# Configurable via use_presentation_style(max_xticks=...).
 _PRESENTATION_MAX_XTICKS = 5
 
 
-def presentations_style() -> dict:
-    """Return rcParams dict for 'presentations' figures (projector-friendly).
+def presentation_style() -> dict:
+    """Return rcParams dict for 'presentation' figures (projector-friendly).
 
     Same as nature_style(), but tuned for readability on a big projector:
     - bigger, bold tick labels (x and y)
@@ -195,8 +195,8 @@ def presentations_style() -> dict:
     The y-axis tick count is also capped (default 4). That has no rcParam
     equivalent, so it is enforced per-axes by save_figure whenever this style is
     active — detected from the rcParams below — so both
-    ``mpl.rcParams.update(presentations_style())`` and
-    ``use_presentations_style()`` get the cap.
+    ``mpl.rcParams.update(presentation_style())`` and
+    ``use_presentation_style()`` get the cap.
     """
     style = nature_style()
     style.update({
@@ -222,8 +222,8 @@ def presentations_style() -> dict:
     return style
 
 
-def _presentations_active() -> bool:
-    """True when the presentations style is the active matplotlib style."""
+def _presentation_active() -> bool:
+    """True when the presentation style is the active matplotlib style."""
     try:
         return (
             float(mpl.rcParams.get("axes.labelsize", 0)) == float(_PRES_AXES_LABELSIZE)
@@ -234,19 +234,56 @@ def _presentations_active() -> bool:
         return False
 
 
-def use_presentations_style(max_yticks: int = 4, max_xticks: int = 5) -> None:
-    """Activate the presentations style globally and set the tick caps.
+# Registry of named styles so `use_style("nature")` (etc.) resolves to a builder.
+_STYLE_BUILDERS = {
+    "nature": nature_style,
+    "poster": poster_style,
+    "presentation": presentation_style,
+}
 
-    Call once (e.g. at the top of a notebook), analogous to
-    ``mpl.rcParams.update(poster_style())``. Applying the style via a bare
-    ``mpl.rcParams.update(presentations_style())`` also works — save_figure
-    detects the active style and still caps y-ticks (to 4) and numeric x-ticks
-    (to 5 nicely-rounded values).
+
+def _resolve_style(style) -> dict:
+    """Resolve a style spec to an rcParams dict.
+
+    Accepts a style builder callable (e.g. ``nature_style``), a name string
+    (``"nature"``, ``"poster"``, ``"presentation"``, with or without a
+    ``_style`` suffix), or an rcParams dict.
+    """
+    if callable(style):
+        return dict(style())
+    if isinstance(style, dict):
+        return dict(style)
+    if isinstance(style, str):
+        key = style.lower().removesuffix("_style")
+        if key in _STYLE_BUILDERS:
+            return dict(_STYLE_BUILDERS[key]())
+        raise ValueError(
+            f"Unknown style {style!r}; known styles: {sorted(set(_STYLE_BUILDERS))}"
+        )
+    raise TypeError(f"style must be a callable, dict, or name string, got {type(style)!r}")
+
+
+def use_style(style="nature", max_yticks: int = 4, max_xticks: int = 5) -> None:
+    """Activate a figure style globally and set the tick caps.
+
+    Call once at the top of a notebook (``use_style()`` for the default nature style,
+    ``use_style("presentation")`` or ``use_style(nature_style)`` for others), so every
+    figure created afterwards — including in other projects that import this — picks up
+    the style. ``style`` accepts a style builder callable, a name string, or an rcParams
+    dict; add new named styles by registering them in ``_STYLE_BUILDERS``.
+
+    The tick caps only take effect under the presentation style: save_figure detects it
+    and caps y-ticks (to ``max_yticks``) and numeric x-ticks (to ``max_xticks``).
     """
     global _PRESENTATION_MAX_YTICKS, _PRESENTATION_MAX_XTICKS
     _PRESENTATION_MAX_YTICKS = max_yticks
     _PRESENTATION_MAX_XTICKS = max_xticks
-    mpl.rcParams.update(presentations_style())
+    mpl.rcParams.update(_resolve_style(style))
+
+
+def use_presentation_style(max_yticks: int = 4, max_xticks: int = 5) -> None:
+    """Deprecated alias for ``use_style("presentation", ...)``; kept for existing callers."""
+    use_style("presentation", max_yticks=max_yticks, max_xticks=max_xticks)
 
 
 def nice_x_locator(max_ticks: int | None = None):
@@ -254,9 +291,9 @@ def nice_x_locator(max_ticks: int | None = None):
     rather than 3, 6, 9, or fractional values for small ranges).
 
     Numeric x-axes that would otherwise set one tick per session/day should use
-    this so the *displayed* figure already matches the presentations save-time
+    this so the *displayed* figure already matches the presentation save-time
     x-tick cap (which uses the same settings). ``max_ticks`` defaults to the
-    presentations x-tick cap.
+    presentation x-tick cap.
     """
     from matplotlib.ticker import MaxNLocator
     n = max_ticks if max_ticks is not None else _PRESENTATION_MAX_XTICKS
@@ -266,7 +303,7 @@ def nice_x_locator(max_ticks: int | None = None):
 # Apply the default (nature) style globally so display and saved figures match.
 # To switch styles for a notebook, call one of:
 #     mpl.rcParams.update(poster_style())
-#     use_presentations_style()          # presentations (also caps y-ticks)
+#     use_presentation_style()          # presentation (also caps y-ticks)
 mpl.rcParams.update(nature_style())
 
 mpl.rcParams["pdf.fonttype"] = 42
@@ -428,7 +465,7 @@ def save_figure(
         Dots per inch passed to savefig (default 300).
     boxplot : bool
         Mark this figure as a boxplot-style plot (categorical x positions). Under
-        the presentations style, its x-tick labels are enlarged beyond the y-ticks
+        the presentation style, its x-tick labels are enlarged beyond the y-ticks
         since the positions are the most important thing to read.
     """
 
@@ -458,10 +495,10 @@ def save_figure(
     if clear_legends:
         strip_legends(fig)
 
-    # Presentations style: cap y-ticks (and numeric x-ticks) to a few round
+    # presentation style: cap y-ticks (and numeric x-ticks) to a few round
     # values (no rcParam for this), and, for boxplot-style figures, enlarge the
     # x-tick labels.
-    if _presentations_active():
+    if _presentation_active():
         from matplotlib.ticker import MaxNLocator, FixedLocator, FixedFormatter
         for _ax in fig.axes:
             if _PRESENTATION_MAX_YTICKS:
