@@ -379,7 +379,6 @@ def _sweep_sequence(prep: dict, alphas: Sequence[float], bs: Sequence[float],
     fits = fit_qlearning_variants(prep["s"], n_starts=n_starts, seed=seed)
     print(f"\n[qsweep] {label} ({prep['n_trials']} trials, {len(alphas)} x {len(bs)} "
           f"(alpha, b) grid per variant)")
-    _print_qlearning_table(fits, bands)
 
     sweeps, bands, figures = {}, {}, {}
     for variant in QLEARN_VARIANT_ORDER:
@@ -397,6 +396,8 @@ def _sweep_sequence(prep: dict, alphas: Sequence[float], bs: Sequence[float],
         if best_grid < fits[variant]["nll"] - _LOGLIK_REPORT_TOL:
             print(f"  NOTE: {variant}: a grid point reached nll {best_grid:.3f} < the ML fit's "
                   f"{fits[variant]['nll']:.3f} -- the multi-start missed the optimum.")
+
+    _print_qlearning_table(fits, bands)
 
     return {"fits": fits, "sweeps": sweeps, "bands": bands, "alphas": tuple(alphas),
             "bs": tuple(bs), "ab_split": prep.get("ab_split"), "prep": prep, "figures": figures}
