@@ -157,6 +157,10 @@ GENERATIVE_QUANTILES = (0.05, 0.95)
 # different trial in every run, so the mean of many runs is a smooth ramp that misrepresents
 # what any single run does; these are drawn next to it.
 N_GENERATIVE_EXAMPLES = 8
+# Minimum rise in fitted rate (p2 - p1) for a simulated run to count as having switched.
+# fit_switchpoint returns a tau for every sequence, switched or not, so without this gate a run
+# that never changed strategy still contributes a tau and inflates the apparent spread.
+SWITCH_THRESHOLD = 0.5
 
 # The variant that represents "qlearning" in compare_models. The other two are fitted alongside
 # by fit_qlearning_variants and overlaid on the figure rather than taking a table row each.
@@ -196,6 +200,7 @@ __all__ = [
     "N_GENERATIVE_SIMS",
     "N_GENERATIVE_EXAMPLES",
     "GENERATIVE_QUANTILES",
+    "SWITCH_THRESHOLD",
     "QLEARN_DEFAULT_VARIANT",
     "QLEARN_VARIANTS",
     "QLEARN_VARIANT_ORDER",
@@ -387,7 +392,8 @@ def simulate_qlearning(n_trials: int, alpha: float, b: float, q0_short: float, q
 def qlearning_generative_band(fit: dict, n_trials: int, n_sims: int = N_GENERATIVE_SIMS,
                               seed: int = 0,
                               quantiles: tuple[float, float] = GENERATIVE_QUANTILES,
-                              n_examples: int = N_GENERATIVE_EXAMPLES) -> dict:
+                              n_examples: int = N_GENERATIVE_EXAMPLES,
+                              switch_threshold: float = SWITCH_THRESHOLD) -> dict:
     """What the fitted Q-learner actually predicts: mean P(SHORT) over its own simulated runs.
 
     Runs ``simulate_qlearning`` ``n_sims`` times at ``fit``'s estimates and summarizes the
@@ -406,6 +412,18 @@ def qlearning_generative_band(fit: dict, n_trials: int, n_sims: int = N_GENERATI
     model does. ``examples`` and ``switch_taus`` are returned so that the individual runs, and
     the spread of their switch trials, can be seen next to the mean.
 
+    **A tau alone does not mean a run switched.** ``fit_switchpoint`` returns its best split for
+    every sequence, including one that never changed strategy, so a scattered ``switch_taus``
+    cannot by itself tell "abrupt switch at a random trial" from "no switch, tau is noise". A
+    run therefore counts as switched only when its fitted rates rise by at least
+    ``switch_threshold`` (``p2 - p1 >= switch_threshold``), and the spread that means anything
+    is the one over ``switch_taus_switched``.
+
+    ``frac_switched`` is itself a result, not a filtering detail, and should be reported rather
+    than quietly dropped: a perseverative fit that only reaches criterion in a small minority of
+    runs is failing to reproduce the animal in a *different* way from one that switches every
+    time at an unpredictable trial, and the two are indistinguishable from the tau spread alone.
+
     Parameters
     ----------
     fit : dict
@@ -421,23 +439,32 @@ def qlearning_generative_band(fit: dict, n_trials: int, n_sims: int = N_GENERATI
     n_examples : int
         Individual runs to keep in ``examples``, taken as the first ``n_examples`` simulations
         (they are i.i.d., so the first few are a fair sample). Clipped to ``n_sims``.
+    switch_threshold : float
+        Minimum ``p2 - p1`` for a simulated run to count as having switched.
 
     Returns
     -------
     dict
         ``mean``, ``lo``, ``hi`` (each length ``n_trials``); ``examples``, an
-        ``(n_examples, n_trials)`` array of individual P(SHORT) runs; ``switch_taus``, the
-        single-switch ``tau`` fitted to each simulated *sequence* (length ``n_sims``) -- their
-        spread is what the mean smooths away; ``n_sims`` and ``quantiles``.
+        ``(n_examples, n_trials)`` array of individual P(SHORT) runs; ``n_sims`` and
+        ``quantiles``.
 
-        All-NaN curves, an empty ``examples`` / ``switch_taus`` and ``n_sims = 0`` for a
+        Per simulated sequence (each length ``n_sims``): ``switch_taus``, ``switch_p1`` and
+        ``switch_p2`` from its ``fit_switchpoint``, and ``switched`` (bool,
+        ``p2 - p1 >= switch_threshold``). Summarizing those: ``frac_switched``, and
+        ``switch_taus_switched``, the taus of the switched runs only -- the spread to read.
+
+        All-NaN curves, empty per-run arrays, ``frac_switched = nan`` and ``n_sims = 0`` for a
         degenerate fit, so a caller can skip drawing it.
     """
     n = max(int(n_trials), 0)
     lo_q, hi_q = float(quantiles[0]), float(quantiles[1])
     degenerate = {"mean": np.full(n, np.nan), "lo": np.full(n, np.nan),
                   "hi": np.full(n, np.nan), "examples": np.zeros((0, n)),
-                  "switch_taus": np.zeros(0, dtype=int), "n_sims": 0, "quantiles": (lo_q, hi_q)}
+                  "switch_taus": np.zeros(0, dtype=int), "switch_p1": np.zeros(0),
+                  "switch_p2": np.zeros(0), "switched": np.zeros(0, dtype=bool),
+                  "frac_switched": float("nan"), "switch_taus_switched": np.zeros(0, dtype=int),
+                  "n_sims": 0, "quantiles": (lo_q, hi_q)}
     estimates = [fit.get(name, np.nan) for name in
                  ("alpha", "b", "q0_short", "q0_long", "kappa")]
     if n == 0 or int(n_sims) < 1 or not np.all(np.isfinite(estimates)):
@@ -445,10 +472,18 @@ def qlearning_generative_band(fit: dict, n_trials: int, n_sims: int = N_GENERATI
     sims, p = simulate_qlearning(n, *estimates, seed=seed, n_sims=int(n_sims))
     lo, hi = np.quantile(p, (lo_q, hi_q), axis=0)
     # Where each individual run switched, on the same single-switch criterion the descriptive
-    # model uses -- so a run's abruptness is measured the same way the animal's is.
-    taus = np.array([fit_switchpoint(sim)["tau"] for sim in sims], dtype=int)
+    # model uses -- so a run's abruptness is measured the same way the animal's is. The fitted
+    # rates come back too: fit_switchpoint returns a tau for every sequence, so without the
+    # p2 - p1 gate a run that never switched contributes a meaningless tau to the spread.
+    fits = [fit_switchpoint(sim) for sim in sims]
+    taus = np.array([f["tau"] for f in fits], dtype=int)
+    p1 = np.array([f["p1"] for f in fits], dtype=float)
+    p2 = np.array([f["p2"] for f in fits], dtype=float)
+    switched = (p2 - p1) >= float(switch_threshold)
     return {"mean": p.mean(axis=0), "lo": lo, "hi": hi,
             "examples": p[:max(int(n_examples), 0)], "switch_taus": taus,
+            "switch_p1": p1, "switch_p2": p2, "switched": switched,
+            "frac_switched": float(switched.mean()), "switch_taus_switched": taus[switched],
             "n_sims": int(n_sims), "quantiles": (lo_q, hi_q)}
 
 

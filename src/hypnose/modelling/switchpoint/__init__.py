@@ -50,6 +50,7 @@ from hypnose.modelling.switchpoint.qlearning import (
     QLEARN_VARIANT_ORDER,
     R_LONG,
     R_SHORT,
+    SWITCH_THRESHOLD,
     fit_qlearning,
     fit_qlearning_variants,
     qlearning_generative_band,
@@ -84,7 +85,7 @@ __all__ = [
     "GENERATIVE_QUANTILES", "N_GENERATIVE_EXAMPLES", "N_GENERATIVE_SIMS", "N_STARTS",
     "QLEARN_DEFAULT_VARIANT",
     "QLEARN_SWEEP_ALPHAS", "QLEARN_SWEEP_BS", "QLEARN_VARIANTS", "QLEARN_VARIANT_ORDER",
-    "R_LONG", "R_SHORT", "fit_qlearning", "fit_qlearning_variants",
+    "R_LONG", "R_SHORT", "SWITCH_THRESHOLD", "fit_qlearning", "fit_qlearning_variants",
     "qlearning_generative_band", "qlearning_nll", "qlearning_parameter_sweep",
     "qlearning_trajectory", "simulate_qlearning",
     # comparison

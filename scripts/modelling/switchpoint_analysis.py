@@ -61,6 +61,7 @@ from hypnose.modelling.switchpoint import (
     QLEARN_SWEEP_ALPHAS,
     QLEARN_SWEEP_BS,
     QLEARN_VARIANT_ORDER,
+    SWITCH_THRESHOLD,
     WARM_START_LABEL,
     acf_bounds,
     compare_models,
@@ -139,12 +140,18 @@ def _describe_fit(name: str, fit: dict) -> str:
     return "not implemented"
 
 
-def _print_qlearning_table(qlearning_fits: dict) -> None:
+def _print_qlearning_table(qlearning_fits: dict, qlearning_bands: Optional[dict] = None) -> None:
     """Print the three Q-learning variants' estimates and scores -- the null being tested.
 
     A ``boundary`` tag names any estimate that stopped within 1% of a bound: the optimizer hit
     the edge of the parameter space, so that number is a constraint artefact rather than an
     estimate, and the variant's fit should be read as "as good as the bounds allow".
+
+    With ``qlearning_bands`` a continuation line reports what the fit actually *generates*: the
+    fraction of simulated runs that reach the switch criterion, and the spread of switch trials
+    over those runs only. Both numbers are needed -- a low fraction and a wide spread are two
+    different ways of failing to reproduce an animal that switched abruptly at one trial, and
+    the tau spread alone cannot tell them apart.
     """
     print(f"  {'q-learning variant':<22}{'alpha':>9}{'b':>9}{'Q0_short':>10}{'Q0_long':>9}"
           f"{'kappa':>8}{'nll':>10}{'AIC':>10}{'BIC':>10}  starts")
@@ -159,6 +166,14 @@ def _print_qlearning_table(qlearning_fits: dict) -> None:
         print(f"  {variant:<22}{fit['alpha']:>9.4g}{fit['b']:>9.4g}{fit['q0_short']:>10.3f}"
               f"{fit['q0_long']:>9.3f}{kappa}{fit['nll']:>10.3f}{fit['aic']:>10.1f}"
               f"{fit['bic']:>10.1f}  {flags}")
+        band = (qlearning_bands or {}).get(variant)
+        if band and band["n_sims"]:
+            taus = band["switch_taus_switched"]
+            spread = (f"switched-run tau: {taus.min()}-{taus.max()} "
+                      f"(5-95% {np.percentile(taus, 5):.0f}-{np.percentile(taus, 95):.0f})"
+                      if taus.size else "no switched run to take a tau spread from")
+            print(f"  {'':<22}generative: {band['frac_switched']:.1%} of {band['n_sims']} runs "
+                  f"reach p2 - p1 >= {SWITCH_THRESHOLD:g}; {spread}")
 
 
 def _print_model_table(comparison: dict) -> None:
@@ -236,7 +251,7 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
     print(f"  FWHM    = [{fwhm_lo}, {fwhm_hi}], width = {fwhm_width} trials")
     _print_model_table(comparison)
     if qlearning_fits:
-        _print_qlearning_table(qlearning_fits)
+        _print_qlearning_table(qlearning_fits, qlearning_bands)
 
     figures = {
         "strategy": plot_strategy(prep, rewarded_only),
@@ -364,7 +379,7 @@ def _sweep_sequence(prep: dict, alphas: Sequence[float], bs: Sequence[float],
     fits = fit_qlearning_variants(prep["s"], n_starts=n_starts, seed=seed)
     print(f"\n[qsweep] {label} ({prep['n_trials']} trials, {len(alphas)} x {len(bs)} "
           f"(alpha, b) grid per variant)")
-    _print_qlearning_table(fits)
+    _print_qlearning_table(fits, bands)
 
     sweeps, bands, figures = {}, {}, {}
     for variant in QLEARN_VARIANT_ORDER:
