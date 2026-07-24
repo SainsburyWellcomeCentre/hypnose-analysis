@@ -11,7 +11,10 @@ This module wires those together: it selects subjects, fits, prints the tables, 
 figures, and exposes four entry points, each callable from a notebook (import, call, get
 results and figure handles back) or from the terminal via the argparse wrapper at the bottom:
 
-- ``run_analysis``                -- per-animal switch-point fit, posterior, and model comparison.
+- ``run_analysis``                -- per-animal switch-point fit, posterior, and model comparison
+  (with the three Q-learning null trajectories overlaid unless turned off).
+- ``run_qlearning_sweep``         -- one ``(alpha, b)`` parameter-sweep figure per Q-learning
+  variant (standalone; three figures per sequence).
 - ``run_permutation``             -- do switches sit closer to *real* sleep boundaries than to
   other animals' donated ones?
 - ``run_logistic_diagnostic``     -- where each of the logistic's multi-start initial conditions
@@ -29,6 +32,7 @@ Examples
 --------
   python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 --likelihood-window 100
   python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 41 --date-range 20251201 20251231 --rewarded-only
+  python scripts/modelling/switchpoint_analysis.py qsweep --subjids 40 --rewarded-only --split-ab
   python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 41 42 --rewarded-only
   python scripts/modelling/switchpoint_analysis.py diagnostic --subjids 40 --rewarded-only --split-ab
   python scripts/modelling/switchpoint_analysis.py autocorr --subjids 40 --rewarded-only
@@ -52,17 +56,23 @@ from hypnose.modelling.switchpoint import (
     ACF_MAX_LAG,
     AB_LETTERS,
     MODEL_ORDER,
+    N_STARTS,
+    QLEARN_SWEEP_ALPHAS,
+    QLEARN_SWEEP_BS,
+    QLEARN_VARIANT_ORDER,
     WARM_START_LABEL,
     acf_bounds,
     compare_models,
     distance_to_session_start,
     fit_logistic_multistart,
+    fit_qlearning_variants,
     fit_switchpoint,
     model_fitted_p,
     normalize_subjids_dates,
     pairwise_f,
     permutation_null_means,
     prepare_subject,
+    qlearning_parameter_sweep,
     residual_acf,
     subject_label,
     subset_by_ab,
@@ -72,6 +82,7 @@ from hypnose.visualization.modelling.switchpoint.plots import (
     plot_multistart,
     plot_permutation,
     plot_posterior,
+    plot_qlearning_sweep,
     plot_residual_autocorr,
     plot_strategy,
 )
@@ -93,7 +104,7 @@ _INCLUSION_RULES = {
     "all": lambda c: True,
 }
 
-__all__ = ["run_analysis", "run_permutation", "run_logistic_diagnostic",
+__all__ = ["run_analysis", "run_qlearning_sweep", "run_permutation", "run_logistic_diagnostic",
            "run_residual_autocorrelation"]
 
 
@@ -112,7 +123,32 @@ def _describe_fit(name: str, fit: dict) -> str:
     if name == "logistic":
         return (f"start = {fit.get('start_label', '?')}, midpoint = {fit['midpoint']:.1f}, "
                 f"slope = {fit['slope']:.4g}, lo = {fit['lo']:.3f}, hi = {fit['hi']:.3f}")
+    if name == "qlearning":
+        return (f"variant = {fit['variant']}, alpha = {fit['alpha']:.4g}, b = {fit['b']:.4g}, "
+                f"Q0 = ({fit['q0_short']:.3f}, {fit['q0_long']:.3f})")
     return "not implemented"
+
+
+def _print_qlearning_table(qlearning_fits: dict) -> None:
+    """Print the three Q-learning variants' estimates and scores -- the null being tested.
+
+    A ``boundary`` tag names any estimate that stopped within 1% of a bound: the optimizer hit
+    the edge of the parameter space, so that number is a constraint artefact rather than an
+    estimate, and the variant's fit should be read as "as good as the bounds allow".
+    """
+    print(f"  {'q-learning variant':<22}{'alpha':>9}{'b':>9}{'Q0_short':>10}{'Q0_long':>9}"
+          f"{'kappa':>8}{'nll':>10}{'AIC':>10}{'BIC':>10}  starts")
+    for variant in QLEARN_VARIANT_ORDER:
+        fit = qlearning_fits[variant]
+        kappa = f"{fit['kappa']:>8.3f}" if variant == "qlearn_perseveration" else f"{'-':>8}"
+        flags = f"{fit['n_starts_converged']}/{fit['n_starts']}"
+        if fit["boundary_hit"]:
+            flags += f"  boundary: {', '.join(fit['boundary_params'])}"
+        if not fit["converged"]:
+            flags += "  NO START CONVERGED"
+        print(f"  {variant:<22}{fit['alpha']:>9.4g}{fit['b']:>9.4g}{fit['q0_short']:>10.3f}"
+              f"{fit['q0_long']:>9.3f}{kappa}{fit['nll']:>10.3f}{fit['aic']:>10.1f}"
+              f"{fit['bic']:>10.1f}  {flags}")
 
 
 def _print_model_table(comparison: dict) -> None:
@@ -151,11 +187,14 @@ def _print_model_table(comparison: dict) -> None:
     print(f"  best model (BIC): {best} -- {_describe_fit(best, comparison['fits'][best])}")
 
 
-def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int) -> Optional[dict]:
+def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
+                      qlearning_overlay: bool = True) -> Optional[dict]:
     """Fit, print and plot one SHORT/LONG sequence -- a whole animal, or one A/B split of it.
 
     Figures are built in the order they should be read: strategy, model comparison, posterior.
-    Returns None (after a message) when the sequence is too short to fit.
+    With ``qlearning_overlay`` the three Q-learning variants are fitted to the same sequence,
+    tabulated, and drawn on the model-comparison figure. Returns None (after a message) when the
+    sequence is too short to fit.
     """
     label = subject_label(prep)
     if prep["n_trials"] < 2:
@@ -164,6 +203,7 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int) -
 
     fit = fit_switchpoint(prep["s"])
     comparison = compare_models(prep["s"])
+    qlearning_fits = fit_qlearning_variants(prep["s"]) if qlearning_overlay else None
     tau = fit["tau"]
     global_tau = int(prep["global_ids"][tau])
     tau_session = prep["session_labels"][int(prep["session_index"][tau])]
@@ -180,16 +220,19 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int) -
     print(f"  95% HDI = [{hdi_lo}, {hdi_hi}], width = {hdi_width} trials")
     print(f"  FWHM    = [{fwhm_lo}, {fwhm_hi}], width = {fwhm_width} trials")
     _print_model_table(comparison)
+    if qlearning_fits:
+        _print_qlearning_table(qlearning_fits)
 
     figures = {
         "strategy": plot_strategy(prep, rewarded_only),
-        "model_comparison": plot_model_comparison(prep, comparison),
+        "model_comparison": plot_model_comparison(prep, comparison, qlearning_fits),
         "posterior": plot_posterior(prep, fit, likelihood_window),
     }
     return {
         "tau": tau, "global_tau": global_tau, "tau_session": tau_session, "hdi": fit["hdi"],
         "hdi_width": hdi_width, "fwhm": fit["fwhm"], "fwhm_width": fwhm_width,
         "p1": fit["p1"], "p2": fit["p2"], "posterior": fit["posterior"], "comparison": comparison,
+        "qlearning": qlearning_fits,
         "session_ends": prep["session_ends"], "session_starts": prep["session_starts"],
         "session_labels": prep["session_labels"], "n_trials": prep["n_trials"],
         "ab_split": prep.get("ab_split"), "prep": prep, "figures": figures,
@@ -203,6 +246,7 @@ def run_analysis(
     likelihood_window: int = 100,
     split_ab: bool = False,
     show: bool = True,
+    qlearning_overlay: bool = True,
 ) -> dict:
     """Fit and plot the strategy switch for each subject independently.
 
@@ -211,6 +255,11 @@ def run_analysis(
     AIC and BIC in-panel; and the switch-point posterior windowed around its peak. The peak
     trial, its session, and the HDI width are printed as well as annotated. Figures are shown
     one animal at a time, so an animal's plots stay together and in order.
+
+    Unless ``qlearning_overlay=False``, the three Q-learning variants -- the mechanistic null --
+    are also fitted per animal (per A/B subset, with ``split_ab``), tabulated, and overlaid on
+    the model-comparison figure as dash-dot curves. They are never fitted on pooled or averaged
+    data; see ``hypnose.modelling.switchpoint.qlearning``.
 
     Parameters
     ----------
@@ -232,14 +281,19 @@ def run_analysis(
         one sequence and reward identity only colours the strategy plot.
     show : bool
         Call ``plt.show()`` after each animal. Set False in notebooks to hold the figures.
+    qlearning_overlay : bool
+        Fit the three Q-learning variants and overlay their P(SHORT) trajectories on the
+        model-comparison figure (default True). Set False to skip the fits entirely -- the
+        figure and the printed output then match the pre-Q-learning behaviour.
 
     Returns
     -------
     dict
         Keyed by subjid. Each value holds ``tau``, ``global_tau``, ``tau_session``, ``hdi``,
-        ``hdi_width``, ``fwhm``, ``fwhm_width``, ``p1``, ``p2``, ``comparison``,
-        ``session_ends``, ``session_starts``, ``session_labels``, ``n_trials``, ``ab_split``,
-        ``prep``, and ``figures`` (``strategy``, ``model_comparison``, ``posterior``).
+        ``hdi_width``, ``fwhm``, ``fwhm_width``, ``p1``, ``p2``, ``comparison``, ``qlearning``
+        (the three variant fits, or None when the overlay is off), ``session_ends``,
+        ``session_starts``, ``session_labels``, ``n_trials``, ``ab_split``, ``prep``, and
+        ``figures`` (``strategy``, ``model_comparison``, ``posterior``).
 
         With ``split_ab=True`` that value is instead nested one level deeper, keyed by reward
         identity: ``results[subjid]["A"]`` and ``results[subjid]["B"]``.
@@ -256,17 +310,122 @@ def run_analysis(
                     print(f"[switchpoint] Subject {subjid}: {unresolved} trial(s) of "
                           f"{prep['n_trials']} have no reward identity; excluded from the split.")
                 splits = {letter: _analyse_sequence(subset_by_ab(prep, letter), rewarded_only,
-                                                    likelihood_window)
+                                                    likelihood_window, qlearning_overlay)
                           for letter in AB_LETTERS}
                 splits = {letter: r for letter, r in splits.items() if r is not None}
                 if splits:
                     results[subjid] = splits
             else:
-                result = _analyse_sequence(prep, rewarded_only, likelihood_window)
+                result = _analyse_sequence(prep, rewarded_only, likelihood_window,
+                                           qlearning_overlay)
                 if result is not None:
                     results[subjid] = result
             if show:
                 plt.show()  # per animal, so its figures stay grouped and ordered
+    return results
+
+
+# --- Q-learning parameter sweep (standalone) ----------------------------------------------
+#
+# The overlay in run_analysis shows only where each variant's likelihood peaked. This shows the
+# surrounding neighbourhood: what a Q-learner of that variant looks like across a grid of
+# learning rates and inverse temperatures, with everything else held at the ML fit. It is the
+# visual form of the argument the null is there to make -- alpha controls how fast P(SHORT)
+# rises and b how far it travels, so if no grid point produces a step, incremental value
+# learning cannot account for an abrupt switch however it is tuned.
+
+
+def _sweep_sequence(prep: dict, alphas: Sequence[float], bs: Sequence[float],
+                    n_starts: int, seed: int) -> Optional[dict]:
+    """Fit all three variants for one sequence and build one sweep figure per variant."""
+    label = subject_label(prep)
+    if prep["n_trials"] < 2:
+        print(f"[qsweep] {label}: {prep['n_trials']} kept trial(s); skipping.")
+        return None
+
+    fits = fit_qlearning_variants(prep["s"], n_starts=n_starts, seed=seed)
+    print(f"\n[qsweep] {label} ({prep['n_trials']} trials, {len(alphas)} x {len(bs)} "
+          f"(alpha, b) grid per variant)")
+    _print_qlearning_table(fits)
+
+    sweeps, figures = {}, {}
+    for variant in QLEARN_VARIANT_ORDER:
+        sweeps[variant] = qlearning_parameter_sweep(prep["s"], fits[variant], alphas, bs)
+        figures[variant] = plot_qlearning_sweep(prep, variant, fits[variant], sweeps[variant],
+                                                alphas, bs)
+        # The ML fit must be at least as good as any grid point of the same variant -- the grid
+        # lies inside the search space. A grid point beating it means the multi-start missed.
+        best_grid = min(point["nll"] for point in sweeps[variant])
+        if best_grid < fits[variant]["nll"] - _LOGLIK_REPORT_TOL:
+            print(f"  NOTE: {variant}: a grid point reached nll {best_grid:.3f} < the ML fit's "
+                  f"{fits[variant]['nll']:.3f} -- the multi-start missed the optimum.")
+
+    return {"fits": fits, "sweeps": sweeps, "alphas": tuple(alphas), "bs": tuple(bs),
+            "ab_split": prep.get("ab_split"), "prep": prep, "figures": figures}
+
+
+def run_qlearning_sweep(
+    subjids: Union[int, Iterable[int], dict],
+    date_ranges: Optional[dict] = None,
+    rewarded_only: bool = False,
+    split_ab: bool = False,
+    alphas: Sequence[float] = QLEARN_SWEEP_ALPHAS,
+    bs: Sequence[float] = QLEARN_SWEEP_BS,
+    n_starts: int = N_STARTS,
+    seed: int = 0,
+    show: bool = True,
+) -> dict:
+    """Draw one Q-learning ``(alpha, b)`` parameter-sweep figure per variant, per animal.
+
+    A **standalone** entry point -- ``run_analysis`` does not call it. Per animal (or per A/B
+    subset) it fits all three variants, prints their estimates, and produces **three figures**:
+    one per variant, each showing the binary trial data with the P(SHORT) trajectories of a
+    4 x 4 ``(alpha, b)`` grid overlaid and that variant's maximum-likelihood fit highlighted.
+    ``Q0`` (and ``kappa``) are held at their fitted values on every grid line, so the figure
+    isolates the two parameters that set the *shape* of the curve.
+
+    ``alpha`` is mapped to colour and ``b`` to linestyle, each with its own legend.
+
+    Parameters
+    ----------
+    subjids, date_ranges, rewarded_only, split_ab, show
+        As in ``run_analysis``. With ``split_ab`` the A- and B-reward trials are partitioned by
+        the same rule and each subset gets its own fits and its own three figures -- never a
+        pooled fit across the two.
+    alphas, bs : sequence of float
+        The sweep grid. Defaults are ``QLEARN_SWEEP_ALPHAS`` / ``QLEARN_SWEEP_BS`` (4 x 4);
+        more than four of either makes the linestyle/colour mapping unreadable.
+    n_starts : int
+        Random starting points per fit (>= 20; see ``fit_qlearning``).
+    seed : int
+        Seed for the multi-start draw, so the fits are reproducible.
+
+    Returns
+    -------
+    dict
+        Keyed by subjid (nested by ``"A"`` / ``"B"`` when ``split_ab``): ``fits`` (per variant),
+        ``sweeps`` (per variant, one entry per grid point with its ``nll`` and trajectory),
+        ``alphas``, ``bs``, ``ab_split``, ``prep``, and ``figures`` (keyed by variant).
+    """
+    subjids, date_ranges, dates_for = normalize_subjids_dates(subjids, date_ranges)
+    results = {}
+
+    with plt.rc_context(nature_style()):
+        for subjid in subjids:
+            prep = prepare_subject(subjid, dates_for(subjid), rewarded_only)
+            if split_ab:
+                splits = {letter: _sweep_sequence(subset_by_ab(prep, letter), alphas, bs,
+                                                  n_starts, seed)
+                          for letter in AB_LETTERS}
+                splits = {letter: r for letter, r in splits.items() if r is not None}
+                if splits:
+                    results[subjid] = splits
+            else:
+                result = _sweep_sequence(prep, alphas, bs, n_starts, seed)
+                if result is not None:
+                    results[subjid] = result
+            if show:
+                plt.show()
     return results
 
 
@@ -708,6 +867,20 @@ def main() -> int:
                           help="half-width in trials of the posterior plot window (default: 100)")
     analysis.add_argument("--split-ab", action="store_true",
                           help="fit and plot the A- and B-reward trials separately")
+    analysis.add_argument("--no-qlearning", action="store_true",
+                          help="skip the Q-learning null fits and their overlay on the "
+                               "model-comparison figure")
+
+    qsweep = subparsers.add_parser("qsweep",
+                                   help="Q-learning (alpha, b) parameter sweep, one figure per "
+                                        "variant (standalone)")
+    _add_shared_args(qsweep)
+    qsweep.add_argument("--split-ab", action="store_true",
+                        help="sweep the A- and B-reward trials separately")
+    qsweep.add_argument("--n-starts", type=int, default=N_STARTS,
+                        help=f"random starting points per fit, min 20 (default: {N_STARTS})")
+    qsweep.add_argument("--seed", type=int, default=0,
+                        help="RNG seed for the multi-start draw (default: 0)")
 
     diagnostic = subparsers.add_parser("diagnostic",
                                        help="logistic multi-start diagnostic (standalone)")
@@ -740,7 +913,12 @@ def main() -> int:
 
     if args.command == "analysis":
         run_analysis(subjids, date_ranges, rewarded_only=args.rewarded_only,
-                     likelihood_window=args.likelihood_window, split_ab=args.split_ab, show=True)
+                     likelihood_window=args.likelihood_window, split_ab=args.split_ab, show=True,
+                     qlearning_overlay=not args.no_qlearning)
+    elif args.command == "qsweep":
+        run_qlearning_sweep(subjids, date_ranges, rewarded_only=args.rewarded_only,
+                            split_ab=args.split_ab, n_starts=args.n_starts, seed=args.seed,
+                            show=True)
     elif args.command == "diagnostic":
         run_logistic_diagnostic(subjids, date_ranges, rewarded_only=args.rewarded_only,
                                 split_ab=args.split_ab, show=True)

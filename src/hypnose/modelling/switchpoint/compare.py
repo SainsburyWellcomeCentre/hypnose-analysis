@@ -19,11 +19,13 @@ from hypnose.modelling.switchpoint.switch import (
     fit_switchpoint,
     logistic_p,
 )
-from hypnose.modelling.switchpoint.qlearning import fit_qlearning
+from hypnose.modelling.switchpoint.qlearning import QLEARN_DEFAULT_VARIANT, fit_qlearning
 
 # Models in increasing flexibility, for tables, plots and the printed logliks. The nesting
 # relations constant <= switch and switch <= logistic should hold along it; switch2 is a
 # monotone-gated (p1 <= p2 <= p3) special case that need not nest the single switch.
+# ``qlearning`` is not part of that chain at all -- it is the mechanistic null, scored on the
+# same per-trial choices so its AIC / BIC are directly comparable.
 MODEL_ORDER = ("constant", "switch", "logistic", "switch2", "qlearning")
 
 __all__ = ["compare_models", "model_fitted_p", "MODEL_ORDER"]
@@ -33,10 +35,17 @@ def compare_models(s: Sequence[int] | np.ndarray) -> dict:
     """Fit all five models and score them with AIC and BIC (lower is better).
 
     The models, in increasing flexibility: ``constant`` (k=1), ``switch`` (k=3), ``logistic``
-    (k=4), ``switch2`` (k=5), and ``qlearning`` (a stub -- see ``fit_qlearning``). Two nesting
-    relations hold and are worth checking on any real fit: ``constant <= switch`` and
-    ``switch <= logistic`` in loglik. ``switch2`` is monotone-gated (``p1 <= p2 <= p3``), so
-    it does *not* nest the single switch and may be ``-inf`` when no monotone split exists.
+    (k=4), ``switch2`` (k=5), and ``qlearning``. Two nesting relations hold and are worth
+    checking on any real fit: ``constant <= switch`` and ``switch <= logistic`` in loglik.
+    ``switch2`` is monotone-gated (``p1 <= p2 <= p3``), so it does *not* nest the single switch
+    and may be ``-inf`` when no monotone split exists.
+
+    ``qlearning`` is the mechanistic null, fitted as ``QLEARN_DEFAULT_VARIANT`` -- the most
+    flexible of the three variants, so the null is scored at its strongest and its ``k`` is
+    that variant's. It nests nothing here, and it winning would be a *finding*: it would mean
+    the rise in P(SHORT) is as well described by incremental value learning as by a step. The
+    other variants are fitted separately by ``fit_qlearning_variants`` and overlaid on the
+    model-comparison figure, rather than charged a row of this table each.
 
     ``AIC = 2k - 2 * loglik`` and ``BIC = k * ln(n) - 2 * loglik``. BIC penalizes the extra
     parameters harder, so it is the stricter test of "there really was a switch".
@@ -77,8 +86,12 @@ def model_fitted_p(name: str, fit: dict, n: int) -> Optional[np.ndarray]:
     """Per-trial fitted P(SHORT) of a fitted model over the continuous ``0..n-1`` trial axis.
 
     Rebuilds the step / curve each model implies at every trial, matching exactly the shapes
-    the model-comparison plot draws. Returns ``None`` for a model with no per-trial curve (the
-    unimplemented ``qlearning`` stub), so a caller can skip it.
+    the model-comparison plot draws. Returns ``None`` for a model with no per-trial curve, so a
+    caller can skip it.
+
+    ``qlearning`` is the one model whose curve is not a function of the trial index: it is
+    driven by the animal's own choice history, so it exists only on the trials that were
+    actually fitted and is returned as stored rather than re-evaluated on ``x``.
     """
     x = np.arange(n)
     if name == "constant":
@@ -92,4 +105,7 @@ def model_fitted_p(name: str, fit: dict, n: int) -> Optional[np.ndarray]:
         return p
     if name == "logistic":
         return logistic_p(x.astype(float), fit["midpoint"], fit["slope"], fit["lo"], fit["hi"])
+    if name == "qlearning":
+        p = np.asarray(fit.get("p_short", ()), dtype=float)
+        return p if p.size == n else None
     return None

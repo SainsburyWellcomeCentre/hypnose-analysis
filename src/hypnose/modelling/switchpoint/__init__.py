@@ -4,7 +4,7 @@ The subsystem's numeric core, one module per role:
 
 - ``data``        -- build the continuous SHORT/LONG sequence for an animal.
 - ``switch``      -- the switch-point model family (constant / switch / switch2 / logistic).
-- ``qlearning``   -- the mechanistic Q-learning account (stub).
+- ``qlearning``   -- the mechanistic Q-learning account: the null to be rejected.
 - ``compare``     -- fit all models and score them with AIC / BIC.
 - ``permutation`` -- the sleep-alignment permutation test.
 - ``autocorr``    -- residual-autocorrelation check for the bootstrap's i.i.d. assumption.
@@ -38,7 +38,22 @@ from hypnose.modelling.switchpoint.switch import (
     switchpoint_loglik_profile,
     switchpoint_posterior,
 )
-from hypnose.modelling.switchpoint.qlearning import fit_qlearning
+from hypnose.modelling.switchpoint.qlearning import (
+    N_STARTS,
+    QLEARN_DEFAULT_VARIANT,
+    QLEARN_SWEEP_ALPHAS,
+    QLEARN_SWEEP_BS,
+    QLEARN_VARIANTS,
+    QLEARN_VARIANT_ORDER,
+    R_LONG,
+    R_SHORT,
+    fit_qlearning,
+    fit_qlearning_variants,
+    qlearning_nll,
+    qlearning_parameter_sweep,
+    qlearning_trajectory,
+    simulate_qlearning,
+)
 from hypnose.modelling.switchpoint.compare import MODEL_ORDER, compare_models, model_fitted_p
 from hypnose.modelling.switchpoint.permutation import (
     distance_to_session_start,
@@ -61,8 +76,11 @@ __all__ = [
     "fit_logistic_multistart", "fit_switch2", "fit_switchpoint", "logistic_p",
     "logistic_start_points", "posterior_fwhm", "posterior_hdi", "switchpoint_loglik_profile",
     "switchpoint_posterior",
-    # qlearning
-    "fit_qlearning",
+    # qlearning (the mechanistic null)
+    "N_STARTS", "QLEARN_DEFAULT_VARIANT", "QLEARN_SWEEP_ALPHAS", "QLEARN_SWEEP_BS",
+    "QLEARN_VARIANTS", "QLEARN_VARIANT_ORDER", "R_LONG", "R_SHORT", "fit_qlearning",
+    "fit_qlearning_variants", "qlearning_nll", "qlearning_parameter_sweep",
+    "qlearning_trajectory", "simulate_qlearning",
     # comparison
     "MODEL_ORDER", "compare_models", "model_fitted_p",
     # permutation test

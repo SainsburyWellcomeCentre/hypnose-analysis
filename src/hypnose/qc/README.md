@@ -11,6 +11,7 @@ read-only `rawdata` and redirect all derivatives I/O to a throwaway temp dir
 | [`regression.py`](regression.py) | Golden-master value check: `trial_data` + metrics vs stored fixtures |
 | [`verify_scripts.py`](verify_scripts.py) | Same, but through the actual `scripts/` CLIs (covers arg wiring) |
 | [`check_imports.py`](check_imports.py) | Static check: flag any referenced global that isn't imported |
+| [`check_qlearning.py`](check_qlearning.py) | Structural self-check of the Q-learning null model — **synthetic data only, no mount needed** |
 | [`validate.py`](validate.py) | `validate_subject()` — pre-flight data-existence check used by the scripts |
 
 ## What `regression.py` checks
@@ -53,6 +54,30 @@ the report say exactly *what* changed:
 ```
 
 Run `verify_scripts.py` and `check_imports.py` as additional gates the same way.
+
+## `check_qlearning.py` — the odd one out
+
+Unlike the tools above it reads **no data at all**: it generates every sequence it uses, so it
+runs anywhere, including with the mount disconnected. It is not a golden master either — there
+is nothing to regenerate. It asserts the *structural* properties of
+`hypnose.modelling.switchpoint.qlearning`, the things that must hold of the model whichever
+animal it is fitted to, and that a plausible-looking fit would hide if they broke:
+
+1. the closed-form value recursion equals the trial-by-trial simulation exactly;
+2. parameters are recovered from simulated data — in the regime where they are identifiable,
+   with the fast-learner regime asserted on the trajectory only, and *not* on `alpha`;
+3. `qlearn_constrained` cannot hold P(SHORT) below 0.5 in steady state, and `qlearn_free` can;
+4. the reward scale is unidentifiable (rewards `(1, 0)` and `(1, 1−d)` with `b` scaled by
+   `1/d` give the same nll — pointwise, at the ML fit, and at an independent refit's optimum);
+5. `kappa = 0` reduces the perseveration variant to `qlearn_free`, which it nests.
+
+```
+python src/hypnose/qc/check_qlearning.py            # exit 0 = PASS, 1 = FAIL
+python src/hypnose/qc/check_qlearning.py --seed 7   # a different synthetic draw
+```
+
+Tolerances are the worst case over 10 synthetic seeds per setting, with headroom; tightening
+them makes the check flaky rather than stricter.
 
 ## Adding / removing sessions
 

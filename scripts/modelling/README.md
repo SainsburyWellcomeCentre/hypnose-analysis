@@ -49,7 +49,7 @@ Colours are fixed: **A = `#E53935`** (red), **B = `#00796B`** (teal), unresolved
 | `switch` | `p1` if `i < tau` else `p2` | 3 | One abrupt change at trial `tau` |
 | `logistic` | `lo + (hi - lo) · sigmoid(slope · (i - midpoint))` | 4 | A graded change |
 | `switch2` | `p1` \| `p2` \| `p3` split by `tau1 < tau2`, gated `p1 ≤ p2 ≤ p3` | 5 | A change arriving in two stages (non-decreasing) |
-| `qlearning` | — | 2 | **Not implemented** (stub); scored `-inf`, so it never wins |
+| `qlearning` | `sigmoid(b · (Q_short − Q_long) + kappa · s_prev)`, values updated per trial | 5 | The **mechanistic null**: a gradual rise derived from value learning |
 
 `tau` is the index of the **first trial of the post-switch regime** (so `1 ≤ tau ≤ n-1`; a
 switch at 0 is just the constant model). The primary hypothesis is one directional switch,
@@ -58,11 +58,71 @@ switch at 0 is just the constant model). The primary hypothesis is one direction
 `switch2` maximizes **exhaustively** over all ordered pairs `tau1 < tau2`
 
 
-#### `qlearning` (planned)
-
 The `logistic` model **nests** the `switch` model as `slope → ∞`, which is what makes
 `slope` a direct read-out of **abruptness**: a large fitted slope is a step, a small one is
 a slow drift.
+
+#### `qlearning` — the null to be rejected
+
+The other four models *describe* the P(SHORT) curve. This one *derives* it, from a
+trial-by-trial value update, and its job is adversarial: incremental reinforcement learning
+produces a **gradual** rise whose steepness is set by the learning rate, so if a Q-learner
+fits an animal as well as the step does, the "sudden strategy switch" reading is not
+supported. It is therefore fitted at its best (multi-start, below) — a strawmanned null that
+loses proves nothing.
+
+Two options with **fixed** rewards `r_short = 1`, `r_long = 0`. Only the chosen option
+updates, `Q[chosen] += alpha · (r[chosen] − Q[chosen])`, and the choice rule is
+
+```
+P(SHORT at t) = sigmoid(b · (Q_short − Q_long) + kappa · s_prev)
+```
+
+with `s_prev` = +1 after a SHORT trial, −1 after a LONG one, 0 at the first trial. Each
+trial's probability uses the values held **before** that trial's update.
+
+Fixing the rewards is a **choice of units, not a claim that LONG is unrewarded** — both routes
+are rewarded, and the sequence is already conditioned on reward. The true reward advantage `d`
+is *unidentifiable* from choice data: it enters only as the product `b · d`, so the fitted
+inverse temperature absorbs it. Writing the rewards as `(1, 1−d)`, scaling `b` by `1/d` and
+mapping `Q0 → d·Q0 + (1−d)` gives the identical likelihood. Fitting `d` would add a flat
+direction to the surface, not information. (Asserted numerically in `check_qlearning.py`.)
+
+Three variants, all sharing `alpha ∈ [1e-4, 1]` and `b ∈ [1e-3, 50]`:
+
+| Variant | Free params | `Q0` bounds | Meaning |
+| --- | --- | --- | --- |
+| `qlearn_free` | alpha, b, Q0_short, Q0_long | `[-10, 10]` | May start outside the experienceable range |
+| `qlearn_constrained` | alpha, b, Q0_short, Q0_long | `[0, 1]` | Initial values lie within the range of experienceable outcomes |
+| `qlearn_perseveration` | + kappa | `[-10, 10]`, kappa `[-10, 10]` | Plus a choice-history (stickiness) term |
+
+**The constrained variant has a structural floor.** `Q_long` decays to 0 within ~`1/alpha`
+LONG choices, and `Q0_short ≥ 0` keeps `Q_short ≥ 0`, so once that decay has happened the
+softmax argument cannot be negative: `qlearn_constrained` **cannot hold P(SHORT) below 0.5 in
+steady state**. An animal that ends up below chance for SHORT is outside what this variant can
+describe at all, and its fit will pin against the bounds (watch for the `boundary` tag).
+
+Fitted per animal, or per A/B subset — **never pooled**. Averaging animals that switched at
+different trials manufactures a gradual curve out of abrupt ones, i.e. it fabricates the very
+thing the null is being used to test, so an aggregate input raises rather than being fitted.
+
+Multi-start is **not optional**: `alpha` and `Q0` trade off (a small `alpha` with an extreme
+`Q0` mimics a large `alpha` with a moderate one), so the surface has more than one basin.
+`fit_qlearning` runs `L-BFGS-B` from 32 points drawn uniformly inside the bounds and keeps the
+best, reporting `n_starts_converged` and a `boundary_hit` flag for any estimate that stopped
+within 1% of a bound — that number is an edge-of-space artefact, not an estimate.
+
+`compare_models` scores `QLEARN_DEFAULT_VARIANT` — currently `qlearn_perseveration`, the most
+flexible of the three, so the null is scored at its strongest — as the `qlearning` row; the
+other two are fitted alongside by `fit_qlearning_variants` and overlaid on the model-comparison
+figure rather than charged a row of the table each. Change the default in one place,
+`qlearning.py`, and the table and its `k` follow.
+
+**A caveat on reading a fitted `alpha`.** When learning is fast the transition is over within
+a few dozen trials, so `alpha` is estimated from that handful and trades off freely against
+`Q0`: the *trajectory* is recovered but the *rate* is not. `check_qlearning.py` asserts both
+regimes explicitly. Do not read a fitted `alpha` as a learning rate without checking that the
+transition it implies spans enough trials to constrain it.
 
 ### How the logistic is fitted (multi-start)
 
@@ -114,8 +174,9 @@ abrupt change.
 `AIC = 2k − 2·loglik` and `BIC = k·ln(n) − 2·loglik`; lower is better. BIC penalizes the
 extra parameters harder, so it is the stricter test that a switch happened at all. Reading
 the winner: `constant` → no switch; `switch` → one abrupt change; `logistic` → gradual;
-`switch2` → two changes (an overshoot, or a change in two stages). `qlearning` is scored but,
-being a stub, is never eligible to win. Read the caveat above before leaning on a narrow win.
+`switch2` → two changes (an overshoot, or a change in two stages); `qlearning` → the rise is
+as well accounted for by incremental value learning as by a step, i.e. the null survives. Read
+the caveat above before leaning on a narrow win.
 
 ### The sleep test (`run_permutation`)
 
@@ -170,11 +231,11 @@ Only animals that actually switched are included. The rule is the `inclusion` pa
 
 ## Entry points
 
-Both are importable from a notebook and runnable from the terminal, and neither depends on
-the other having run. They select their own subjects and recompute their own fits.
+All are importable from a notebook and runnable from the terminal, and none depends on another
+having run. They select their own subjects and recompute their own fits.
 
 ```python
-from switchpoint_analysis import run_analysis, run_permutation
+from switchpoint_analysis import run_analysis, run_qlearning_sweep, run_permutation
 
 results = run_analysis(
     subjids=[40, 45],
@@ -183,11 +244,22 @@ results = run_analysis(
     likelihood_window=100,
     split_ab=False,      # True -> fit and plot the A- and B-reward trials separately
     show=False,          # keep the figures rather than displaying them
+    qlearning_overlay=True,  # fit the Q-learning null and overlay it (default; False to skip)
 )
 results[40]["tau"], results[40]["hdi_width"], results[40]["figures"]["posterior"]
+results[40]["qlearning"]["qlearn_free"]["alpha"]   # the three variant fits, or None if skipped
 
 # with split_ab=True the per-subject value is nested by reward identity:
 #   results[40]["A"]["tau"], results[40]["B"]["figures"]["strategy"]
+
+sweeps = run_qlearning_sweep(       # standalone; three figures per animal, one per variant
+    subjids=[40],
+    date_ranges={40: None},
+    rewarded_only=True,
+    split_ab=True,
+    show=False,
+)
+sweeps[40]["A"]["figures"]["qlearn_free"]
 
 perm = run_permutation(
     subjids=[40, 45, 48, 50],       # may be a different set of animals
@@ -218,6 +290,15 @@ interleaving with another's. **SHORT is the lower row, LONG the upper row** in t
    five-row AIC/BIC table in-panel with the BIC winner marked, so *no switch / abrupt /
    gradual / two-stage* can be read off directly. The printed table adds each model's loglik,
    the nesting check, and the winner's fitted parameters.
+
+   Unless `qlearning_overlay=False`, the three Q-learning variants are also drawn here, as
+   **dash-dot curves labelled `(null)`** in the legend — one colour each, annotated with their
+   `alpha`, `b` and BIC, and tagged `[bound]` when an estimate stopped against a bound. They
+   are the mechanistic null: they should visibly fail to reproduce the step. A second printed
+   table gives all three variants' estimates, nll, AIC/BIC and start-convergence counts.
+   Unlike the descriptive curves these are **not functions of the trial index** — they are
+   driven by the animal's own choice history, so they look step-like wherever its run of
+   choices was one-sided.
 3. **Posterior** — the switch-point posterior over *all* trials, plotted windowed to
    ±`likelihood_window` trials around its peak. `tau`, its session, and the HDI width are
    printed and annotated (HDI primary, FWHM secondary).
@@ -237,7 +318,34 @@ This matters when an animal adopts the SHORT strategy for one reward before the 
 (20251212), a four-day gap the pooled fit averages away.
 
 Returns a dict keyed by subjid holding `tau`, `tau_session`, `hdi`, `hdi_width`, `fwhm`,
-`p1`, `p2`, `comparison`, `session_ends`, `session_starts`, and the `figures`.
+`p1`, `p2`, `comparison`, `qlearning`, `session_ends`, `session_starts`, and the `figures`.
+
+### `run_qlearning_sweep` — what can a Q-learner actually look like?
+
+A **standalone** entry point; `run_analysis` does not call it. The overlay above shows only
+where each variant's likelihood peaked; this shows the surrounding neighbourhood. Per animal
+(or per A/B subset) it produces **three figures, one per variant**, each showing the binary
+trial data with the P(SHORT) trajectories of a 4 × 4 `(alpha, b)` grid overlaid — `alpha` mapped
+to colour, `b` to linestyle, each with its own legend — and that variant's maximum-likelihood
+fit drawn thick and black on top. `Q0` (and `kappa`) are held at their fitted values on every
+grid line, so the figure isolates the two parameters that set the *shape* of the curve:
+**`alpha` sets how fast P(SHORT) rises, `b` how far it travels.**
+
+That is the visual form of the argument the null exists to make. If no point on the grid
+produces a step, incremental value learning cannot account for an abrupt switch however it is
+tuned.
+
+```python
+from switchpoint_analysis import run_qlearning_sweep
+
+sweeps = run_qlearning_sweep([40], {40: None}, rewarded_only=True, split_ab=True, show=False)
+sweeps[40]["A"]["figures"]["qlearn_constrained"]     # a Figure per variant
+sweeps[40]["A"]["fits"]["qlearn_constrained"]["bic"]
+sweeps[40]["A"]["sweeps"]["qlearn_constrained"][0]   # {alpha, b, i_alpha, i_b, nll, p_short}
+```
+
+Each grid point's `nll` is kept, and a grid point beating the ML fit is reported as an
+optimization failure — the grid lies inside the search space, so it cannot legitimately win.
 
 ### `run_logistic_diagnostic` — is the logistic fit trustworthy?
 
@@ -291,6 +399,12 @@ python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 45 \
 python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 \
     --date-range 20251125 20251231 --rewarded-only --split-ab
 
+# skip the Q-learning null fits (restores the pre-Q-learning figure and printout)
+python scripts/modelling/switchpoint_analysis.py analysis --subjids 40 --no-qlearning
+
+# Q-learning (alpha, b) parameter sweep -- three figures per animal, one per variant
+python scripts/modelling/switchpoint_analysis.py qsweep --subjids 40 --rewarded-only --split-ab
+
 # where does each logistic multi-start initial condition converge?
 python scripts/modelling/switchpoint_analysis.py diagnostic --subjids 40 --rewarded-only --split-ab
 
@@ -312,11 +426,13 @@ python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 45 48 
 | `--date-range START END` | all | Inclusive `YYYYMMDD` range (alternative to `--dates`). |
 | `--rewarded-only` | all | Keep only rewarded trials; aborts are always dropped. |
 | `--likelihood-window N` | `analysis` | Half-width of the posterior plot window (default 100). |
-| `--split-ab` | `analysis`, `diagnostic`, `autocorr` | Fit and plot the A- and B-reward trials separately. |
+| `--split-ab` | `analysis`, `qsweep`, `diagnostic`, `autocorr` | Fit and plot the A- and B-reward trials separately. |
+| `--no-qlearning` | `analysis` | Skip the Q-learning null fits and their overlay. |
+| `--n-starts N` | `qsweep` | Random starting points per Q-learning fit, min 20 (default 32). |
 | `--max-lag N` | `autocorr` | Largest lag reported, clamped to n-1 (default 50). |
 | `--inclusion RULE` | `permutation` | Which animals count as having switched (default `bic_switch_wins`). |
 | `--n-permutations N` | `permutation` | Permutations drawn for the null (default 10000). |
-| `--seed N` | `permutation` | RNG seed for a reproducible null (default 0). |
+| `--seed N` | `qsweep`, `permutation` | RNG seed for a reproducible multi-start / null (default 0). |
 
 `--dates` and `--date-range` are mutually exclusive; omit both for all dates. The CLI applies
 one date range to every subject — for per-subject ranges, call the functions directly.

@@ -7,7 +7,7 @@ numpy arrays and plain dicts out. No file I/O, no plotting, no pandas, no path h
 This module holds the descriptive switch-point family and its Bernoulli primitives. The
 sibling models and the machinery that scores them live alongside it:
 
-- ``qlearning.py``   -- the mechanistic Q-learning account (currently a stub).
+- ``qlearning.py``   -- the mechanistic Q-learning account: the null to be rejected.
 - ``compare.py``     -- ``compare_models`` (AIC/BIC over every model) and the per-trial
   fitted-P reconstruction.
 - ``permutation.py`` -- ``distance_to_session_start`` and the sleep-alignment test.

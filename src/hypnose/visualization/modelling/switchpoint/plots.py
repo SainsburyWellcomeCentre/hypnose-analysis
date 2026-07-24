@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from hypnose.modelling.switchpoint.data import subject_label
 from hypnose.modelling.switchpoint.switch import logistic_p
 from hypnose.modelling.switchpoint.compare import MODEL_ORDER
+from hypnose.modelling.switchpoint.qlearning import QLEARN_VARIANT_ORDER
 
 # --- style constants ----------------------------------------------------------------------
 _SESSION_LINE_COLOR = "tab:blue"
@@ -25,6 +26,19 @@ _SWITCH_COLOR = "#E64B35"
 _SWITCH2_COLOR = "#8491B4"
 _LOGISTIC_COLOR = "#00A087"
 _DATA_COLOR = "#2b2b2b"
+
+# Q-learning null: one colour per variant, all drawn dash-dot so the mechanistic null reads as
+# one family against the descriptive models' solid / dashed / dotted lines.
+_QLEARN_COLORS = {"qlearn_free": "#7E6148", "qlearn_constrained": "#F39B7F",
+                  "qlearn_perseveration": "#4DBBD5"}
+_QLEARN_LINESTYLE = (0, (5, 1.5, 1, 1.5))
+_QLEARN_SHORT_LABELS = {"qlearn_free": "Q free", "qlearn_constrained": "Q constr",
+                        "qlearn_perseveration": "Q persev"}
+
+# Parameter-sweep figure: alpha is mapped to colour (a sequential map, since alpha is ordered)
+# and b to linestyle, so a line's two coordinates are readable without a 16-entry legend.
+_SWEEP_CMAP = "viridis"
+_SWEEP_LINESTYLES = ("-", "--", "-.", ":")
 
 # Reward-identity colours. Trials whose identity cannot be resolved are drawn in grey.
 _AB_COLORS = {"A": "#E53935", "B": "#00796B"}
@@ -43,6 +57,7 @@ __all__ = [
     "plot_posterior",
     "plot_model_comparison",
     "plot_multistart",
+    "plot_qlearning_sweep",
     "plot_residual_autocorr",
     "plot_permutation",
 ]
@@ -125,12 +140,42 @@ def plot_posterior(prep: dict, fit: dict, likelihood_window: int):
     return fig
 
 
-def plot_model_comparison(prep: dict, comparison: dict):
+def _qlearn_label(variant: str, fit: dict) -> str:
+    """Legend entry for one fitted Q-learning variant: its two shape parameters and its BIC."""
+    kappa = f", k={fit['kappa']:.2f}" if variant == "qlearn_perseveration" else ""
+    flag = " [bound]" if fit.get("boundary_hit") else ""
+    return (f"{_QLEARN_SHORT_LABELS[variant]} (null): a={fit['alpha']:.3g}, "
+            f"b={fit['b']:.3g}{kappa}, BIC {fit['bic']:.0f}{flag}")
+
+
+def _overlay_qlearning(ax, x: np.ndarray, qlearning_fits: dict) -> None:
+    """Draw each fitted Q-learning variant's P(SHORT) trajectory over the data.
+
+    Unlike the descriptive curves these are not functions of the trial index -- they are driven
+    by the animal's own choice history -- so they are plotted on the fitted trials only and are
+    step-like wherever the animal's run of choices was one-sided.
+    """
+    for variant in QLEARN_VARIANT_ORDER:
+        fit = qlearning_fits.get(variant)
+        p = np.asarray(fit["p_short"], dtype=float) if fit else np.zeros(0)
+        if p.size != x.size:  # degenerate / missing fit: nothing to draw
+            continue
+        ax.plot(x, p, color=_QLEARN_COLORS[variant], linewidth=1.1,
+                linestyle=_QLEARN_LINESTYLE, alpha=0.8, zorder=8,
+                label=_qlearn_label(variant, fit))
+
+
+def plot_model_comparison(prep: dict, comparison: dict, qlearning_fits: dict | None = None):
     """Overlay every fitted model on the data, with the five-row AIC/BIC table in-panel.
 
     SHORT is the lower row, matching the strategy plot: the y axis is inverted, so the fitted
-    P(SHORT) curves rise downward. Unimplemented models (``qlearning``) appear in the table
-    but have no curve to draw.
+    P(SHORT) curves rise downward.
+
+    ``qlearning_fits`` (as returned by ``fit_qlearning_variants``) additionally overlays the
+    three Q-learning variants -- the mechanistic null -- as dash-dot curves, one colour each,
+    labelled "(null)" in the legend to keep them visually apart from the descriptive models.
+    Pass ``None`` to omit them; the table row for the ``qlearning`` entry of ``comparison`` is
+    drawn either way.
     """
     s, x, n = prep["s"], prep["trial_ids"], prep["n_trials"]
     constant, switch, switch2, logistic = (comparison["fits"][m] for m in
@@ -158,6 +203,8 @@ def plot_model_comparison(prep: dict, comparison: dict):
             color=_LOGISTIC_COLOR, linewidth=1.8, linestyle="--", zorder=7,
             label=f"Logistic: slope = {logistic['slope']:.3f} "
                   f"(start {logistic.get('start_label', '?')})")
+    if qlearning_fits:
+        _overlay_qlearning(ax, x, qlearning_fits)
     _mark_sessions(ax, prep["session_ends"])
 
     best_bic = comparison["best_bic"]
@@ -182,7 +229,7 @@ def plot_model_comparison(prep: dict, comparison: dict):
     ax.set_xlabel("Trial (continuous across sessions)")
     ax.set_ylabel("P(SHORT)")
     ax.set_title(f"{subject_label(prep)} - model comparison")
-    ax.legend(loc="upper right", fontsize=7, ncol=2)
+    ax.legend(loc="upper right", fontsize=6.5 if qlearning_fits else 7, ncol=2)
     fig.tight_layout()
     return fig
 
@@ -237,6 +284,69 @@ def plot_multistart(prep: dict, fits: list[dict], best: int, warm: int):
                  f"({len(fits)} initial conditions)")
     ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1.0), fontsize=6, frameon=False)
     fig.tight_layout()
+    return fig
+
+
+def plot_qlearning_sweep(prep: dict, variant: str, fit: dict, sweep: list[dict],
+                         alphas, bs):
+    """One Q-learning variant's ``(alpha, b)`` parameter sweep over the binary trial data.
+
+    Every line is the P(SHORT) trajectory of the same variant with ``Q0`` (and ``kappa``) held
+    at their maximum-likelihood values and only ``alpha`` and ``b`` varied over the grid, so the
+    figure shows what those two parameters can and cannot make a Q-learner do: **alpha sets how
+    fast the curve rises, b how far it travels**. If no combination reaches a step, the null
+    cannot describe an abrupt switch, which is the point of drawing it.
+
+    ``alpha`` maps to colour (a sequential map, since alpha is ordered) and ``b`` to linestyle,
+    each with its own compact legend -- 16 individually labelled lines would be unreadable. The
+    maximum-likelihood fit is drawn thick and black on top.
+    """
+    s, x, n = prep["s"], prep["trial_ids"], prep["n_trials"]
+    colors = plt.get_cmap(_SWEEP_CMAP)(np.linspace(0.05, 0.9, max(len(alphas), 2)))
+
+    fig, ax = plt.subplots(figsize=(12, 4.6))
+    ax.plot(x, s, marker="|", linestyle="none", markersize=6, color=_DATA_COLOR, alpha=0.30,
+            zorder=2)
+    roll_x, roll_y = _rolling_mean(s)
+    if roll_x.size:
+        ax.plot(roll_x, roll_y, color="#999999", linewidth=1.0, zorder=3,
+                label=f"Empirical P(SHORT), {_ROLLING_WINDOW}-trial mean")
+
+    for point in sweep:
+        ax.plot(x, point["p_short"], color=colors[point["i_alpha"]],
+                linestyle=_SWEEP_LINESTYLES[point["i_b"] % len(_SWEEP_LINESTYLES)],
+                linewidth=1.0, alpha=0.85, zorder=4)
+    ml, = ax.plot(x, fit["p_short"], color=_DATA_COLOR, linewidth=2.4, zorder=8,
+                  label=f"ML fit\na={fit['alpha']:.3g}, b={fit['b']:.3g}\nnll={fit['nll']:.1f}")
+    _mark_sessions(ax, prep["session_ends"], label=False)
+
+    # Two proxy legends: one for the alpha colours, one for the b linestyles. Neither draws
+    # data -- they only decode the 4 x 4 grid.
+    alpha_handles = [plt.Line2D([], [], color=colors[i], linewidth=1.6, label=f"alpha = {a:g}")
+                     for i, a in enumerate(alphas)]
+    b_handles = [plt.Line2D([], [], color="#666666", linewidth=1.4,
+                            linestyle=_SWEEP_LINESTYLES[i % len(_SWEEP_LINESTYLES)],
+                            label=f"b = {b:g}") for i, b in enumerate(bs)]
+    first = ax.legend(handles=[ml, *alpha_handles], loc="upper left", bbox_to_anchor=(1.02, 1.0),
+                      fontsize=7, frameon=False, title="alpha: learning rate", title_fontsize=7)
+    ax.add_artist(first)
+    ax.legend(handles=b_handles, loc="upper left", bbox_to_anchor=(1.02, 0.42), fontsize=7,
+              frameon=False, title="b: inverse temp.", title_fontsize=7)
+
+    ax.set_ylim(1.45, -0.35)  # inverted: SHORT on the lower row, LONG on the upper row
+    ax.set_xlim(-1, max(n, 1))
+    ax.set_yticks([0, 1])
+    ax.set_yticklabels(["LONG", "SHORT"])
+    ax.set_xlabel("Trial (continuous across sessions)")
+    ax.set_ylabel("P(SHORT)")
+    held = (f"Q0 = ({fit['q0_short']:.2f}, {fit['q0_long']:.2f})"
+            + (f", kappa = {fit['kappa']:.2f}" if variant == "qlearn_perseveration" else ""))
+    ax.set_title(f"{subject_label(prep)} - {variant} parameter sweep "
+                 f"({len(alphas)} x {len(bs)} grid; {held} held at ML)")
+    fig.tight_layout()
+    # tight_layout sizes the axes without seeing the two out-of-axes legends, so their titles
+    # would be clipped; reserve the right margin for them explicitly afterwards.
+    fig.subplots_adjust(right=0.83)
     return fig
 
 
