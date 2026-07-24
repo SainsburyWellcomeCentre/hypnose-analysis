@@ -782,14 +782,18 @@ def get_experiment_parameters(root):
             return None
         return None
 
-    # Get sampleOffsetTime from SessionSettings (handle nested metadata DotMaps)
-    session_meta = session_settings.iloc[0]['metadata']
-    sample_offset_time = _coerce_to_float(getattr(session_meta, 'sampleOffsetTime', None))
+    # sampleOffsetTime lives per-segment in the Schema (newer sessions); detect_settings
+    # resolves it and falls back to the legacy SessionSettings location for older sessions.
+    sample_offset_time = _coerce_to_float(session_schema.get('sampleOffsetTime'))
     if sample_offset_time is None:
-        nested_meta = getattr(session_meta, 'metadata', None)
-        sample_offset_time = _coerce_to_float(getattr(nested_meta, 'sampleOffsetTime', None)) if nested_meta else None
+        # Last-resort direct read of SessionSettings (handles nested metadata DotMaps)
+        session_meta = session_settings.iloc[0]['metadata']
+        sample_offset_time = _coerce_to_float(getattr(session_meta, 'sampleOffsetTime', None))
+        if sample_offset_time is None:
+            nested_meta = getattr(session_meta, 'metadata', None)
+            sample_offset_time = _coerce_to_float(getattr(nested_meta, 'sampleOffsetTime', None)) if nested_meta else None
     if sample_offset_time is None:
-        raise ValueError("sampleOffsetTime missing or invalid in SessionSettings metadata")
+        raise ValueError("sampleOffsetTime missing or invalid in Schema sequences and SessionSettings metadata")
 
     # Get per-odor minimumSamplingTime dict and ensure scalar values
     raw_minimums = session_schema.get('minimumSamplingTime_by_odor', {}) or {}

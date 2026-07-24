@@ -13,6 +13,40 @@ from functools import reduce
 from collections import defaultdict
 from itertools import product
 
+def _to_float(value):
+    """Return value as float, or None if it is missing/not numeric.
+
+    DotMap returns an empty DotMap (not None) for missing attributes, so plain
+    `is not None` checks are not enough to detect an absent setting.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _first_segment_value(sequences_obj, key):
+    """First non-None value of `key` across every segment of the sequences tree."""
+    if not sequences_obj:
+        return None
+    try:
+        for block in sequences_obj:
+            segs = block if isinstance(block, list) else [block]
+            for seg in segs:
+                if not hasattr(seg, 'get'):
+                    continue
+                value = seg.get(key)
+                if _to_float(value) is not None:
+                    return value
+    except Exception:
+        pass
+    return None
+
+
 def detect_settings(root):
     """
     Handles structure of settings and schema files.
@@ -32,8 +66,9 @@ def detect_settings(root):
     minimumSamplingTime_by_odor = {}
     completionRequiresEngagement = None
     responseTime = None
+    sampleOffsetTime = None
     sequences_obj = None
-    
+
     if not hasattr(metadata, 'sequences') or (hasattr(metadata, 'sequences') and not metadata.sequences):
         # Separate Schema files case
         sequence_schema = utils.load_json(metadata_reader, path_root/"Schema")
@@ -49,9 +84,20 @@ def detect_settings(root):
         if first_segment:
             completionRequiresEngagement = first_segment.get('completionRequiresEngagement')
             responseTime = first_segment.get('responseTime')
+            sampleOffsetTime = first_segment.get('sampleOffsetTime')
     except:
         pass
-    
+
+    # sampleOffsetTime used to live in SessionSettings (metadata.metadata.sampleOffsetTime)
+    # and now lives per-segment in the Schema. Scan every segment as a safety net (in case
+    # the first segment omits it), then fall back to the legacy SessionSettings location.
+    if _to_float(sampleOffsetTime) is None:
+        sampleOffsetTime = _first_segment_value(sequences_obj, 'sampleOffsetTime')
+    if _to_float(sampleOffsetTime) is None:
+        legacy_meta = getattr(metadata, 'metadata', None)
+        sampleOffsetTime = getattr(legacy_meta, 'sampleOffsetTime', None) if legacy_meta is not None else None
+    sampleOffsetTime = _to_float(sampleOffsetTime)
+
     # Extract minimum sampling time per odor by iterating through all definitions
     target_odors = {'OdorA', 'OdorB', 'OdorC', 'OdorD', 'OdorE', 'OdorF', 'OdorG'}
     found_odors = set()
@@ -142,7 +188,7 @@ def detect_settings(root):
     )
     
     schema_settings['minimumSamplingTime_by_odor'] = minimumSamplingTime_by_odor
-    schema_settings['sampleOffsetTime'] = metadata.metadata.sampleOffsetTime
+    schema_settings['sampleOffsetTime'] = sampleOffsetTime
     schema_settings['completionRequiresEngagement'] = completionRequiresEngagement
     schema_settings['responseTime'] = responseTime
     
