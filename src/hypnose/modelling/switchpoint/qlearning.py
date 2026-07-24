@@ -66,10 +66,20 @@ variant                    free parameters                    ``Q0`` bounds
 ``qlearn_constrained`` reads "initial values lie within the range of experienceable outcomes"
 -- the animal cannot start out believing an option is worth more than any outcome it could
 ever receive. That constraint has a structural consequence worth knowing before reading any
-fit: since ``Q_long`` decays to ``0`` within ~``1/alpha`` LONG choices and ``Q0_short >= 0``
-keeps ``Q_short >= 0``, the constrained model **cannot hold P(SHORT) below 0.5 in steady
-state**. It can only describe an animal that ends up at or above chance for SHORT. The free
-version may initialise outside the experienceable range and has no such floor.
+fit: **once ``Q_long`` has converged, the constrained model cannot hold P(SHORT) below 0.5**,
+because ``Q_long -> 0`` while ``Q0_short >= 0`` keeps ``Q_short >= 0``. It can only describe
+an animal that ends up at or above chance for SHORT.
+
+That floor is *asymptotic*, and the escape route matters. ``Q_long`` needs ``n >> 1/alpha``
+LONG choices to converge, and ``alpha`` is bounded below at ``1e-4`` -- i.e. 10,000 trials,
+beyond any real dataset here. So a constrained fit to an animal that sits below chance for
+SHORT will buy its sub-0.5 plateau by pinning ``alpha`` at that floor, never reaching the
+asymptotic regime at all. The expected signature is therefore ``boundary_hit`` on ``alpha``,
+and it costs the model the transition: an ``alpha`` that small also freezes ``Q_short``, so no
+rise in P(SHORT) is possible either. Read a constrained fit with ``alpha`` at its bound as
+"this variant cannot describe this animal", not as a learning rate.
+
+The free version may initialise outside the experienceable range and has no such floor.
 
 Two kinds of trajectory -- do not confuse them
 ----------------------------------------------
@@ -107,7 +117,7 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.special import expit
 
-from hypnose.modelling.switchpoint.switch import _as_binary
+from hypnose.modelling.switchpoint.switch import _as_binary, fit_switchpoint
 
 # Fixed reward constants -- a choice of units, NOT fitted. See the module docstring.
 R_SHORT = 1.0
@@ -125,7 +135,8 @@ _KAPPA_BOUNDS = (-10.0, 10.0)
 
 # Multi-start: alpha and Q0 trade off against each other (a small alpha with an extreme Q0
 # mimics a large alpha with a moderate one), so the surface is not unimodal and a single start
-# is not reliable. Starts are drawn uniformly inside the bounds from a seeded generator.
+# is not reliable. Starts are drawn inside the bounds from a seeded generator: log-uniformly
+# for the parameters in _LOG_SCALE_PARAMS, uniformly for the rest.
 N_STARTS = 32
 
 # An estimate this close to either end of its bound range (as a fraction of the range) is
@@ -133,8 +144,22 @@ N_STARTS = 32
 # constraint artefact rather than an estimate.
 _BOUNDARY_RTOL = 0.01
 
-# The variant that represents "qlearning" in compare_models -- the most flexible of the three,
-# so the model comparison scores the null at its strongest.
+# Proximity to a bound is measured on each parameter's natural scale. alpha and b span orders
+# of magnitude (b runs 1e-3 .. 50), so a linear window would be 0.5 wide and would flag an
+# ordinary b = 0.4 as an artefact; on the log scale the same 1% window is a factor of ~1.11.
+# Q0 and kappa are ordinary linear quantities and are left alone.
+_LOG_SCALE_PARAMS = ("alpha", "b")
+
+# Simulations behind the generative band, and the quantiles it spans.
+N_GENERATIVE_SIMS = 500
+GENERATIVE_QUANTILES = (0.05, 0.95)
+# Individual runs kept alongside the mean. A perseverative Q-learner steps abruptly at a
+# different trial in every run, so the mean of many runs is a smooth ramp that misrepresents
+# what any single run does; these are drawn next to it.
+N_GENERATIVE_EXAMPLES = 8
+
+# The variant that represents "qlearning" in compare_models. The other two are fitted alongside
+# by fit_qlearning_variants and overlaid on the figure rather than taking a table row each.
 QLEARN_DEFAULT_VARIANT = "qlearn_free"
 
 QLEARN_VARIANTS = {
@@ -168,6 +193,9 @@ __all__ = [
     "R_SHORT",
     "R_LONG",
     "N_STARTS",
+    "N_GENERATIVE_SIMS",
+    "N_GENERATIVE_EXAMPLES",
+    "GENERATIVE_QUANTILES",
     "QLEARN_DEFAULT_VARIANT",
     "QLEARN_VARIANTS",
     "QLEARN_VARIANT_ORDER",
@@ -176,6 +204,7 @@ __all__ = [
     "qlearning_trajectory",
     "qlearning_nll",
     "simulate_qlearning",
+    "qlearning_generative_band",
     "fit_qlearning",
     "fit_qlearning_variants",
     "qlearning_parameter_sweep",
@@ -204,14 +233,45 @@ def _as_one_animal(s: Sequence[int] | np.ndarray) -> np.ndarray:
     return _as_binary(arr)
 
 
+def _trajectory_unchecked(s: np.ndarray, alpha: float, b: float, q0_short: float,
+                          q0_long: float, kappa: float = 0.0,
+                          rewards: tuple[float, float] = (R_SHORT, R_LONG)) -> dict:
+    """``qlearning_trajectory`` without the input validation -- ``s`` must already be 0/1 int.
+
+    The optimizer evaluates this tens of thousands of times per fit (n_starts x iterations x
+    finite-difference steps), and re-running ``np.isin(s, (0, 1)).all()`` on every one of them
+    is pure overhead: ``s`` is fixed for the whole fit and is validated once by the caller.
+    """
+    n = s.size
+    r_short, r_long = float(rewards[0]), float(rewards[1])
+    # Updates of each option BEFORE trial t: the closed form needs only these counts.
+    n_short_before = np.concatenate(([0], np.cumsum(s)[:-1])) if n else np.zeros(0, dtype=int)
+    n_long_before = np.arange(n) - n_short_before
+    decay = 1.0 - float(alpha)
+    q_short = r_short - (r_short - float(q0_short)) * decay ** n_short_before
+    q_long = r_long - (r_long - float(q0_long)) * decay ** n_long_before
+    # +1 after a SHORT trial, -1 after a LONG one, 0 at the first trial (no history yet).
+    s_prev = np.concatenate(([0.0], 2.0 * s[:-1] - 1.0)) if n else np.zeros(0)
+    p_short = np.clip(expit(float(b) * (q_short - q_long) + float(kappa) * s_prev),
+                      _P_EPS, 1.0 - _P_EPS)
+    return {"p_short": p_short, "q_short": q_short, "q_long": q_long, "s_prev": s_prev}
+
+
 def qlearning_trajectory(s: Sequence[int] | np.ndarray, alpha: float, b: float,
                          q0_short: float, q0_long: float, kappa: float = 0.0,
                          rewards: tuple[float, float] = (R_SHORT, R_LONG)) -> dict:
-    """Per-trial P(SHORT) implied by a Q-learner that made the choices in ``s``.
+    """**One-step-ahead** per-trial P(SHORT) of a Q-learner that made the choices in ``s``.
 
     Each trial's probability uses the Q values held *before* that trial's update; the update
     then applies to the option the animal actually took, and only to that option. Evaluated in
     closed form (see the module docstring), so it is O(n) numpy with no Python loop.
+
+    This is conditioned on the animal's own history at every trial -- both the update counts and
+    ``s_prev`` are read off ``s``. It is the right quantity for the likelihood, AIC / BIC and
+    the residual ACF, and it is **not** a prediction of the animal's trajectory: a large fitted
+    ``kappa`` makes it approximately a one-trial-lagged copy of ``s``, which will look like a
+    perfect fit to any switch. For what the fitted model actually predicts, use
+    ``qlearning_generative_band``.
 
     Parameters
     ----------
@@ -231,20 +291,20 @@ def qlearning_trajectory(s: Sequence[int] | np.ndarray, alpha: float, b: float,
         ``p_short`` (length n, clipped into ``[1e-10, 1 - 1e-10]``), ``q_short``, ``q_long``
         (the values held *before* each trial's update), and ``s_prev`` (+1/-1/0).
     """
-    s = _as_one_animal(s)
-    n = s.size
-    r_short, r_long = float(rewards[0]), float(rewards[1])
-    # Updates of each option BEFORE trial t: the closed form needs only these counts.
-    n_short_before = np.concatenate(([0], np.cumsum(s)[:-1])) if n else np.zeros(0, dtype=int)
-    n_long_before = np.arange(n) - n_short_before
-    decay = 1.0 - float(alpha)
-    q_short = r_short - (r_short - float(q0_short)) * decay ** n_short_before
-    q_long = r_long - (r_long - float(q0_long)) * decay ** n_long_before
-    # +1 after a SHORT trial, -1 after a LONG one, 0 at the first trial (no history yet).
-    s_prev = np.concatenate(([0.0], 2.0 * s[:-1] - 1.0)) if n else np.zeros(0)
-    p_short = np.clip(expit(float(b) * (q_short - q_long) + float(kappa) * s_prev),
-                      _P_EPS, 1.0 - _P_EPS)
-    return {"p_short": p_short, "q_short": q_short, "q_long": q_long, "s_prev": s_prev}
+    return _trajectory_unchecked(_as_one_animal(s), alpha, b, q0_short, q0_long, kappa, rewards)
+
+
+def _nll_unchecked(s: np.ndarray, alpha: float, b: float, q0_short: float, q0_long: float,
+                   kappa: float = 0.0,
+                   rewards: tuple[float, float] = (R_SHORT, R_LONG)) -> tuple[float, np.ndarray]:
+    """``qlearning_nll`` without the input validation -- ``s`` must already be 0/1 int.
+
+    This is the optimizer's inner loop; see ``_trajectory_unchecked``.
+    """
+    p = _trajectory_unchecked(s, alpha, b, q0_short, q0_long, kappa, rewards)["p_short"]
+    if s.size == 0:
+        return 0.0, p
+    return -float(np.sum(np.where(s == 1, np.log(p), np.log1p(-p)))), p
 
 
 def qlearning_nll(s: Sequence[int] | np.ndarray, alpha: float, b: float, q0_short: float,
@@ -254,61 +314,142 @@ def qlearning_nll(s: Sequence[int] | np.ndarray, alpha: float, b: float, q0_shor
 
     ``-sum_t log P(observed choice at t)``, directly comparable with the ``-loglik`` of the
     descriptive models in ``switch.py`` because it scores exactly the same per-trial Bernoulli
-    choices.
+    choices. The trajectory returned is the one-step-ahead one -- see ``qlearning_trajectory``.
 
     Returns
     -------
     (float, np.ndarray)
         ``(nll, p_short)``. ``nll`` is ``0.0`` for an empty sequence.
     """
-    s = _as_one_animal(s)
-    p = qlearning_trajectory(s, alpha, b, q0_short, q0_long, kappa, rewards)["p_short"]
-    if s.size == 0:
-        return 0.0, p
-    nll = -float(np.sum(np.where(s == 1, np.log(p), np.log1p(-p))))
-    return nll, p
+    return _nll_unchecked(_as_one_animal(s), alpha, b, q0_short, q0_long, kappa, rewards)
 
 
 def simulate_qlearning(n_trials: int, alpha: float, b: float, q0_short: float, q0_long: float,
-                       kappa: float = 0.0, seed: Optional[int] = None) -> tuple[np.ndarray, np.ndarray]:
-    """Draw a SHORT/LONG sequence from the Q-learner, stepping trial by trial.
+                       kappa: float = 0.0, seed: Optional[int] = None,
+                       n_sims: Optional[int] = None,
+                       rewards: tuple[float, float] = (R_SHORT, R_LONG)) -> tuple[np.ndarray, np.ndarray]:
+    """Draw SHORT/LONG sequences from the Q-learner, stepping trial by trial.
 
-    The generative direction of ``qlearning_trajectory``: each trial's choice is sampled from
-    the current P(SHORT), and only the sampled option is then updated -- so the values, and
-    hence the next trial's probability, depend on what was actually drawn.
+    The **generative** direction of ``qlearning_trajectory``: each trial's choice is sampled
+    from the current P(SHORT), and only the sampled option is then updated -- so the values,
+    and hence the next trial's probability, depend on what was actually drawn. Nothing here is
+    conditioned on an observed sequence, which is what makes this (and not
+    ``qlearning_trajectory``) a prediction of what an animal would do.
+
+    The trial loop is vectorized **across simulations**, not across trials: it cannot be
+    vectorized across trials, since trial ``t+1`` depends on the draw at ``t``. Drawing 500
+    simulations therefore costs one pass over the trials rather than 500.
 
     Parameters
     ----------
     n_trials : int
-        Length of the sequence to draw.
+        Length of each sequence to draw.
     alpha, b, q0_short, q0_long, kappa : float
         As in ``qlearning_trajectory``.
     seed : int | None
         Seed for ``np.random.default_rng``, for a reproducible draw.
+    n_sims : int | None
+        Draw this many independent sequences at once, returning ``(n_sims, n_trials)`` arrays.
+        ``None`` (default) draws one and returns 1-D arrays -- and returns *exactly* what
+        ``n_sims=1`` returns for the same seed, since one simulation consumes the same numbers
+        from the generator either way.
+    rewards : (float, float)
+        ``(r_short, r_long)``, as on ``qlearning_trajectory`` -- present so the two agree at any
+        reward scale, not only the default ``(1, 0)``. Every fit uses the default.
 
     Returns
     -------
     (np.ndarray, np.ndarray)
         ``(s, p_short)`` -- the drawn 0/1 choices, and the P(SHORT) each was drawn from
-        (i.e. the value held *before* that trial's update). Both length ``n_trials``.
+        (i.e. the value held *before* that trial's update).
     """
     n = int(n_trials)
+    m = 1 if n_sims is None else int(n_sims)
+    r_short, r_long = float(rewards[0]), float(rewards[1])
     rng = np.random.default_rng(seed)
-    s = np.zeros(n, dtype=np.int64)
-    p_short = np.zeros(n, dtype=float)
-    q_short, q_long, s_prev = float(q0_short), float(q0_long), 0.0
+    s = np.zeros((m, n), dtype=np.int64)
+    p_short = np.zeros((m, n), dtype=float)
+    q_short = np.full(m, float(q0_short))
+    q_long = np.full(m, float(q0_long))
+    s_prev = np.zeros(m)
     for t in range(n):
-        p = float(np.clip(expit(b * (q_short - q_long) + kappa * s_prev),
-                          _P_EPS, 1.0 - _P_EPS))
-        p_short[t] = p
-        chose_short = bool(rng.random() < p)
-        s[t] = int(chose_short)
-        if chose_short:  # only the chosen option updates
-            q_short += alpha * (R_SHORT - q_short)
-        else:
-            q_long += alpha * (R_LONG - q_long)
-        s_prev = 1.0 if chose_short else -1.0
-    return s, p_short
+        p = np.clip(expit(b * (q_short - q_long) + kappa * s_prev), _P_EPS, 1.0 - _P_EPS)
+        p_short[:, t] = p
+        chose_short = rng.random(m) < p
+        s[:, t] = chose_short
+        # Only the chosen option updates; the other is carried forward untouched.
+        q_short = np.where(chose_short, q_short + alpha * (r_short - q_short), q_short)
+        q_long = np.where(chose_short, q_long, q_long + alpha * (r_long - q_long))
+        s_prev = np.where(chose_short, 1.0, -1.0)
+    return (s, p_short) if n_sims is not None else (s[0], p_short[0])
+
+
+def qlearning_generative_band(fit: dict, n_trials: int, n_sims: int = N_GENERATIVE_SIMS,
+                              seed: int = 0,
+                              quantiles: tuple[float, float] = GENERATIVE_QUANTILES,
+                              n_examples: int = N_GENERATIVE_EXAMPLES) -> dict:
+    """What the fitted Q-learner actually predicts: mean P(SHORT) over its own simulated runs.
+
+    Runs ``simulate_qlearning`` ``n_sims`` times at ``fit``'s estimates and summarizes the
+    resulting P(SHORT) trajectories. Unlike ``fit["p_short"]`` this is **not** conditioned on
+    the animal's choices, so it is the honest answer to "can this fitted null reproduce the
+    observed switch?" -- and the one to plot as the model's trajectory.
+
+    The spread is genuine model uncertainty, not estimation error: each simulation makes its own
+    choices, so a Q-learner whose transition timing is loosely determined produces a wide band
+    even at a well-identified parameter set.
+
+    **The mean alone can mislead, and for ``qlearn_perseveration`` it does.** A strongly
+    perseverative Q-learner does not drift: each run locks onto one option and flips abruptly,
+    at a trial that differs from run to run. Averaging 500 such step functions gives a smooth
+    ramp, which reads as "perseveration predicts gradual change" -- the opposite of what the
+    model does. ``examples`` and ``switch_taus`` are returned so that the individual runs, and
+    the spread of their switch trials, can be seen next to the mean.
+
+    Parameters
+    ----------
+    fit : dict
+        A ``fit_qlearning`` result (needs ``alpha``, ``b``, ``q0_short``, ``q0_long``, ``kappa``).
+    n_trials : int
+        Length of each simulated run -- normally the animal's trial count.
+    n_sims : int
+        Simulations to average over.
+    seed : int
+        Seed for the draw, so the band is reproducible.
+    quantiles : (float, float)
+        Lower and upper quantile of the band.
+    n_examples : int
+        Individual runs to keep in ``examples``, taken as the first ``n_examples`` simulations
+        (they are i.i.d., so the first few are a fair sample). Clipped to ``n_sims``.
+
+    Returns
+    -------
+    dict
+        ``mean``, ``lo``, ``hi`` (each length ``n_trials``); ``examples``, an
+        ``(n_examples, n_trials)`` array of individual P(SHORT) runs; ``switch_taus``, the
+        single-switch ``tau`` fitted to each simulated *sequence* (length ``n_sims``) -- their
+        spread is what the mean smooths away; ``n_sims`` and ``quantiles``.
+
+        All-NaN curves, an empty ``examples`` / ``switch_taus`` and ``n_sims = 0`` for a
+        degenerate fit, so a caller can skip drawing it.
+    """
+    n = max(int(n_trials), 0)
+    lo_q, hi_q = float(quantiles[0]), float(quantiles[1])
+    degenerate = {"mean": np.full(n, np.nan), "lo": np.full(n, np.nan),
+                  "hi": np.full(n, np.nan), "examples": np.zeros((0, n)),
+                  "switch_taus": np.zeros(0, dtype=int), "n_sims": 0, "quantiles": (lo_q, hi_q)}
+    estimates = [fit.get(name, np.nan) for name in
+                 ("alpha", "b", "q0_short", "q0_long", "kappa")]
+    if n == 0 or int(n_sims) < 1 or not np.all(np.isfinite(estimates)):
+        return degenerate
+    sims, p = simulate_qlearning(n, *estimates, seed=seed, n_sims=int(n_sims))
+    lo, hi = np.quantile(p, (lo_q, hi_q), axis=0)
+    # Where each individual run switched, on the same single-switch criterion the descriptive
+    # model uses -- so a run's abruptness is measured the same way the animal's is.
+    taus = np.array([fit_switchpoint(sim)["tau"] for sim in sims], dtype=int)
+    return {"mean": p.mean(axis=0), "lo": lo, "hi": hi,
+            "examples": p[:max(int(n_examples), 0)], "switch_taus": taus,
+            "n_sims": int(n_sims), "quantiles": (lo_q, hi_q)}
 
 
 def _unpack(variant: str, theta: Sequence[float]) -> dict:
@@ -319,18 +460,34 @@ def _unpack(variant: str, theta: Sequence[float]) -> dict:
 
 
 def _boundary_params(variant: str, values: dict) -> list[str]:
-    """Names of the estimates sitting within ``_BOUNDARY_RTOL`` of either end of their bounds."""
+    """Names of the estimates sitting within ``_BOUNDARY_RTOL`` of either end of their bounds.
+
+    Proximity is measured on each parameter's natural scale (``_LOG_SCALE_PARAMS`` are compared
+    in logs). A linear window on ``b``, whose bounds span ``1e-3 .. 50``, would be 0.5 wide and
+    would flag a perfectly ordinary ``b = 0.4`` as a constraint artefact; in logs the same 1%
+    window is a factor of ~1.11 from either end. Non-finite estimates (a degenerate fit) are
+    skipped rather than flagged.
+    """
     spec = QLEARN_VARIANTS[variant]
     hit = []
     for name, (lo, hi) in zip(spec["params"], spec["bounds"]):
+        value = values[name]
+        if not np.isfinite(value):
+            continue
+        if name in _LOG_SCALE_PARAMS and min(lo, hi, value) > 0:
+            value, lo, hi = np.log(value), np.log(lo), np.log(hi)
         tol = _BOUNDARY_RTOL * (hi - lo)
-        if values[name] - lo <= tol or hi - values[name] <= tol:
+        if value - lo <= tol or hi - value <= tol:
             hit.append(name)
     return hit
 
 
 def _degenerate_fit(variant: str, n: int) -> dict:
-    """The fit dict for a sequence too short to fit (``n < 2``): NaN estimates, ``-inf`` loglik."""
+    """The fit dict for a sequence too short to fit (``n < 2``): NaN estimates, ``-inf`` loglik.
+
+    ``p_short`` is all-NaN rather than zeros: there is no fitted trajectory, and zeros would
+    read as "P(SHORT) = 0" and be drawn as a flat line along the SHORT row.
+    """
     spec = QLEARN_VARIANTS[variant]
     k = len(spec["params"])
     return {"variant": variant, "alpha": float("nan"), "b": float("nan"),
@@ -338,7 +495,7 @@ def _degenerate_fit(variant: str, n: int) -> dict:
             "free_params": spec["params"], "nll": float("inf"), "loglik": float("-inf"),
             "aic": float("inf"), "bic": float("inf"), "n_trials": int(n), "k_params": k,
             "converged": False, "n_starts": 0, "n_starts_converged": 0, "boundary_hit": False,
-            "boundary_params": [], "p_short": np.zeros(int(n)), "implemented": True}
+            "boundary_params": [], "p_short": np.full(int(n), np.nan), "implemented": True}
 
 
 def fit_qlearning(s: Sequence[int] | np.ndarray, variant: str = QLEARN_DEFAULT_VARIANT,
@@ -346,11 +503,12 @@ def fit_qlearning(s: Sequence[int] | np.ndarray, variant: str = QLEARN_DEFAULT_V
     """Fit one Q-learning variant to ONE animal's sequence by multi-start maximum likelihood.
 
     ``scipy.optimize.minimize`` with ``L-BFGS-B`` (the bounds are the model), started from
-    ``n_starts`` points drawn uniformly inside the bounds from a seeded generator; the lowest
-    negative log-likelihood wins. Multi-start is not optional here: ``alpha`` and ``Q0`` trade
-    off against each other, so the surface has more than one basin and a single start
-    under-fits -- which would strawman the null against the descriptive models rather than
-    test it.
+    ``n_starts`` points drawn inside the bounds from a seeded generator -- log-uniformly for
+    the parameters in ``_LOG_SCALE_PARAMS`` (``alpha`` and ``b``, which span orders of
+    magnitude), uniformly for ``Q0`` and ``kappa``; the lowest negative log-likelihood wins.
+    Multi-start is not optional here: ``alpha`` and ``Q0`` trade off against each other, so the
+    surface has more than one basin and a single start under-fits -- which would strawman the
+    null against the descriptive models rather than test it.
 
     Per animal or per session, never pooled: an aggregate raises (see ``_as_one_animal``).
 
@@ -374,9 +532,10 @@ def fit_qlearning(s: Sequence[int] | np.ndarray, variant: str = QLEARN_DEFAULT_V
         ``free_params``; ``nll`` and ``loglik`` (``= -nll``); ``aic``, ``bic``; ``n_trials``,
         ``k_params``; ``converged`` (True iff at least one start converged),
         ``n_starts``, ``n_starts_converged``; ``boundary_hit`` and ``boundary_params`` (any
-        estimate within 1% of a bound -- an edge-of-space artefact, not an estimate);
-        ``p_short`` (the fitted per-trial P(SHORT) trajectory, for the plots); and
-        ``implemented`` (True), so it scores in ``compare_models``.
+        estimate within 1% of a bound on its natural scale -- an edge-of-space artefact, not an
+        estimate); ``p_short`` (the fitted per-trial **one-step-ahead** P(SHORT) trajectory --
+        see ``qlearning_trajectory``, and use ``qlearning_generative_band`` for what the fit
+        predicts); and ``implemented`` (True), so it scores in ``compare_models``.
 
     Raises
     ------
@@ -398,13 +557,18 @@ def fit_qlearning(s: Sequence[int] | np.ndarray, variant: str = QLEARN_DEFAULT_V
     k = len(spec["params"])
 
     def negative_loglik(theta: np.ndarray) -> float:
-        nll, _ = qlearning_nll(s, **_unpack(variant, theta))
+        # _nll_unchecked, not qlearning_nll: s was validated above and is fixed for the whole
+        # fit, so re-validating it on every one of the ~10k evaluations is pure overhead.
+        nll, _ = _nll_unchecked(s, **_unpack(variant, theta))
         return nll
 
     rng = np.random.default_rng(seed)
     lo = np.array([b[0] for b in bounds], dtype=float)
     hi = np.array([b[1] for b in bounds], dtype=float)
-    starts = rng.uniform(lo, hi, size=(int(n_starts), k))
+    starts = rng.uniform(lo, hi, size=(n_starts, k))
+    for j, name in enumerate(spec["params"]):
+        if name in _LOG_SCALE_PARAMS:
+            starts[:, j] = np.exp(rng.uniform(np.log(lo[j]), np.log(hi[j]), n_starts))
 
     best, n_converged = None, 0
     for theta0 in starts:
@@ -414,7 +578,7 @@ def fit_qlearning(s: Sequence[int] | np.ndarray, variant: str = QLEARN_DEFAULT_V
             best = result
 
     values = _unpack(variant, best.x)
-    nll, p_short = qlearning_nll(s, **values)
+    nll, p_short = _nll_unchecked(s, **values)
     loglik = -nll
     boundary = _boundary_params(variant, values)
     return {"variant": variant, **values, "free_params": spec["params"],
@@ -432,8 +596,13 @@ def fit_qlearning_variants(s: Sequence[int] | np.ndarray,
     """Fit every variant to the same sequence, keyed by variant name.
 
     Convenience over ``fit_qlearning`` for the overlay and sweep figures, which need all three.
-    Each variant gets the same ``seed``, so their starting points are identical and any
-    difference between the fits comes from the model rather than from the draw.
+    Each variant is fitted from the same ``seed``, so a rerun reproduces the same fits; the
+    starting *points* are not comparable across variants, and are not meant to be.
+    ``qlearn_perseveration`` draws a ``k = 5`` array rather than ``k = 4``, and
+    ``qlearn_constrained``'s narrower ``Q0`` bounds map the same variates onto different
+    values. Differences between the fits are therefore differences of model plus draw, which is
+    fine here -- each variant is fitted at its own best over 32 starts, not raced from a shared
+    initial condition.
     """
     return {variant: fit_qlearning(s, variant, n_starts=n_starts, seed=seed)
             for variant in variants}
@@ -441,7 +610,9 @@ def fit_qlearning_variants(s: Sequence[int] | np.ndarray,
 
 def qlearning_parameter_sweep(s: Sequence[int] | np.ndarray, fit: dict,
                               alphas: Sequence[float] = QLEARN_SWEEP_ALPHAS,
-                              bs: Sequence[float] = QLEARN_SWEEP_BS) -> list[dict]:
+                              bs: Sequence[float] = QLEARN_SWEEP_BS,
+                              generative: bool = False,
+                              n_sims: int = N_GENERATIVE_SIMS, seed: int = 0) -> list[dict]:
     """P(SHORT) trajectories over an ``(alpha, b)`` grid, holding the other estimates at their ML.
 
     The sweep shows what the *shape* of a Q-learning curve is controlled by: ``alpha`` sets how
@@ -449,18 +620,38 @@ def qlearning_parameter_sweep(s: Sequence[int] | np.ndarray, fit: dict,
     variant) stay at ``fit``'s maximum-likelihood values, so every line differs from the ML fit
     in the two swept parameters only.
 
+    ``generative`` additionally simulates each grid point. **Read this before drawing a sweep
+    of ``qlearn_perseveration``:** ``kappa`` is held at its ML value across the whole grid, and
+    the one-step-ahead trajectory of a large ``kappa`` collapses to roughly
+    ``expit(kappa * s_prev)`` -- a one-trial-lagged copy of the data. So a figure meant to show
+    "no grid point produces a step" would instead show all 16 lines stepping at exactly the
+    right trial, for a reason that has nothing to do with ``alpha`` or ``b``. The generative
+    trajectory is not conditioned on the data and cannot do that.
+
     Returns
     -------
     list[dict]
         One entry per grid point, in ``alpha``-major order: ``alpha``, ``b``, ``i_alpha``,
-        ``i_b``, ``nll``, and ``p_short`` (the trajectory).
+        ``i_b``, ``nll``, and ``p_short`` (the one-step-ahead trajectory, which is the one the
+        ``nll`` beside it scores). With ``generative``, also ``p_generative`` (the mean over
+        ``n_sims`` simulated runs at that grid point) and ``band`` (the full
+        ``qlearning_generative_band`` result, for its ``examples`` and ``switch_taus``).
     """
-    s = _as_one_animal(s)
+    s = _as_one_animal(s)  # validated once here; the grid then uses the unchecked path
     out = []
     for i_alpha, alpha in enumerate(alphas):
         for i_b, b in enumerate(bs):
-            nll, p_short = qlearning_nll(s, alpha, b, fit["q0_short"], fit["q0_long"],
-                                         fit["kappa"])
-            out.append({"alpha": float(alpha), "b": float(b), "i_alpha": i_alpha, "i_b": i_b,
-                        "nll": float(nll), "p_short": p_short})
+            nll, p_short = _nll_unchecked(s, alpha, b, fit["q0_short"], fit["q0_long"],
+                                          fit["kappa"])
+            point = {"alpha": float(alpha), "b": float(b), "i_alpha": i_alpha, "i_b": i_b,
+                     "nll": float(nll), "p_short": p_short}
+            if generative:
+                # Same simulator as the ML band, at this grid point's alpha/b with Q0 and kappa
+                # held at ML -- so the generative grid varies exactly what the sweep sweeps.
+                band = qlearning_generative_band(
+                    {**fit, "alpha": float(alpha), "b": float(b)}, s.size,
+                    n_sims=n_sims, seed=seed)
+                point["p_generative"] = band["mean"]
+                point["band"] = band
+            out.append(point)
     return out

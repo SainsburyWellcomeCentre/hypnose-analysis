@@ -11,21 +11,30 @@ Checks
 1. **closed form == sequential update.** ``qlearning_trajectory`` evaluates the value recursion
    in closed form (see its module docstring); ``simulate_qlearning`` steps trial by trial. Given
    the same choices they must produce the identical P(SHORT) trajectory. This is the check that
-   the fast path is the model.
-2. **parameter recovery.** Simulate from known parameters, refit with the shipped multi-start,
+   the fast path is the model. It also pins ``n_sims=1`` to the scalar draw, since the
+   simulation loop is vectorized across simulations.
+2. **generative is not one-step-ahead.** The two trajectories mean different things and must
+   not be conflated: a strongly perseverative fit tracks an abrupt switch closely one step
+   ahead (``s_prev`` hands it the answer each trial) while being unable to *generate* that
+   switch at all. The check asserts the gap is large, so a future change that plotted the
+   one-step-ahead curve as the model's prediction would fail here.
+3. **boundary proximity is scale-aware.** Flagged on the log scale for ``alpha`` and ``b``,
+   linear for ``Q0`` and ``kappa`` -- so an ordinary ``b = 0.4`` is not called an artefact
+   while a genuinely pinned ``b = 1.05e-3`` is.
+4. **parameter recovery.** Simulate from known parameters, refit with the shipped multi-start,
    and require the estimates and the recovered P(SHORT) trajectory back.
-3. **the constrained floor.** ``qlearn_constrained`` *cannot* hold P(SHORT) below 0.5 in steady
+5. **the constrained floor.** ``qlearn_constrained`` *cannot* hold P(SHORT) below 0.5 in steady
    state: ``Q_long`` decays to 0 within ~``1/alpha`` LONG choices and ``Q0_short >= 0`` keeps
    ``Q_short >= 0``, so once ``Q_long`` has decayed the softmax argument cannot be negative.
    This is a property of the bounds, not of any dataset -- an animal that ends up *below*
    chance for SHORT is outside what this variant can describe, and that must not be discovered
    by accident from a fit. The check also confirms ``qlearn_free`` has no such floor.
-4. **reward-scale identifiability.** The claim in the qlearning module docstring, numerically:
+6. **reward-scale identifiability.** The claim in the qlearning module docstring, numerically:
    rewards ``(1, 0)`` with ``(alpha, b, Q0_short, Q0_long)`` and rewards ``(1, 1-d)`` with
    ``(alpha, b/d, d*Q0_short + 1-d, d*Q0_long + 1-d)`` give the identical nll -- pointwise, at
    the ML fit, and at the optimum of an independent refit. So ``d`` is not estimable and the
    reward scale is rightly fixed rather than fitted.
-5. **kappa = 0 reduces perseveration to free.** The perseveration variant nests
+7. **kappa = 0 reduces perseveration to free.** The perseveration variant nests
    ``qlearn_free``: same nll at ``kappa = 0``, same simulated draw, and a fitted nll that is
    never worse.
 
@@ -53,7 +62,9 @@ from hypnose.modelling.switchpoint.qlearning import (  # noqa: E402
     QLEARN_VARIANTS,
     R_LONG,
     R_SHORT,
+    _boundary_params,
     fit_qlearning,
+    qlearning_generative_band,
     qlearning_nll,
     qlearning_trajectory,
     simulate_qlearning,
@@ -97,6 +108,7 @@ def _report(name: str, ok: bool, detail: str) -> bool:
 def check_closed_form(rng: np.random.Generator) -> bool:
     """The vectorized trajectory must reproduce the trial-by-trial simulation exactly."""
     worst, worst_case = 0.0, None
+    single_vs_batch = True
     for _ in range(20):
         alpha = float(rng.uniform(1e-3, 1.0))
         b = float(rng.uniform(0.1, 20.0))
@@ -109,9 +121,91 @@ def check_closed_form(rng: np.random.Generator) -> bool:
         err = float(np.max(np.abs(p_sim - p_closed)))
         if err > worst:
             worst, worst_case = err, (alpha, b, q0_short, q0_long, kappa)
-    return _report("closed form == sequential update", worst < 1e-12,
-                   f"max |p_simulated - p_closed_form| = {worst:.3e} over 20 draws "
-                   f"(worst at alpha={worst_case[0]:.4g}, b={worst_case[1]:.4g})")
+        # The loop is vectorized across simulations, so n_sims=1 must consume the generator
+        # identically to the scalar path -- otherwise the band and the single draw disagree.
+        s_batch, p_batch = simulate_qlearning(600, alpha, b, q0_short, q0_long, kappa,
+                                              seed=seed, n_sims=1)
+        single_vs_batch &= bool(np.array_equal(s, s_batch[0]) and
+                                np.array_equal(p_sim, p_batch[0]))
+    ok = _report("closed form == sequential update", worst < 1e-12,
+                 f"max |p_simulated - p_closed_form| = {worst:.3e} over 20 draws "
+                 f"(worst at alpha={worst_case[0]:.4g}, b={worst_case[1]:.4g})")
+    ok &= _report("n_sims=1 == the scalar draw", single_vs_batch,
+                  "the sims-vectorized loop reproduces the 1-D path bit for bit, same seed")
+    return bool(ok)
+
+
+def check_generative_vs_onestep(rng: np.random.Generator) -> bool:
+    """The one-step-ahead curve is NOT a prediction; the generative band is. Show the gap.
+
+    Built to fail loudly if the two are ever conflated: a strongly perseverative Q-learner is
+    fitted to an *abrupt* switch it cannot generate. Its one-step-ahead curve tracks the data
+    closely anyway -- because ``s_prev`` hands it the answer each trial -- while its generative
+    mean cannot reproduce the step at all. If a future change made the plots draw the
+    one-step-ahead curve as the model's trajectory, this is the check that catches it.
+    """
+    tau = 500
+    s = np.concatenate([(rng.random(tau) < 0.05).astype(np.int64),
+                        (rng.random(700) < 0.95).astype(np.int64)])
+    fit = fit_qlearning(s, "qlearn_perseveration", seed=0)
+    band = qlearning_generative_band(fit, s.size, n_sims=300, seed=0)
+
+    # How well does each track the actual step? Compare mean P(SHORT) either side of tau.
+    onestep_step = float(fit["p_short"][tau:].mean() - fit["p_short"][:tau].mean())
+    generative_step = float(band["mean"][tau:].mean() - band["mean"][:tau].mean())
+    observed_step = float(s[tau:].mean() - s[:tau].mean())
+
+    ok = _report(
+        "generative band is not the one-step-ahead curve",
+        abs(onestep_step - generative_step) > 0.1,
+        f"observed step = {observed_step:+.2f}; one-step-ahead reproduces {onestep_step:+.2f} "
+        f"(kappa = {fit['kappa']:+.2f} lets it copy the lagged data), generative only "
+        f"{generative_step:+.2f} -- a gap of {abs(onestep_step - generative_step):.2f}")
+    ok &= _report("generative band brackets its own mean", band["n_sims"] == 300 and
+                  bool(np.all(band["lo"] <= band["mean"] + 1e-12) and
+                       np.all(band["mean"] <= band["hi"] + 1e-12)),
+                  f"lo <= mean <= hi at every trial over {band['n_sims']} sims "
+                  f"({band['quantiles'][0]:.0%}-{band['quantiles'][1]:.0%})")
+
+    # A degenerate fit must produce an all-NaN band and n_sims = 0, so a caller can skip it
+    # rather than draw a flat line at zero.
+    degenerate = fit_qlearning(np.zeros(1, dtype=np.int64), "qlearn_free")
+    empty = qlearning_generative_band(degenerate, 1)
+    ok &= _report("degenerate fit -> NaN, not zeros",
+                  bool(np.all(np.isnan(degenerate["p_short"])) and empty["n_sims"] == 0
+                       and np.all(np.isnan(empty["mean"]))),
+                  "p_short and the band are all-NaN with n_sims = 0")
+    return bool(ok)
+
+
+def check_boundary_scale(rng: np.random.Generator) -> bool:
+    """Boundary proximity is judged on each parameter's natural scale, log for alpha and b."""
+    def flags(**kwargs):
+        values = {"alpha": 0.1, "b": 5.0, "q0_short": 0.0, "q0_long": 0.5, "kappa": 0.0}
+        return _boundary_params("qlearn_perseveration", {**values, **kwargs})
+
+    cases = [
+        # (kwargs, expected flag for that parameter, why)
+        ({"b": 0.4}, False, "b = 0.4 is an ordinary inverse temperature, not an artefact"),
+        ({"b": 1.05e-3}, True, "b pinned at its lower bound (1e-3)"),
+        ({"b": 49.9}, True, "b pinned at its upper bound (50)"),
+        ({"alpha": 0.0035}, False, "alpha = 0.0035 is an ordinary slow learning rate"),
+        ({"alpha": 1.05e-4}, True, "alpha pinned at its lower bound (1e-4)"),
+        ({"alpha": 0.999}, True, "alpha pinned at its upper bound (1)"),
+        ({"q0_short": 9.95}, True, "Q0 is linear: 9.95 of [-10, 10] is at the bound"),
+        ({"q0_short": 5.0}, False, "Q0 = 5 is well inside [-10, 10]"),
+    ]
+    ok = True
+    for kwargs, expected, why in cases:
+        name = next(iter(kwargs))
+        got = name in flags(**kwargs)
+        ok &= _report(f"boundary scale: {name} = {kwargs[name]:g}", got == expected,
+                      f"{'flagged' if got else 'not flagged'} -- {why}")
+
+    # Non-finite estimates are skipped, not flagged.
+    ok &= _report("boundary scale: NaN estimates skipped", flags(alpha=np.nan, b=np.nan) == [],
+                  "a degenerate fit reports no boundary hits")
+    return bool(ok)
 
 
 # --- 2. parameter recovery -----------------------------------------------------------------
@@ -325,6 +419,8 @@ def main() -> int:
     print(f"Q-learning null model self-check (synthetic data, seed {args.seed})\n")
     checks = [
         ("closed form", check_closed_form),
+        ("generative vs one-step-ahead", check_generative_vs_onestep),
+        ("boundary scale", check_boundary_scale),
         ("parameter recovery", check_recovery),
         ("constrained floor", check_constrained_floor),
         ("reward identifiability", check_identifiability),

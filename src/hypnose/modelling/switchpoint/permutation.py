@@ -15,6 +15,12 @@ import numpy as np
 # Attempts to build a without-replacement donor assignment before allowing replacement.
 _ASSIGNMENT_TRIES = 20
 
+# TODO (deferred): nothing in this module needs changing, but the inclusion rules that decide
+# which animals reach it (`_INCLUSION_RULES` in scripts/modelling/switchpoint_analysis.py) now
+# run against a model set where `qlearning` is a real, eligible fit rather than a stub. An
+# animal whose BIC winner is the mechanistic null is therefore dropped from the test without
+# that being an explicit choice. See the TODO at `_INCLUSION_RULES`.
+
 __all__ = [
     "distance_to_session_start",
     "pairwise_f",

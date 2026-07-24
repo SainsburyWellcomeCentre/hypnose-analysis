@@ -12,6 +12,15 @@ from typing import Optional
 
 import numpy as np
 
+# TODO (deferred): `model_fitted_p` now returns a curve for `qlearning` too, so when the
+# mechanistic null is the BIC winner this diagnostic will run on ITS residuals -- and those are
+# not comparable with the descriptive models'. The Q-learner's fitted curve is the
+# one-step-ahead P(SHORT), conditioned on the animal's own choice history, so it absorbs part of
+# the serial dependence the ACF is trying to measure: a lag-1 near zero would then mean "the
+# Q-learner already explained the autocorrelation", not "the trials are independent". The
+# verdict text and the i.i.d.-bootstrap conclusion both need rewording for that case. Nothing
+# changed here yet.
+
 # Default largest lag reported by the diagnostic (clamped to n - 1 by the caller).
 ACF_MAX_LAG = 50
 # ~95% band multiplier, i.e. the standard +/- 1.96 / sqrt(N) autocorrelation band.

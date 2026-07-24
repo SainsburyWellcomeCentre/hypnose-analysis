@@ -39,6 +39,9 @@ from hypnose.modelling.switchpoint.switch import (
     switchpoint_posterior,
 )
 from hypnose.modelling.switchpoint.qlearning import (
+    GENERATIVE_QUANTILES,
+    N_GENERATIVE_EXAMPLES,
+    N_GENERATIVE_SIMS,
     N_STARTS,
     QLEARN_DEFAULT_VARIANT,
     QLEARN_SWEEP_ALPHAS,
@@ -49,6 +52,7 @@ from hypnose.modelling.switchpoint.qlearning import (
     R_SHORT,
     fit_qlearning,
     fit_qlearning_variants,
+    qlearning_generative_band,
     qlearning_nll,
     qlearning_parameter_sweep,
     qlearning_trajectory,
@@ -77,9 +81,11 @@ __all__ = [
     "logistic_start_points", "posterior_fwhm", "posterior_hdi", "switchpoint_loglik_profile",
     "switchpoint_posterior",
     # qlearning (the mechanistic null)
-    "N_STARTS", "QLEARN_DEFAULT_VARIANT", "QLEARN_SWEEP_ALPHAS", "QLEARN_SWEEP_BS",
-    "QLEARN_VARIANTS", "QLEARN_VARIANT_ORDER", "R_LONG", "R_SHORT", "fit_qlearning",
-    "fit_qlearning_variants", "qlearning_nll", "qlearning_parameter_sweep",
+    "GENERATIVE_QUANTILES", "N_GENERATIVE_EXAMPLES", "N_GENERATIVE_SIMS", "N_STARTS",
+    "QLEARN_DEFAULT_VARIANT",
+    "QLEARN_SWEEP_ALPHAS", "QLEARN_SWEEP_BS", "QLEARN_VARIANTS", "QLEARN_VARIANT_ORDER",
+    "R_LONG", "R_SHORT", "fit_qlearning", "fit_qlearning_variants",
+    "qlearning_generative_band", "qlearning_nll", "qlearning_parameter_sweep",
     "qlearning_trajectory", "simulate_qlearning",
     # comparison
     "MODEL_ORDER", "compare_models", "model_fitted_p",

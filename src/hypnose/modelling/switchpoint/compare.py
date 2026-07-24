@@ -31,7 +31,7 @@ MODEL_ORDER = ("constant", "switch", "logistic", "switch2", "qlearning")
 __all__ = ["compare_models", "model_fitted_p", "MODEL_ORDER"]
 
 
-def compare_models(s: Sequence[int] | np.ndarray) -> dict:
+def compare_models(s: Sequence[int] | np.ndarray, qlearning_fit: Optional[dict] = None) -> dict:
     """Fit all five models and score them with AIC and BIC (lower is better).
 
     The models, in increasing flexibility: ``constant`` (k=1), ``switch`` (k=3), ``logistic``
@@ -40,12 +40,16 @@ def compare_models(s: Sequence[int] | np.ndarray) -> dict:
     ``switch2`` is monotone-gated (``p1 <= p2 <= p3``), so it does *not* nest the single switch
     and may be ``-inf`` when no monotone split exists.
 
-    ``qlearning`` is the mechanistic null, fitted as ``QLEARN_DEFAULT_VARIANT`` -- the most
-    flexible of the three variants, so the null is scored at its strongest and its ``k`` is
+    ``qlearning`` is the mechanistic null, fitted as ``QLEARN_DEFAULT_VARIANT``; its ``k`` is
     that variant's. It nests nothing here, and it winning would be a *finding*: it would mean
     the rise in P(SHORT) is as well described by incremental value learning as by a step. The
     other variants are fitted separately by ``fit_qlearning_variants`` and overlaid on the
     model-comparison figure, rather than charged a row of this table each.
+
+    ``qlearning_fit`` lets a caller that has *already* fitted the Q-learning variants hand the
+    relevant one in, instead of paying for a second multi-start of the same variant on the same
+    sequence. It must be a fit of this same sequence; its ``k_params`` is used as given, so
+    passing a different variant deliberately changes what the ``qlearning`` row means.
 
     ``AIC = 2k - 2 * loglik`` and ``BIC = k * ln(n) - 2 * loglik``. BIC penalizes the extra
     parameters harder, so it is the stricter test of "there really was a switch".
@@ -65,11 +69,21 @@ def compare_models(s: Sequence[int] | np.ndarray) -> dict:
     dict
         One entry per model name, each ``{loglik, k_params, aic, bic}``; ``best_aic`` and
         ``best_bic`` (the winning implemented model); and ``fits``, the full fit dict of each.
+
+    Raises
+    ------
+    ValueError
+        ``qlearning_fit`` was fitted to a sequence of a different length.
     """
     s = _as_binary(s)
     n = max(s.size, 1)
+    if qlearning_fit is not None and qlearning_fit["n_trials"] != s.size:
+        raise ValueError(
+            f"qlearning_fit was fitted to {qlearning_fit['n_trials']} trials but s has "
+            f"{s.size}; it must be a fit of this same sequence.")
     fits = {"constant": fit_constant(s), "switch": fit_switchpoint(s),
-            "logistic": fit_logistic(s), "switch2": fit_switch2(s), "qlearning": fit_qlearning(s)}
+            "logistic": fit_logistic(s), "switch2": fit_switch2(s),
+            "qlearning": fit_qlearning(s) if qlearning_fit is None else qlearning_fit}
     scores = {}
     for name, fit in fits.items():
         k, loglik = fit["k_params"], fit["loglik"]
@@ -91,7 +105,13 @@ def model_fitted_p(name: str, fit: dict, n: int) -> Optional[np.ndarray]:
 
     ``qlearning`` is the one model whose curve is not a function of the trial index: it is
     driven by the animal's own choice history, so it exists only on the trials that were
-    actually fitted and is returned as stored rather than re-evaluated on ``x``.
+    actually fitted and is returned as stored rather than re-evaluated on ``x``. What is
+    returned is its **one-step-ahead** trajectory -- conditioned on the observed choices, which
+    is what the residual-ACF diagnostic and the likelihood want. It is *not* the model's
+    prediction of the animal's trajectory; for that see ``qlearning_generative_band``, and note
+    that residuals formed against a one-step-ahead curve are not comparable with those of the
+    descriptive models (the Q-learner absorbs some of the serial structure being measured).
+    ``None`` for a degenerate (all-NaN) fit.
     """
     x = np.arange(n)
     if name == "constant":
@@ -107,5 +127,5 @@ def model_fitted_p(name: str, fit: dict, n: int) -> Optional[np.ndarray]:
         return logistic_p(x.astype(float), fit["midpoint"], fit["slope"], fit["lo"], fit["hi"])
     if name == "qlearning":
         p = np.asarray(fit.get("p_short", ()), dtype=float)
-        return p if p.size == n else None
+        return p if p.size == n and not np.all(np.isnan(p)) else None
     return None

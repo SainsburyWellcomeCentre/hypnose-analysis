@@ -17,7 +17,10 @@ import matplotlib.pyplot as plt
 from hypnose.modelling.switchpoint.data import subject_label
 from hypnose.modelling.switchpoint.switch import logistic_p
 from hypnose.modelling.switchpoint.compare import MODEL_ORDER
-from hypnose.modelling.switchpoint.qlearning import QLEARN_VARIANT_ORDER
+from hypnose.modelling.switchpoint.qlearning import (
+    QLEARN_VARIANT_ORDER,
+    qlearning_generative_band,
+)
 
 # --- style constants ----------------------------------------------------------------------
 _SESSION_LINE_COLOR = "tab:blue"
@@ -27,11 +30,30 @@ _SWITCH2_COLOR = "#8491B4"
 _LOGISTIC_COLOR = "#00A087"
 _DATA_COLOR = "#2b2b2b"
 
-# Q-learning null: one colour per variant, all drawn dash-dot so the mechanistic null reads as
-# one family against the descriptive models' solid / dashed / dotted lines.
+# Q-learning null: one colour per variant.
+#
+# TWO curves are drawn per variant and they mean different things (see the qlearning module
+# docstring). The GENERATIVE one -- the model run forward on its own choices, averaged over
+# simulations -- is what the fitted null actually predicts, so it is solid, full weight, with
+# its quantile band shaded. The ONE-STEP-AHEAD one is conditioned on the animal's observed
+# choices at every trial; it is what the likelihood scores, but it is not a prediction, and
+# with a large fitted kappa it degenerates into a one-trial-lagged copy of the data that would
+# appear to track any switch perfectly. It is therefore drawn thin and faint, as a reference.
 _QLEARN_COLORS = {"qlearn_free": "#7E6148", "qlearn_constrained": "#F39B7F",
                   "qlearn_perseveration": "#4DBBD5"}
 _QLEARN_LINESTYLE = (0, (5, 1.5, 1, 1.5))
+# The generative band is usually WIDE -- a free-running Q-learner's transition lands at a
+# different trial in every simulation, which is itself a result worth seeing. Three of them
+# overlap, so each fill is kept very light and sits *below* the data markers; otherwise the
+# panel washes out and the trials underneath become unreadable.
+_QLEARN_BAND_ALPHA = 0.07
+_QLEARN_BAND_ZORDER = 1.5
+_QLEARN_ONESTEP_ALPHA = 0.45
+# Individual simulated runs, drawn faint next to the mean. For a perseverative fit each run
+# steps abruptly at its own trial, so the mean of many is a smooth ramp that no single run
+# resembles -- these are what stop that mean being read as "the model predicts gradual change".
+_QLEARN_EXAMPLE_ALPHA = 0.30
+_QLEARN_EXAMPLE_LW = 0.7
 _QLEARN_SHORT_LABELS = {"qlearn_free": "Q free", "qlearn_constrained": "Q constr",
                         "qlearn_perseveration": "Q persev"}
 
@@ -148,34 +170,85 @@ def _qlearn_label(variant: str, fit: dict) -> str:
             f"b={fit['b']:.3g}{kappa}, BIC {fit['bic']:.0f}{flag}")
 
 
-def _overlay_qlearning(ax, x: np.ndarray, qlearning_fits: dict) -> None:
-    """Draw each fitted Q-learning variant's P(SHORT) trajectory over the data.
+def _overlay_qlearning(ax, x: np.ndarray, qlearning_fits: dict,
+                       qlearning_bands: dict | None = None) -> list:
+    """Draw each fitted Q-learning variant over the data: generative curve, band, one-step-ahead.
 
-    Unlike the descriptive curves these are not functions of the trial index -- they are driven
-    by the animal's own choice history -- so they are plotted on the fitted trials only and are
-    step-like wherever the animal's run of choices was one-sided.
+    The generative mean (solid, full weight, with its quantile band shaded) is the model's own
+    prediction and is what should be read. A few individual simulated runs are drawn faint
+    alongside it, because the mean alone misrepresents a perseverative fit: its runs step
+    abruptly at a trial that differs each time, and averaging them yields a smooth ramp that no
+    single run resembles. The one-step-ahead curve is drawn thin and faint beneath as a
+    reference -- see the ``_QLEARN_*`` constants for why the two must not be confused. Returns
+    proxy handles explaining the line styles, for the legend.
     """
+    bands = qlearning_bands or {}
+    n_sims, n_examples, drew_onestep = 0, 0, False
     for variant in QLEARN_VARIANT_ORDER:
         fit = qlearning_fits.get(variant)
-        p = np.asarray(fit["p_short"], dtype=float) if fit else np.zeros(0)
-        if p.size != x.size:  # degenerate / missing fit: nothing to draw
+        if fit is None:
             continue
-        ax.plot(x, p, color=_QLEARN_COLORS[variant], linewidth=1.1,
-                linestyle=_QLEARN_LINESTYLE, alpha=0.8, zorder=8,
-                label=_qlearn_label(variant, fit))
+        color = _QLEARN_COLORS[variant]
+        band = bands.get(variant) or qlearning_generative_band(fit, x.size)
+        # Generative: the model on its own choices. The dominant overlay.
+        if band["n_sims"] and np.isfinite(band["mean"]).any():
+            lo_q, hi_q = band["quantiles"]
+            ax.fill_between(x, band["lo"], band["hi"], color=color,
+                            alpha=_QLEARN_BAND_ALPHA, linewidth=0,
+                            zorder=_QLEARN_BAND_ZORDER)
+            examples = np.asarray(band.get("examples", np.zeros((0, x.size))), dtype=float)
+            for run in examples:
+                ax.plot(x, run, color=color, linewidth=_QLEARN_EXAMPLE_LW,
+                        alpha=_QLEARN_EXAMPLE_ALPHA, zorder=5)
+            n_examples = max(n_examples, len(examples))
+            ax.plot(x, band["mean"], color=color, linewidth=1.9, zorder=9,
+                    label=_qlearn_label(variant, fit))
+            n_sims = band["n_sims"]
+            _band_pct = f"{lo_q:.0%}-{hi_q:.0%}"
+        # One-step-ahead: conditioned on the observed choices. Reference only.
+        p = np.asarray(fit["p_short"], dtype=float)
+        if p.size == x.size and not np.all(np.isnan(p)):
+            ax.plot(x, p, color=color, linewidth=0.8, linestyle=_QLEARN_LINESTYLE,
+                    alpha=_QLEARN_ONESTEP_ALPHA, zorder=7)
+            drew_onestep = True
+
+    handles = []
+    if n_sims:
+        handles.append(plt.Line2D([], [], color="#666666", linewidth=1.9,
+                                  label=f"(null) solid = generative: model's own\n"
+                                        f"choices, mean of {n_sims} sims, {_band_pct} band"))
+    if n_examples:
+        handles.append(plt.Line2D([], [], color="#666666", linewidth=_QLEARN_EXAMPLE_LW,
+                                  alpha=_QLEARN_EXAMPLE_ALPHA,
+                                  label=f"(null) hairlines = {n_examples} individual\n"
+                                        f"simulated runs (the mean is not one)"))
+    if drew_onestep:
+        handles.append(plt.Line2D([], [], color="#666666", linewidth=0.8,
+                                  linestyle=_QLEARN_LINESTYLE, alpha=_QLEARN_ONESTEP_ALPHA,
+                                  label="(null) faint = one-step-ahead:\n"
+                                        "conditioned on observed choices"))
+    return handles
 
 
-def plot_model_comparison(prep: dict, comparison: dict, qlearning_fits: dict | None = None):
+def plot_model_comparison(prep: dict, comparison: dict, qlearning_fits: dict | None = None,
+                          qlearning_bands: dict | None = None):
     """Overlay every fitted model on the data, with the five-row AIC/BIC table in-panel.
 
     SHORT is the lower row, matching the strategy plot: the y axis is inverted, so the fitted
     P(SHORT) curves rise downward.
 
     ``qlearning_fits`` (as returned by ``fit_qlearning_variants``) additionally overlays the
-    three Q-learning variants -- the mechanistic null -- as dash-dot curves, one colour each,
-    labelled "(null)" in the legend to keep them visually apart from the descriptive models.
-    Pass ``None`` to omit them; the table row for the ``qlearning`` entry of ``comparison`` is
-    drawn either way.
+    three Q-learning variants -- the mechanistic null -- one colour each, labelled "(null)" in
+    the legend to keep them visually apart from the descriptive models. Each is drawn twice:
+    the **generative** trajectory solid with its quantile band (what the fitted model predicts),
+    and the **one-step-ahead** trajectory thin and faint (what the likelihood scores, which is
+    conditioned on the animal's choices and so cannot be read as a prediction). The legend names
+    both explicitly. Pass ``None`` to omit them; the table row for the ``qlearning`` entry of
+    ``comparison`` is drawn either way.
+
+    ``qlearning_bands`` supplies precomputed ``qlearning_generative_band`` results keyed by
+    variant, so a caller that already has them does not pay for the simulations twice; they are
+    computed here when omitted.
     """
     s, x, n = prep["s"], prep["trial_ids"], prep["n_trials"]
     constant, switch, switch2, logistic = (comparison["fits"][m] for m in
@@ -203,8 +276,7 @@ def plot_model_comparison(prep: dict, comparison: dict, qlearning_fits: dict | N
             color=_LOGISTIC_COLOR, linewidth=1.8, linestyle="--", zorder=7,
             label=f"Logistic: slope = {logistic['slope']:.3f} "
                   f"(start {logistic.get('start_label', '?')})")
-    if qlearning_fits:
-        _overlay_qlearning(ax, x, qlearning_fits)
+    style_handles = _overlay_qlearning(ax, x, qlearning_fits, qlearning_bands) if qlearning_fits else []
     _mark_sessions(ax, prep["session_ends"])
 
     best_bic = comparison["best_bic"]
@@ -229,7 +301,10 @@ def plot_model_comparison(prep: dict, comparison: dict, qlearning_fits: dict | N
     ax.set_xlabel("Trial (continuous across sessions)")
     ax.set_ylabel("P(SHORT)")
     ax.set_title(f"{subject_label(prep)} - model comparison")
-    ax.legend(loc="upper right", fontsize=6.5 if qlearning_fits else 7, ncol=2)
+    handles, labels = ax.get_legend_handles_labels()
+    ax.legend(handles=[*handles, *style_handles],
+              labels=[*labels, *(h.get_label() for h in style_handles)],
+              loc="upper right", fontsize=6.5 if qlearning_fits else 7, ncol=2)
     fig.tight_layout()
     return fig
 
@@ -288,18 +363,32 @@ def plot_multistart(prep: dict, fits: list[dict], best: int, warm: int):
 
 
 def plot_qlearning_sweep(prep: dict, variant: str, fit: dict, sweep: list[dict],
-                         alphas, bs):
+                         alphas, bs, band: dict | None = None):
     """One Q-learning variant's ``(alpha, b)`` parameter sweep over the binary trial data.
 
-    Every line is the P(SHORT) trajectory of the same variant with ``Q0`` (and ``kappa``) held
-    at their maximum-likelihood values and only ``alpha`` and ``b`` varied over the grid, so the
-    figure shows what those two parameters can and cannot make a Q-learner do: **alpha sets how
-    fast the curve rises, b how far it travels**. If no combination reaches a step, the null
-    cannot describe an abrupt switch, which is the point of drawing it.
+    Every grid line holds ``Q0`` (and ``kappa``) at their maximum-likelihood values and varies
+    only ``alpha`` and ``b``, so the figure shows what those two parameters can and cannot make
+    a Q-learner do: **alpha sets how fast the curve rises, b how far it travels**. If no
+    combination reaches a step, the null cannot describe an abrupt switch, which is the point of
+    drawing it.
+
+    When ``sweep`` carries ``p_generative`` (i.e. ``qlearning_parameter_sweep(...,
+    generative=True)``) the grid is drawn **generatively** -- each line the mean of that grid
+    point's own simulated runs. That is the version to draw for ``qlearn_perseveration``: with a
+    large ``kappa`` held across the grid, every one-step-ahead line collapses to roughly
+    ``expit(kappa * s_prev)`` and all 16 would step at exactly the animal's switch trial, for a
+    reason that has nothing to do with ``alpha`` or ``b``. The one-step-ahead grid is then kept
+    as faint hairlines, since it is what each point's ``nll`` scores. Without ``p_generative``
+    the grid is one-step-ahead only, and the title says so.
 
     ``alpha`` maps to colour (a sequential map, since alpha is ordered) and ``b`` to linestyle,
-    each with its own compact legend -- 16 individually labelled lines would be unreadable. The
-    maximum-likelihood fit is drawn thick and black on top.
+    each with its own compact legend -- 16 individually labelled lines would be unreadable.
+
+    The maximum-likelihood fit is drawn on top: its **generative** trajectory thick and black
+    with its quantile band and a few individual simulated runs (what the fit predicts, and how
+    little the mean resembles any one run), and its one-step-ahead trajectory thin and dashed.
+    ``band`` supplies a precomputed ``qlearning_generative_band``; it is computed here when
+    omitted.
     """
     s, x, n = prep["s"], prep["trial_ids"], prep["n_trials"]
     colors = plt.get_cmap(_SWEEP_CMAP)(np.linspace(0.05, 0.9, max(len(alphas), 2)))
@@ -312,12 +401,42 @@ def plot_qlearning_sweep(prep: dict, variant: str, fit: dict, sweep: list[dict],
         ax.plot(roll_x, roll_y, color="#999999", linewidth=1.0, zorder=3,
                 label=f"Empirical P(SHORT), {_ROLLING_WINDOW}-trial mean")
 
+    # Generative grid where available; the one-step-ahead grid then drops to faint hairlines.
+    has_generative = any("p_generative" in point for point in sweep)
     for point in sweep:
-        ax.plot(x, point["p_short"], color=colors[point["i_alpha"]],
-                linestyle=_SWEEP_LINESTYLES[point["i_b"] % len(_SWEEP_LINESTYLES)],
-                linewidth=1.0, alpha=0.85, zorder=4)
-    ml, = ax.plot(x, fit["p_short"], color=_DATA_COLOR, linewidth=2.4, zorder=8,
-                  label=f"ML fit\na={fit['alpha']:.3g}, b={fit['b']:.3g}\nnll={fit['nll']:.1f}")
+        style = dict(color=colors[point["i_alpha"]],
+                     linestyle=_SWEEP_LINESTYLES[point["i_b"] % len(_SWEEP_LINESTYLES)])
+        if has_generative and "p_generative" in point:
+            ax.plot(x, point["p_generative"], linewidth=1.1, alpha=0.85, zorder=5, **style)
+        ax.plot(x, point["p_short"], linewidth=0.7 if has_generative else 0.9,
+                alpha=_QLEARN_EXAMPLE_ALPHA if has_generative else 0.7, zorder=4, **style)
+    ml_band = band if band is not None else qlearning_generative_band(fit, n)
+    ml_handles = []
+    if ml_band["n_sims"] and np.isfinite(ml_band["mean"]).any():
+        lo_q, hi_q = ml_band["quantiles"]
+        ax.fill_between(x, ml_band["lo"], ml_band["hi"], color=_DATA_COLOR,
+                        alpha=_QLEARN_BAND_ALPHA, linewidth=0, zorder=7)
+        handle, = ax.plot(x, ml_band["mean"], color=_DATA_COLOR, linewidth=2.4, zorder=9,
+                          label=f"ML fit, generative\na={fit['alpha']:.3g}, b={fit['b']:.3g}\n"
+                                f"mean of {ml_band['n_sims']} sims\n({lo_q:.0%}-{hi_q:.0%} band)")
+        ml_handles.append(handle)
+        examples = np.asarray(ml_band.get("examples", np.zeros((0, x.size))), dtype=float)
+        for run in examples:
+            ax.plot(x, run, color=_DATA_COLOR, linewidth=_QLEARN_EXAMPLE_LW,
+                    alpha=_QLEARN_EXAMPLE_ALPHA, zorder=6)
+        if len(examples):
+            ml_handles.append(plt.Line2D([], [], color=_DATA_COLOR,
+                                         linewidth=_QLEARN_EXAMPLE_LW,
+                                         alpha=_QLEARN_EXAMPLE_ALPHA,
+                                         label=f"{len(examples)} individual runs\n"
+                                               f"(the mean is not one)"))
+    onestep = np.asarray(fit["p_short"], dtype=float)
+    if onestep.size == x.size and not np.all(np.isnan(onestep)):
+        handle, = ax.plot(x, onestep, color=_DATA_COLOR, linewidth=1.0,
+                          linestyle=_QLEARN_LINESTYLE, alpha=0.7, zorder=8,
+                          label=f"ML fit, one-step-ahead\n(conditioned on observed\n"
+                                f"choices) nll={fit['nll']:.1f}")
+        ml_handles.append(handle)
     _mark_sessions(ax, prep["session_ends"], label=False)
 
     # Two proxy legends: one for the alpha colours, one for the b linestyles. Neither draws
@@ -327,10 +446,11 @@ def plot_qlearning_sweep(prep: dict, variant: str, fit: dict, sweep: list[dict],
     b_handles = [plt.Line2D([], [], color="#666666", linewidth=1.4,
                             linestyle=_SWEEP_LINESTYLES[i % len(_SWEEP_LINESTYLES)],
                             label=f"b = {b:g}") for i, b in enumerate(bs)]
-    first = ax.legend(handles=[ml, *alpha_handles], loc="upper left", bbox_to_anchor=(1.02, 1.0),
-                      fontsize=7, frameon=False, title="alpha: learning rate", title_fontsize=7)
+    first = ax.legend(handles=[*ml_handles, *alpha_handles], loc="upper left",
+                      bbox_to_anchor=(1.02, 1.0), fontsize=7, frameon=False,
+                      title="alpha: learning rate", title_fontsize=7)
     ax.add_artist(first)
-    ax.legend(handles=b_handles, loc="upper left", bbox_to_anchor=(1.02, 0.42), fontsize=7,
+    ax.legend(handles=b_handles, loc="lower left", bbox_to_anchor=(1.02, 0.0), fontsize=7,
               frameon=False, title="b: inverse temp.", title_fontsize=7)
 
     ax.set_ylim(1.45, -0.35)  # inverted: SHORT on the lower row, LONG on the upper row
@@ -341,8 +461,16 @@ def plot_qlearning_sweep(prep: dict, variant: str, fit: dict, sweep: list[dict],
     ax.set_ylabel("P(SHORT)")
     held = (f"Q0 = ({fit['q0_short']:.2f}, {fit['q0_long']:.2f})"
             + (f", kappa = {fit['kappa']:.2f}" if variant == "qlearn_perseveration" else ""))
+    # Name which grid is drawn. The one-step-ahead grid carries the kappa * s_prev term, so with
+    # a non-zero kappa held at ML it spikes on every choice flip -- that is the curve tracking
+    # the lagged data, not plot noise, and it is exactly why the generative grid exists.
+    grid_note = ("grid lines are generative (each the mean of its own sims); hairlines are the "
+                 "one-step-ahead grid, which each point's nll scores"
+                 if has_generative else
+                 "grid lines are one-step-ahead, pairing with each point's nll")
     ax.set_title(f"{subject_label(prep)} - {variant} parameter sweep "
-                 f"({len(alphas)} x {len(bs)} grid; {held} held at ML)")
+                 f"({len(alphas)} x {len(bs)} grid; {held} held at ML)\n{grid_note}",
+                 fontsize=9)
     fig.tight_layout()
     # tight_layout sizes the axes without seeing the two out-of-axes legends, so their titles
     # would be clipped; reserve the right margin for them explicitly afterwards.

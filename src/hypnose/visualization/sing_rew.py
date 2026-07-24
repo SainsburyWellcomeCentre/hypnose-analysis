@@ -504,7 +504,7 @@ def FR_latency(
                 continue
             groups = {"False Response": fr_all, "Reward": rew_all}
             fig, ax = plt.subplots(figsize=(7, 5))
-            _plot_violin_with_stats(ax, groups, "Latency (ms)", "")
+            _plot_violins_with_stats(ax, groups, "Latency (ms)", "")
             ax.set_ylim(bottom=0)
             ax.set_title(f"Subjid {subjid} FR vs reward latency")
             fig.tight_layout()

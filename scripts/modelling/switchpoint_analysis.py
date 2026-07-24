@@ -57,6 +57,7 @@ from hypnose.modelling.switchpoint import (
     AB_LETTERS,
     MODEL_ORDER,
     N_STARTS,
+    QLEARN_DEFAULT_VARIANT,
     QLEARN_SWEEP_ALPHAS,
     QLEARN_SWEEP_BS,
     QLEARN_VARIANT_ORDER,
@@ -72,6 +73,7 @@ from hypnose.modelling.switchpoint import (
     pairwise_f,
     permutation_null_means,
     prepare_subject,
+    qlearning_generative_band,
     qlearning_parameter_sweep,
     residual_acf,
     subject_label,
@@ -92,6 +94,14 @@ from hypnose.visualization.modelling.switchpoint.plots import (
 _LOGLIK_REPORT_TOL = 1e-3
 
 # Which animals count as "has a switch" in run_permutation. Keys are the `inclusion` values.
+#
+# TODO (deferred): `qlearning` is now a real fit and is eligible to win compare_models, so
+# `bic_switch_wins` and `aic_switch_wins` silently drop any animal where the mechanistic null
+# takes the BIC/AIC crown -- an exclusion that did not exist while qlearning was a stub, and
+# one that is currently invisible in the printed "no switch under '<rule>'" line beyond the
+# named winner. Make it an explicit, counted choice: either a rule that treats a qlearning win
+# as "no abrupt switch" deliberately, or one that ranks the switch model against the
+# descriptive models only. Not changed here.
 _INCLUSION_RULES = {
     # Strictest: the 3-parameter switch beats BOTH the constant and the 4-parameter
     # logistic on BIC, i.e. the change is real *and* abrupt rather than a slow drift.
@@ -202,8 +212,13 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
         return None
 
     fit = fit_switchpoint(prep["s"])
-    comparison = compare_models(prep["s"])
+    # Fit the Q-learning variants FIRST, then hand compare_models the one it scores: otherwise
+    # it would run a second, identical multi-start of that same variant on the same sequence.
     qlearning_fits = fit_qlearning_variants(prep["s"]) if qlearning_overlay else None
+    comparison = compare_models(
+        prep["s"], qlearning_fits[QLEARN_DEFAULT_VARIANT] if qlearning_fits else None)
+    qlearning_bands = ({v: qlearning_generative_band(f, prep["n_trials"])
+                        for v, f in qlearning_fits.items()} if qlearning_fits else None)
     tau = fit["tau"]
     global_tau = int(prep["global_ids"][tau])
     tau_session = prep["session_labels"][int(prep["session_index"][tau])]
@@ -225,14 +240,15 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
 
     figures = {
         "strategy": plot_strategy(prep, rewarded_only),
-        "model_comparison": plot_model_comparison(prep, comparison, qlearning_fits),
+        "model_comparison": plot_model_comparison(prep, comparison, qlearning_fits,
+                                                  qlearning_bands),
         "posterior": plot_posterior(prep, fit, likelihood_window),
     }
     return {
         "tau": tau, "global_tau": global_tau, "tau_session": tau_session, "hdi": fit["hdi"],
         "hdi_width": hdi_width, "fwhm": fit["fwhm"], "fwhm_width": fwhm_width,
         "p1": fit["p1"], "p2": fit["p2"], "posterior": fit["posterior"], "comparison": comparison,
-        "qlearning": qlearning_fits,
+        "qlearning": qlearning_fits, "qlearning_bands": qlearning_bands,
         "session_ends": prep["session_ends"], "session_starts": prep["session_starts"],
         "session_labels": prep["session_labels"], "n_trials": prep["n_trials"],
         "ab_split": prep.get("ab_split"), "prep": prep, "figures": figures,
@@ -251,10 +267,11 @@ def run_analysis(
     """Fit and plot the strategy switch for each subject independently.
 
     Produces three figures per animal, in this order: the binary SHORT/LONG strategy coloured
-    by reward identity, with sleep markers; the constant/switch/logistic model comparison with
-    AIC and BIC in-panel; and the switch-point posterior windowed around its peak. The peak
-    trial, its session, and the HDI width are printed as well as annotated. Figures are shown
-    one animal at a time, so an animal's plots stay together and in order.
+    by reward identity, with sleep markers; the five-model comparison
+    (constant / switch / logistic / switch2 / qlearning) with AIC and BIC in-panel; and the
+    switch-point posterior windowed around its peak. The peak trial, its session, and the HDI
+    width are printed as well as annotated. Figures are shown one animal at a time, so an
+    animal's plots stay together and in order.
 
     Unless ``qlearning_overlay=False``, the three Q-learning variants -- the mechanistic null --
     are also fitted per animal (per A/B subset, with ``split_ab``), tabulated, and overlaid on
@@ -291,7 +308,8 @@ def run_analysis(
     dict
         Keyed by subjid. Each value holds ``tau``, ``global_tau``, ``tau_session``, ``hdi``,
         ``hdi_width``, ``fwhm``, ``fwhm_width``, ``p1``, ``p2``, ``comparison``, ``qlearning``
-        (the three variant fits, or None when the overlay is off), ``session_ends``,
+        (the three variant fits, or None when the overlay is off), ``qlearning_bands`` (each
+        variant's ``qlearning_generative_band``, or None likewise), ``session_ends``,
         ``session_starts``, ``session_labels``, ``n_trials``, ``ab_split``, ``prep``, and
         ``figures`` (``strategy``, ``model_comparison``, ``posterior``).
 
@@ -348,11 +366,16 @@ def _sweep_sequence(prep: dict, alphas: Sequence[float], bs: Sequence[float],
           f"(alpha, b) grid per variant)")
     _print_qlearning_table(fits)
 
-    sweeps, figures = {}, {}
+    sweeps, bands, figures = {}, {}, {}
     for variant in QLEARN_VARIANT_ORDER:
-        sweeps[variant] = qlearning_parameter_sweep(prep["s"], fits[variant], alphas, bs)
+        # generative=True: with kappa held at ML across the grid, one-step-ahead lines would all
+        # step at the animal's switch trial regardless of alpha and b, which is the opposite of
+        # what this figure is for.
+        sweeps[variant] = qlearning_parameter_sweep(prep["s"], fits[variant], alphas, bs,
+                                                    generative=True)
+        bands[variant] = qlearning_generative_band(fits[variant], prep["n_trials"])
         figures[variant] = plot_qlearning_sweep(prep, variant, fits[variant], sweeps[variant],
-                                                alphas, bs)
+                                                alphas, bs, bands[variant])
         # The ML fit must be at least as good as any grid point of the same variant -- the grid
         # lies inside the search space. A grid point beating it means the multi-start missed.
         best_grid = min(point["nll"] for point in sweeps[variant])
@@ -360,8 +383,8 @@ def _sweep_sequence(prep: dict, alphas: Sequence[float], bs: Sequence[float],
             print(f"  NOTE: {variant}: a grid point reached nll {best_grid:.3f} < the ML fit's "
                   f"{fits[variant]['nll']:.3f} -- the multi-start missed the optimum.")
 
-    return {"fits": fits, "sweeps": sweeps, "alphas": tuple(alphas), "bs": tuple(bs),
-            "ab_split": prep.get("ab_split"), "prep": prep, "figures": figures}
+    return {"fits": fits, "sweeps": sweeps, "bands": bands, "alphas": tuple(alphas),
+            "bs": tuple(bs), "ab_split": prep.get("ab_split"), "prep": prep, "figures": figures}
 
 
 def run_qlearning_sweep(
