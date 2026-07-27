@@ -85,6 +85,7 @@ from hypnose.visualization.modelling.switchpoint.plots import (
     plot_multistart,
     plot_permutation,
     plot_posterior,
+    plot_qlearning_generative,
     plot_qlearning_sweep,
     plot_residual_autocorr,
     plot_strategy,
@@ -217,9 +218,11 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
     """Fit, print and plot one SHORT/LONG sequence -- a whole animal, or one A/B split of it.
 
     Figures are built in the order they should be read: strategy, model comparison, posterior.
-    With ``qlearning_overlay`` the three Q-learning variants are fitted to the same sequence,
-    tabulated, and drawn on the model-comparison figure. Returns None (after a message) when the
-    sequence is too short to fit.
+    With ``qlearning_overlay`` the three Q-learning variants are fitted to the same sequence and
+    tabulated; their one-step-ahead fits are drawn on the model-comparison figure, and a fourth
+    ``generative`` figure shows what each variant actually predicts (its own simulated runs, mean
+    and band) against the observed switch. Returns None (after a message) when the sequence is
+    too short to fit.
     """
     label = subject_label(prep)
     if prep["n_trials"] < 2:
@@ -255,10 +258,12 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
 
     figures = {
         "strategy": plot_strategy(prep, rewarded_only),
-        "model_comparison": plot_model_comparison(prep, comparison, qlearning_fits,
-                                                  qlearning_bands),
+        "model_comparison": plot_model_comparison(prep, comparison, qlearning_fits),
         "posterior": plot_posterior(prep, fit, likelihood_window),
     }
+    if qlearning_fits:
+        figures["generative"] = plot_qlearning_generative(prep, qlearning_fits, qlearning_bands,
+                                                          fit)
     return {
         "tau": tau, "global_tau": global_tau, "tau_session": tau_session, "hdi": fit["hdi"],
         "hdi_width": hdi_width, "fwhm": fit["fwhm"], "fwhm_width": fwhm_width,
@@ -314,9 +319,10 @@ def run_analysis(
     show : bool
         Call ``plt.show()`` after each animal. Set False in notebooks to hold the figures.
     qlearning_overlay : bool
-        Fit the three Q-learning variants and overlay their P(SHORT) trajectories on the
-        model-comparison figure (default True). Set False to skip the fits entirely -- the
-        figure and the printed output then match the pre-Q-learning behaviour.
+        Fit the three Q-learning variants (default True). Their one-step-ahead fits are overlaid
+        on the model-comparison figure and an extra ``generative`` figure is produced. Set False
+        to skip the fits entirely -- the figures and the printed output then match the
+        pre-Q-learning behaviour, and no ``generative`` figure is built.
 
     Returns
     -------
@@ -326,7 +332,8 @@ def run_analysis(
         (the three variant fits, or None when the overlay is off), ``qlearning_bands`` (each
         variant's ``qlearning_generative_band``, or None likewise), ``session_ends``,
         ``session_starts``, ``session_labels``, ``n_trials``, ``ab_split``, ``prep``, and
-        ``figures`` (``strategy``, ``model_comparison``, ``posterior``).
+        ``figures`` (``strategy``, ``model_comparison``, ``posterior``, and -- when the overlay
+        is on -- ``generative``).
 
         With ``split_ab=True`` that value is instead nested one level deeper, keyed by reward
         identity: ``results[subjid]["A"]`` and ``results[subjid]["B"]``.

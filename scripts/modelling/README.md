@@ -277,36 +277,44 @@ perm["observed_mean"], perm["p_value"], perm["null_means"], perm["n_pairs_droppe
 date list, or `None` for all sessions. A `{subjid: date_range}` dict may be passed as
 `subjids` on its own, matching the convention of the plotters in `hypnose.visualization`.
 
-### `run_analysis` — three figures per animal
+### `run_analysis` — figures per animal
 
 Shown in this order, one animal at a time, so an animal's figures stay together rather than
-interleaving with another's. **SHORT is the lower row, LONG the upper row** in the first two.
+interleaving with another's. **SHORT is the lower row, LONG the upper row.** Three figures with
+`qlearning_overlay=False`, four with the overlay on (the default).
 
 1. **Strategy** — SHORT/LONG per trial on the continuous trial axis, each trial coloured by
    its reward identity (A red, B teal, unresolved grey), with a blue dotted vertical line at
    each session end (sleep).
-2. **Model comparison** — the data with every fitted model overlaid (constant line, switch
-   step, switch2 two-step, logistic curve), plus an empirical 21-trial rolling mean, and the
-   five-row AIC/BIC table in-panel with the BIC winner marked, so *no switch / abrupt /
-   gradual / two-stage* can be read off directly. The printed table adds each model's loglik,
-   the nesting check, and the winner's fitted parameters.
+2. **Model comparison** — the data with every fitted model overlaid as **one fitted line each**
+   (constant line, switch step, switch2 two-step, logistic curve), plus an empirical 21-trial
+   rolling mean, and the five-row AIC/BIC table in-panel with the BIC winner marked, so *no
+   switch / abrupt / gradual / two-stage* can be read off directly. The printed table adds each
+   model's loglik, the nesting check, and the winner's fitted parameters.
 
-   Unless `qlearning_overlay=False`, the three Q-learning variants are also drawn here, as
-   **dash-dot curves labelled `(null)`** in the legend — one colour each, annotated with their
-   `alpha`, `b` and BIC, and tagged `[bound]` when an estimate stopped against a bound. They
-   are the mechanistic null: they should visibly fail to reproduce the step. A second printed
-   table gives all three variants' estimates, nll, AIC/BIC and start-convergence counts.
-   Unlike the descriptive curves these are **not functions of the trial index** — they are
-   driven by the animal's own choice history, so they look step-like wherever its run of
-   choices was one-sided.
+   Unless `qlearning_overlay=False`, the three Q-learning variants are also drawn here, one
+   **solid line each labelled `(null)`** — the variant's **one-step-ahead** curve, the quantity
+   its AIC/BIC scores. That curve is conditioned on the animal's own choices, so it is *not* a
+   prediction of the trajectory (with a large `kappa` it becomes a one-trial-lagged copy of the
+   data); the honest, generative view is figure 4. A second printed table gives all three
+   variants' estimates, nll, AIC/BIC, start-convergence counts, and — per variant — the fraction
+   of generative runs that switch and their switch-trial spread.
 3. **Posterior** — the switch-point posterior over *all* trials, plotted windowed to
    ±`likelihood_window` trials around its peak. `tau`, its session, and the HDI width are
    printed and annotated (HDI primary, FWHM secondary).
+4. **Q-learning generative** (overlay only) — three stacked panels, one per variant, showing
+   what each fitted null actually *predicts*: the model run forward on its own choices, drawn as
+   the generative mean (thick), the 5–95% band, and a handful of individual simulated runs
+   (faint). The observed `tau` and its 95% HDI are marked in every panel, so the few trials the
+   animal's switch is localised to sit directly against the null's own switch-trial spread —
+   typically hundreds of trials wide — with the contrast stated numerically per panel. The
+   individual runs are the point for `qlearn_perseveration`: each steps abruptly at its own
+   trial, so their mean is a smooth ramp that no single run resembles.
 
 #### `split_ab`
 
 With `split_ab=True` the trials are split by reward identity and **each subset is modelled and
-plotted independently** — six figures per animal, the three above for A then the three for B.
+plotted independently** — twice the figures per animal, the set above for A then for B.
 Each subset gets its own contiguous `0 .. m-1` trial axis, because the switch-point index must
 index the sequence being fitted; `tau` is therefore a position within that subset, and
 `global_tau` reports the same trial's position on the full, unsplit axis. Session boundaries
@@ -318,7 +326,8 @@ This matters when an animal adopts the SHORT strategy for one reward before the 
 (20251212), a four-day gap the pooled fit averages away.
 
 Returns a dict keyed by subjid holding `tau`, `tau_session`, `hdi`, `hdi_width`, `fwhm`,
-`p1`, `p2`, `comparison`, `qlearning`, `session_ends`, `session_starts`, and the `figures`.
+`p1`, `p2`, `comparison`, `qlearning`, `qlearning_bands`, `session_ends`, `session_starts`, and
+the `figures` (`strategy`, `model_comparison`, `posterior`, and `generative` with the overlay).
 
 ### `run_qlearning_sweep` — what can a Q-learner actually look like?
 
@@ -438,6 +447,30 @@ python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 45 48 
 one date range to every subject — for per-subject ranges, call the functions directly.
 Subjects with no data are skipped via `hypnose.qc.validate.validate_subject`, as in the other
 scripts.
+
+## Deferred (planned follow-ups)
+
+Not implemented yet; recorded here so the intent is not lost.
+
+- **Transition-width comparison figure.** For every model *and* the empirical data, compute the
+  transition width the same way — the number of trials it takes P(SHORT) to cross from 0.1 to
+  0.9 — and show the per-model distribution of that width on one axis. The point is to put the
+  near-instant descriptive fits (`switch` is a step, `logistic` steep) and the wide Q-learning
+  *generative* spreads on a common ruler, so "how abrupt" becomes a single comparable number
+  rather than a per-figure impression. For the Q-learning variants the width is measured on the
+  simulated runs, **switched runs only** (`p2 - p1 >= switch_threshold`, as in
+  `qlearning_generative_band`), and reported alongside `frac_switched` — a variant that seldom
+  switches is failing differently from one that switches over a wide window, and the width alone
+  hides that. Builds on the `crossing_widths` helper sketched for this (0.1→0.9 crossing on an
+  arbitrary trajectory); wire it through `compare_models` outputs and the generative bands.
+
+- **Interactive fit explorer (notebook only, not a paper figure).** An `ipywidgets` tool: pick
+  an animal and a variant, get sliders for `alpha`, `b`, `Q0_short`, `Q0_long`, `kappa`, and
+  redraw live over that animal's trial data — the one-step-ahead curve always, the generative
+  mean and band on demand. Cheap enough to be interactive: `_trajectory_unchecked` is
+  closed-form (no per-trial loop) and `simulate_qlearning` is vectorised across simulations, so
+  a slider drag is a couple of array passes. For exploring how the fitted parameters shape the
+  curve and sanity-checking a fit by hand, not for the manuscript.
 
 ## Caveats
 

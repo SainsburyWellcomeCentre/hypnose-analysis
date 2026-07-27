@@ -95,8 +95,9 @@ the value-learning part of the model is doing.
 ``qlearning_generative_band`` returns the **generative** trajectory: the model run forward on
 its *own* choices, averaged over many simulations, with a quantile band. That is what the
 fitted Q-learner actually predicts an animal would do, and it is the one to read when asking
-whether the null can reproduce an abrupt switch. It is the visually dominant overlay in the
-figures for exactly this reason.
+whether the null can reproduce an abrupt switch. It gets its own figure
+(``plot_qlearning_generative``) for exactly this reason, kept apart from the one-step-ahead fit
+that the model-comparison figure draws, so the two are never mistaken for each other.
 
 Closed form
 -----------
