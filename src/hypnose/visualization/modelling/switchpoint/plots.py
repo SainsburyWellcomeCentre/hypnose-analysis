@@ -272,7 +272,7 @@ def plot_model_comparison(prep: dict, comparison: dict, qlearning_fits: dict | N
 
 
 def plot_qlearning_generative(prep: dict, qlearning_fits: dict, qlearning_bands: dict,
-                              switch_fit: dict):
+                              switch_fit: dict, show_hdi: bool = True):
     """The honest Q-learning view: what each fitted variant *generates*, one panel per variant.
 
     Three stacked panels sharing the trial axis, one per variant. Each draws the binary trial
@@ -282,9 +282,13 @@ def plot_qlearning_generative(prep: dict, qlearning_fits: dict, qlearning_bands:
     abruptly at its own trial, so their mean is a smooth ramp that no single run resembles, and
     only the runs reveal that.
 
-    The observed switch-point ``tau`` and its 95% HDI are marked in every panel, so the width the
-    animal's switch is localised to (typically a handful of trials) sits directly against the
-    generative spread of the null's own switch trials (typically hundreds). That contrast is the
+    The observed switch-point ``tau`` line is marked in every panel. Its 95% HDI band (and the
+    HDI-width figures in the legend and annotation) are drawn only when ``show_hdi`` is True: when
+    there is no abrupt switch the posterior is flat and the HDI spans essentially all trials, so a
+    band shaded across the whole panel would be meaningless. The caller decides -- ``run_analysis``
+    passes ``show_hdi=True`` only when the switch model wins BIC. When the band is shown, the width
+    the animal's switch is localised to (typically a handful of trials) sits directly against the
+    generative spread of the null's own switch trials (typically hundreds); that contrast is the
     figure's whole point, and it is stated numerically in each panel's annotation:
     ``frac_switched`` of the runs reach the switch criterion at all, and their switch trials span
     a 5-95% range printed beside the observed HDI width.
@@ -301,10 +305,15 @@ def plot_qlearning_generative(prep: dict, qlearning_fits: dict, qlearning_bands:
         fit, band = qlearning_fits.get(variant), qlearning_bands.get(variant)
         ax.plot(x, s, marker="|", linestyle="none", markersize=6, color=_DATA_COLOR,
                 alpha=0.30, zorder=2)
-        # The observed abrupt switch: tau localised to its HDI. The contrast the panel is for.
-        ax.axvspan(hdi_lo, hdi_hi, color=_SWITCH_COLOR, alpha=0.12, zorder=1)
+        # The observed abrupt switch: tau, localised to its HDI. The contrast the panel is for.
+        # The HDI band is drawn only when the switch is real (show_hdi); otherwise a flat
+        # posterior would shade the band across every trial. The tau line is always drawn.
+        if show_hdi:
+            ax.axvspan(hdi_lo, hdi_hi, color=_SWITCH_COLOR, alpha=0.12, zorder=1)
+        tau_label = f"observed switch tau = {tau}" + (f" (95% HDI width {hdi_width})"
+                                                      if show_hdi else "")
         ax.axvline(tau, color=_SWITCH_COLOR, linestyle="--", linewidth=1.1, zorder=3,
-                   label=f"observed switch tau = {tau} (95% HDI width {hdi_width})")
+                   label=tau_label)
 
         note = _qlearn_label(variant, fit) if fit else f"{_QLEARN_SHORT_LABELS[variant]}: no fit"
         if band and band["n_sims"] and np.isfinite(band["mean"]).any():
@@ -320,9 +329,9 @@ def plot_qlearning_generative(prep: dict, qlearning_fits: dict, qlearning_bands:
             taus = np.asarray(band.get("switch_taus_switched", np.zeros(0)), dtype=float)
             if taus.size:
                 g_lo, g_hi = np.percentile(taus, [5, 95])
+                vs_hdi = f" vs observed HDI width {hdi_width}" if show_hdi else ""
                 spread = (f"{band['frac_switched']:.0%} of runs switch; their tau spans "
-                          f"5-95% = {g_lo:.0f}-{g_hi:.0f} (width {g_hi - g_lo:.0f}) "
-                          f"vs observed HDI width {hdi_width}")
+                          f"5-95% = {g_lo:.0f}-{g_hi:.0f} (width {g_hi - g_lo:.0f}){vs_hdi}")
             else:
                 spread = (f"only {band['frac_switched']:.0%} of runs reach the switch "
                           f"criterion -- the null rarely switches at all")

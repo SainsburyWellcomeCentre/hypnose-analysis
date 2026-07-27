@@ -214,7 +214,7 @@ def _print_model_table(comparison: dict) -> None:
 
 
 def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
-                      qlearning_overlay: bool = True) -> Optional[dict]:
+                      qlearning_overlay: bool = True, defer_figures: bool = False) -> Optional[dict]:
     """Fit, print and plot one SHORT/LONG sequence -- a whole animal, or one A/B split of it.
 
     Figures are built in the order they should be read: strategy, model comparison, posterior.
@@ -223,6 +223,11 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
     ``generative`` figure shows what each variant actually predicts (its own simulated runs, mean
     and band) against the observed switch. Returns None (after a message) when the sequence is
     too short to fit.
+
+    With ``defer_figures`` the maths and printing happen as usual but no figure is created; the
+    returned ``figures`` dict is left empty and the caller builds the figures later via
+    ``_build_sequence_figure`` (used by ``run_analysis`` to interleave the A and B splits by
+    figure kind rather than emit all of A's figures before any of B's).
     """
     label = subject_label(prep)
     if prep["n_trials"] < 2:
@@ -256,23 +261,71 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
     if qlearning_fits:
         _print_qlearning_table(qlearning_fits, qlearning_bands)
 
-    figures = {
-        "strategy": plot_strategy(prep, rewarded_only),
-        "model_comparison": plot_model_comparison(prep, comparison, qlearning_fits),
-        "posterior": plot_posterior(prep, fit, likelihood_window),
-    }
-    if qlearning_fits:
-        figures["generative"] = plot_qlearning_generative(prep, qlearning_fits, qlearning_bands,
-                                                          fit)
-    return {
+    result = {
         "tau": tau, "global_tau": global_tau, "tau_session": tau_session, "hdi": fit["hdi"],
         "hdi_width": hdi_width, "fwhm": fit["fwhm"], "fwhm_width": fwhm_width,
         "p1": fit["p1"], "p2": fit["p2"], "posterior": fit["posterior"], "comparison": comparison,
         "qlearning": qlearning_fits, "qlearning_bands": qlearning_bands,
         "session_ends": prep["session_ends"], "session_starts": prep["session_starts"],
         "session_labels": prep["session_labels"], "n_trials": prep["n_trials"],
-        "ab_split": prep.get("ab_split"), "prep": prep, "figures": figures,
+        "ab_split": prep.get("ab_split"), "prep": prep, "fit": fit, "figures": {},
     }
+    if not defer_figures:
+        for kind in _FIGURE_KINDS:
+            fig = _build_sequence_figure(result, kind, rewarded_only, likelihood_window)
+            if fig is not None:
+                result["figures"][kind] = fig
+    return result
+
+
+# The figure kinds one sequence produces, in read order. `generative` is skipped when the
+# Q-learning overlay is off (its inputs are None); see `_build_sequence_figure`.
+_FIGURE_KINDS = ("strategy", "model_comparison", "posterior", "generative")
+
+
+def _build_sequence_figure(result: dict, kind: str, rewarded_only: bool, likelihood_window: int):
+    """Create one figure of the given kind for a sequence analysed by ``_analyse_sequence``.
+
+    Kept separate from the maths so ``run_analysis`` can interleave the A and B splits by figure
+    kind. Returns None for ``generative`` when the Q-learning overlay was off for this sequence.
+    """
+    prep = result["prep"]
+    if kind == "strategy":
+        return plot_strategy(prep, rewarded_only)
+    if kind == "model_comparison":
+        return plot_model_comparison(prep, result["comparison"], result["qlearning"])
+    if kind == "posterior":
+        return plot_posterior(prep, result["fit"], likelihood_window)
+    if kind == "generative":
+        if result["qlearning"] is None:
+            return None
+        # Show the observed switch's 95% HDI band only when the switch model wins BIC -- i.e. when
+        # there is a real abrupt switch to localise. Without one the posterior is flat and the HDI
+        # spans essentially every trial, so the band would shade the whole panel meaninglessly.
+        show_hdi = result["comparison"]["best_bic"] == "switch"
+        return plot_qlearning_generative(prep, result["qlearning"], result["qlearning_bands"],
+                                         result["fit"], show_hdi=show_hdi)
+    raise ValueError(f"unknown figure kind {kind!r}")
+
+
+def _show_figures(show: bool) -> None:
+    """Render the figures built so far, preserving the order they were created in.
+
+    In an interactive notebook backend (ipympl ``widget`` / ``inline``) every figure created in
+    the cell is auto-displayed at cell end, in creation order, by the backend's ``post_execute``
+    flush hook -- so we must NOT also call ``plt.show()`` there. ipympl's ``show()`` eagerly
+    displays only the *active* (last-created) figure mid-execution and drops it from the flush
+    queue, which floats it above all the others; this is why the last-built (reward-B Q-learning)
+    figure used to appear first. For non-interactive/GUI backends (the CLI) nothing auto-displays,
+    so ``plt.show()`` is still required.
+    """
+    if not show:
+        return
+    backend = plt.get_backend().lower()
+    notebook = any(tag in backend for tag in ("ipympl", "nbagg", "inline")) or backend == "widget"
+    if notebook and plt.isinteractive():
+        return  # the flush hook will display them in creation order
+    plt.show()
 
 
 def run_analysis(
@@ -291,7 +344,9 @@ def run_analysis(
     (constant / switch / logistic / switch2 / qlearning) with AIC and BIC in-panel; and the
     switch-point posterior windowed around its peak. The peak trial, its session, and the HDI
     width are printed as well as annotated. Figures are shown one animal at a time, so an
-    animal's plots stay together and in order.
+    animal's plots stay together and in order. With ``split_ab`` the reward-A and reward-B
+    figures of one animal are interleaved by kind (A strategy, B strategy, A model comparison,
+    B model comparison, ...), so same-kind figures sit next to each other.
 
     Unless ``qlearning_overlay=False``, the three Q-learning variants -- the mechanistic null --
     are also fitted per animal (per A/B subset, with ``split_ab``), tabulated, and overlaid on
@@ -317,7 +372,9 @@ def run_analysis(
         unresolved fall into neither subset. When False (default) all trials are modelled as
         one sequence and reward identity only colours the strategy plot.
     show : bool
-        Call ``plt.show()`` after each animal. Set False in notebooks to hold the figures.
+        Display each animal's figures once built (default True). In an interactive notebook
+        backend the figures are shown by the backend's own flush hook, in creation order; on
+        other backends this triggers ``plt.show()``. See ``_show_figures``.
     qlearning_overlay : bool
         Fit the three Q-learning variants (default True). Their one-step-ahead fits are overlaid
         on the model-comparison figure and an extra ``generative`` figure is produced. Set False
@@ -331,9 +388,9 @@ def run_analysis(
         ``hdi_width``, ``fwhm``, ``fwhm_width``, ``p1``, ``p2``, ``comparison``, ``qlearning``
         (the three variant fits, or None when the overlay is off), ``qlearning_bands`` (each
         variant's ``qlearning_generative_band``, or None likewise), ``session_ends``,
-        ``session_starts``, ``session_labels``, ``n_trials``, ``ab_split``, ``prep``, and
-        ``figures`` (``strategy``, ``model_comparison``, ``posterior``, and -- when the overlay
-        is on -- ``generative``).
+        ``session_starts``, ``session_labels``, ``n_trials``, ``ab_split``, ``prep``, ``fit``
+        (the switch-point fit), and ``figures`` (``strategy``, ``model_comparison``,
+        ``posterior``, and -- when the overlay is on -- ``generative``).
 
         With ``split_ab=True`` that value is instead nested one level deeper, keyed by reward
         identity: ``results[subjid]["A"]`` and ``results[subjid]["B"]``.
@@ -350,18 +407,29 @@ def run_analysis(
                     print(f"[switchpoint] Subject {subjid}: {unresolved} trial(s) of "
                           f"{prep['n_trials']} have no reward identity; excluded from the split.")
                 splits = {letter: _analyse_sequence(subset_by_ab(prep, letter), rewarded_only,
-                                                    likelihood_window, qlearning_overlay)
+                                                    likelihood_window, qlearning_overlay,
+                                                    defer_figures=True)
                           for letter in AB_LETTERS}
                 splits = {letter: r for letter, r in splits.items() if r is not None}
                 if splits:
+                    # Interleave the splits by figure kind: all splits' strategy figures, then
+                    # all their model-comparison figures, and so on -- so within an animal the
+                    # reward-A and reward-B figures of the same kind sit next to each other,
+                    # rather than every A figure preceding every B figure.
+                    for kind in _FIGURE_KINDS:
+                        for letter, r in splits.items():
+                            fig = _build_sequence_figure(r, kind, rewarded_only, likelihood_window)
+                            if fig is not None:
+                                r["figures"][kind] = fig
                     results[subjid] = splits
             else:
                 result = _analyse_sequence(prep, rewarded_only, likelihood_window,
                                            qlearning_overlay)
                 if result is not None:
                     results[subjid] = result
-            if show:
-                plt.show()  # per animal, so its figures stay grouped and ordered
+            # Per animal: build figures for this subject, then display. In the notebook the
+            # flush hook renders them in creation order; see _show_figures.
+            _show_figures(show)
     return results
 
 
@@ -470,8 +538,7 @@ def run_qlearning_sweep(
                 result = _sweep_sequence(prep, alphas, bs, n_starts, seed)
                 if result is not None:
                     results[subjid] = result
-            if show:
-                plt.show()
+            _show_figures(show)
     return results
 
 
@@ -562,8 +629,7 @@ def run_logistic_diagnostic(
                 result = _diagnose_sequence(prep)
                 if result is not None:
                     results[subjid] = result
-            if show:
-                plt.show()
+            _show_figures(show)
     return results
 
 
@@ -707,8 +773,7 @@ def run_residual_autocorrelation(
                 result = _autocorr_sequence(prep, max_lag)
                 if result is not None:
                     results[subjid] = result
-            if show:
-                plt.show()
+            _show_figures(show)
     return results
 
 
@@ -862,8 +927,7 @@ def run_permutation(
     with plt.rc_context(nature_style()):
         fig = plot_permutation(real_f, shuffled_f, null_means, observed_mean, p_value,
                                n_permutations, len(included), inclusion)
-        if show:
-            plt.show()
+        _show_figures(show)
 
     return {"real_f": real_f, "shuffled_f": shuffled_f, "null_means": null_means,
             "observed_mean": observed_mean, "p_value": p_value, "n_permutations": n_permutations,
