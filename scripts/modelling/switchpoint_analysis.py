@@ -49,7 +49,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 import numpy as np
 import matplotlib.pyplot as plt
 
-from hypnose.io.save import nature_style
+from hypnose.io.save import nature_style, save_figure
 from hypnose.qc.validate import validate_subject
 from hypnose.modelling.switchpoint import (
     ACF_MATERIAL_THRESHOLD,
@@ -284,6 +284,31 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
 # Q-learning overlay is off (its inputs are None); see `_build_sequence_figure`.
 _FIGURE_KINDS = ("strategy", "model_comparison", "posterior", "generative")
 
+# Base file name per figure kind for `save=True`. The reward letter (A/B) is prefixed for a
+# split_ab sequence, giving e.g. "A_all_models", "B_qlearning_generative"; `save_figure` then
+# appends the subject/date tags. Short and informative.
+_FIGURE_SAVE_NAMES = {
+    "strategy": "strategy",
+    "model_comparison": "all_models",
+    "posterior": "switch_posterior",
+    "generative": "qlearning_generative",
+}
+
+
+def _save_sequence_figures(result: dict, subjid: int, dates) -> list:
+    """Save each of a sequence's figures as its own PDF under the subject's figures directory.
+
+    File names are ``<letter>_<kind>`` (the letter present only for an A/B split), e.g.
+    ``A_all_models`` or ``B_qlearning_generative``; ``save_figure`` appends the subject/date tags
+    and resolves the path -- subject-level (``derivatives/sub-NNN_id-*/figures``) for the
+    multi-date ranges this analysis uses. Returns the saved paths.
+    """
+    letter = result.get("ab_split")
+    prefix = f"{letter}_" if letter else ""
+    return [save_figure(fig, f"{prefix}{_FIGURE_SAVE_NAMES.get(kind, kind)}",
+                        subjids=[subjid], dates=dates)
+            for kind, fig in result["figures"].items()]
+
 
 def _build_sequence_figure(result: dict, kind: str, rewarded_only: bool, likelihood_window: int,
                            around_switch: bool = False, plot_trials: int = 200):
@@ -343,6 +368,7 @@ def run_analysis(
     qlearning_overlay: bool = True,
     around_switch: bool = False,
     plot_trials: int = 200,
+    save: bool = False,
 ) -> dict:
     """Fit and plot the strategy switch for each subject independently.
 
@@ -393,6 +419,11 @@ def run_analysis(
         are unaffected.
     plot_trials : int
         Half-width in trials of the ``around_switch`` crop (default 200).
+    save : bool
+        Save every figure to disk (default False). Each is written as its own PDF into the
+        subject's ``derivatives/sub-NNN_id-*/figures`` directory via ``save_figure``, named by
+        figure kind with the reward letter prefixed for a split (e.g. ``A_all_models``,
+        ``B_qlearning_generative``). Independent of ``show``.
 
     Returns
     -------
@@ -442,6 +473,16 @@ def run_analysis(
                                            plot_trials=plot_trials)
                 if result is not None:
                     results[subjid] = result
+            # Save this subject's figures (one PDF each) before display. A stored value is either a
+            # single sequence (has a "figures" key) or a {letter: sequence} split.
+            if save and subjid in results:
+                stored = results[subjid]
+                seqs = [stored] if "figures" in stored else list(stored.values())
+                saved = [p for seq in seqs
+                         for p in _save_sequence_figures(seq, subjid, dates_for(subjid))]
+                if saved:
+                    print(f"[switchpoint] Subject {subjid}: saved {len(saved)} figure(s) to "
+                          f"{saved[0].parent}")
             # Per animal: build figures for this subject, then display. In the notebook the
             # flush hook renders them in creation order; see _show_figures.
             _show_figures(show)
@@ -999,6 +1040,8 @@ def main() -> int:
                           help="crop the model-comparison figure to trials near the switch")
     analysis.add_argument("--plot-trials", type=int, default=200,
                           help="half-width in trials of the --around-switch crop (default: 200)")
+    analysis.add_argument("--save", action="store_true",
+                          help="save each figure as a PDF in the subject's derivatives figures dir")
 
     qsweep = subparsers.add_parser("qsweep",
                                    help="Q-learning (alpha, b) parameter sweep, one figure per "
@@ -1044,7 +1087,7 @@ def main() -> int:
         run_analysis(subjids, date_ranges, rewarded_only=args.rewarded_only,
                      likelihood_window=args.likelihood_window, split_ab=args.split_ab, show=True,
                      qlearning_overlay=not args.no_qlearning, around_switch=args.around_switch,
-                     plot_trials=args.plot_trials)
+                     plot_trials=args.plot_trials, save=args.save)
     elif args.command == "qsweep":
         run_qlearning_sweep(subjids, date_ranges, rewarded_only=args.rewarded_only,
                             split_ab=args.split_ab, n_starts=args.n_starts, seed=args.seed,
