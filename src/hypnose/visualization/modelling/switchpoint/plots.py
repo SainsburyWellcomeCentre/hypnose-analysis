@@ -25,9 +25,9 @@ from hypnose.modelling.switchpoint.qlearning import (
 # --- style constants ----------------------------------------------------------------------
 _SESSION_LINE_COLOR = "tab:blue"
 _CONSTANT_COLOR = "#3C5488"
-_SWITCH_COLOR = "#E64B35"
+_SWITCH_COLOR = "#FF26F4"
 _SWITCH2_COLOR = "#8491B4"
-_LOGISTIC_COLOR = "#00A087"
+_LOGISTIC_COLOR = "#E2BA06"
 _DATA_COLOR = "#2b2b2b"
 
 # Q-learning null: one colour per variant.
@@ -67,6 +67,13 @@ _AB_UNKNOWN_COLOR = "#BDBDBD"
 
 # Trials per bin of the empirical P(SHORT) trace drawn under the model fits.
 _ROLLING_WINDOW = 21
+
+# Model-comparison figure: the switch step and the logistic sigmoid coincide when the switch is
+# sharp. When their largest vertical gap over the trial axis is below _CURVE_OVERLAP_TOL they are
+# treated as overlapping, and each is nudged by +/-_CURVE_OFFSET (in P(SHORT)) so both stay
+# visible instead of one hiding the other.
+_CURVE_OFFSET = 0.02
+_CURVE_OVERLAP_TOL = 0.06
 
 # Multi-start diagnostic: y positions of the initial/converged midpoint strip, in data
 # coordinates above the LONG row (the axis is inverted, so these are negative).
@@ -170,7 +177,7 @@ def _qlearn_label(variant: str, fit: dict) -> str:
             f"b={fit['b']:.3g}{kappa}, BIC {fit['bic']:.0f}{flag}")
 
 
-def _overlay_qlearning(ax, x: np.ndarray, qlearning_fits: dict) -> list:
+def _overlay_qlearning(ax, x: np.ndarray, qlearning_fits: dict) -> None:
     """Draw each fitted Q-learning variant's one-step-ahead curve over the data, one solid line.
 
     This figure shows every model as a single fitted line, so the Q-learning null is drawn the
@@ -180,9 +187,9 @@ def _overlay_qlearning(ax, x: np.ndarray, qlearning_fits: dict) -> list:
     conditioned on the animal's choices; see the qlearning module docstring), and with a large
     kappa it degenerates into a lagged copy of the data -- which is exactly why the honest,
     generative view lives in its own figure, ``plot_qlearning_generative``, rather than being
-    layered on here. Returns proxy handles for the legend.
+    layered on here. Each variant gets its own coloured legend entry (tagged ``(null)``); no extra
+    proxy handle is added, so every legend swatch corresponds to a line actually on the plot.
     """
-    drew = False
     for variant in QLEARN_VARIANT_ORDER:
         fit = qlearning_fits.get(variant)
         if fit is None:
@@ -191,18 +198,18 @@ def _overlay_qlearning(ax, x: np.ndarray, qlearning_fits: dict) -> list:
         if p.size == x.size and not np.all(np.isnan(p)):
             ax.plot(x, p, color=_QLEARN_COLORS[variant], linewidth=1.5, zorder=8,
                     label=_qlearn_label(variant, fit))
-            drew = True
-    if drew:
-        return [plt.Line2D([], [], color="#666666", linewidth=1.5,
-                           label="(null) one-step-ahead fit\n(prediction: see generative figure)")]
-    return []
 
 
-def plot_model_comparison(prep: dict, comparison: dict, qlearning_fits: dict | None = None):
-    """Overlay every fitted model on the data, with the five-row AIC/BIC table in-panel.
+def plot_model_comparison(prep: dict, comparison: dict, qlearning_fits: dict | None = None,
+                          around_switch: bool = False, plot_trials: int = 200):
+    """Overlay every fitted model on the data, with the AIC/BIC table beside it.
 
     SHORT is the lower row, matching the strategy plot: the y axis is inverted, so the fitted
-    P(SHORT) curves rise downward. Every model is drawn as a single fitted line.
+    P(SHORT) curves rise downward. Trial ticks are coloured by reward identity, as in the
+    per-reward strategy figures. The switch model is a solid red step and the logistic a solid
+    green sigmoid, both drawn thick; where they would coincide (a sharp switch the logistic
+    matches) each is nudged a hair apart so both stay visible. switch2 stays a dotted grey line.
+    The legend and the AIC/BIC table both sit outside the axes, stacked on the right.
 
     ``qlearning_fits`` (as returned by ``fit_qlearning_variants``) additionally overlays the
     three Q-learning variants -- the mechanistic null -- one solid line each, labelled "(null)"
@@ -211,34 +218,56 @@ def plot_model_comparison(prep: dict, comparison: dict, qlearning_fits: dict | N
     conditioned on the animal's choices and so is not a prediction of the trajectory -- for that,
     read ``plot_qlearning_generative``. Pass ``None`` to omit them; the ``qlearning`` table row
     is drawn either way.
+
+    With ``around_switch`` the x-axis is cropped to ``plot_trials`` trials either side of the
+    switch tau (default 200), zooming in on the transition; the fits are unchanged, only the view.
     """
     s, x, n = prep["s"], prep["trial_ids"], prep["n_trials"]
+    ab = prep["ab"]
     constant, switch, switch2, logistic = (comparison["fits"][m] for m in
                                            ("constant", "switch", "switch2", "logistic"))
 
-    fig, ax = plt.subplots(figsize=(11, 4.2))
-    ax.plot(x, s, marker="|", linestyle="none", markersize=6, color=_DATA_COLOR, alpha=0.35, zorder=2)
-    roll_x, roll_y = _rolling_mean(s)
-    if roll_x.size:
-        ax.plot(roll_x, roll_y, color="#999999", linewidth=1.0, zorder=3,
-                label=f"Empirical P(SHORT), {_ROLLING_WINDOW}-trial mean")
+    fig, ax = plt.subplots(figsize=(13, 4.5))
+
+    # Trial ticks, coloured by reward identity to match the per-reward strategy figures, and drawn
+    # a little longer and thicker so they read clearly under the fitted curves.
+    for letter, color in _AB_COLORS.items():
+        mask = ab == letter
+        if mask.any():
+            ax.scatter(x[mask], s[mask], marker="|", s=80, linewidths=1.4, color=color,
+                       alpha=0.55, zorder=2)
+    unresolved = ~np.isin(ab, list(_AB_COLORS))
+    if unresolved.any():
+        ax.scatter(x[unresolved], s[unresolved], marker="|", s=80, linewidths=1.4,
+                   color=_AB_UNKNOWN_COLOR, alpha=0.55, zorder=2)
+
     ax.axhline(constant["p"], color=_CONSTANT_COLOR, linewidth=1.6, zorder=4,
                label=f"Constant: p = {constant['p']:.2f}")
-    ax.step([0, switch["tau"], n - 1], [switch["p1"], switch["p2"], switch["p2"]], where="post",
-            color=_SWITCH_COLOR, linewidth=1.8, zorder=5,
-            label=f"Switch: tau = {switch['tau']}, {switch['p1']:.2f} -> {switch['p2']:.2f}")
+
+    # The switch step and the logistic sigmoid coincide when the switch is sharp; when their
+    # largest vertical gap is tiny, nudge each apart so both stay visible (see _CURVE_OFFSET).
+    grid = np.linspace(0, max(n - 1, 1), 500)
+    log_y = logistic_p(grid, logistic["midpoint"], logistic["slope"], logistic["lo"],
+                       logistic["hi"])
+    switch_on_grid = np.where(grid < switch["tau"], switch["p1"], switch["p2"])
+    off = _CURVE_OFFSET if np.nanmax(np.abs(switch_on_grid - log_y)) < _CURVE_OVERLAP_TOL else 0.0
+
+    # switch2 first, so the red switch and green logistic draw on top of it.
     if np.isfinite(switch2["loglik"]):
         ax.step([0, switch2["tau1"], switch2["tau2"], n - 1],
                 [switch2["p1"], switch2["p2"], switch2["p3"], switch2["p3"]], where="post",
-                color=_SWITCH2_COLOR, linewidth=1.8, linestyle=":", zorder=6,
+                color=_SWITCH2_COLOR, linewidth=2.2, linestyle=":", zorder=5,
                 label=f"Switch2: tau = ({switch2['tau1']}, {switch2['tau2']}), "
                       f"{switch2['p1']:.2f} -> {switch2['p2']:.2f} -> {switch2['p3']:.2f}")
-    grid = np.linspace(0, max(n - 1, 1), 500)
-    ax.plot(grid, logistic_p(grid, logistic["midpoint"], logistic["slope"], logistic["lo"], logistic["hi"]),
-            color=_LOGISTIC_COLOR, linewidth=1.8, linestyle="--", zorder=7,
+    ax.step([0, switch["tau"], n - 1],
+            [switch["p1"] + off, switch["p2"] + off, switch["p2"] + off], where="post",
+            color=_SWITCH_COLOR, linewidth=2.6, zorder=6,
+            label=f"Switch: tau = {switch['tau']}, {switch['p1']:.2f} -> {switch['p2']:.2f}")
+    ax.plot(grid, log_y - off, color=_LOGISTIC_COLOR, linewidth=2.6, zorder=7,
             label=f"Logistic: slope = {logistic['slope']:.3f} "
                   f"(start {logistic.get('start_label', '?')})")
-    style_handles = _overlay_qlearning(ax, x, qlearning_fits) if qlearning_fits else []
+    if qlearning_fits:
+        _overlay_qlearning(ax, x, qlearning_fits)
     _mark_sessions(ax, prep["session_ends"])
 
     best_bic = comparison["best_bic"]
@@ -251,23 +280,27 @@ def plot_model_comparison(prep: dict, comparison: dict, qlearning_fits: dict | N
         else:
             rows.append(f"{m:<10}{score['k_params']:>3}{score['aic']:>10.1f}{score['bic']:>10.1f}{mark}")
     rows.append(f"best: AIC {comparison['best_aic']}, BIC {best_bic}")
-    # Bottom-left: the SHORT row before the switch, which is empty by construction.
-    ax.text(0.015, 0.03, "\n".join(rows), transform=ax.transAxes, va="bottom", ha="left",
-            family="monospace", fontsize=7,
-            bbox=dict(boxstyle="round", facecolor="white", edgecolor="#cccccc", alpha=0.9))
 
     ax.set_ylim(1.45, -0.35)  # inverted: SHORT on the lower row, LONG on the upper row
-    ax.set_xlim(-1, max(n, 1))
+    if around_switch:
+        tau = switch["tau"]
+        ax.set_xlim(max(-1, tau - plot_trials), min(n, tau + plot_trials + 1))
+    else:
+        ax.set_xlim(-1, max(n, 1))
     ax.set_yticks([0, 1])
     ax.set_yticklabels(["LONG", "SHORT"])
     ax.set_xlabel("Trial (continuous across sessions)")
     ax.set_ylabel("P(SHORT)")
     ax.set_title(f"{subject_label(prep)} - model comparison")
-    handles, labels = ax.get_legend_handles_labels()
-    ax.legend(handles=[*handles, *style_handles],
-              labels=[*labels, *(h.get_label() for h in style_handles)],
-              loc="upper right", fontsize=6.5 if qlearning_fits else 7, ncol=2)
-    fig.tight_layout()
+
+    # Legend and AIC/BIC table both outside the axes on the right: legend at the top, table at the
+    # bottom, so neither covers the trace.
+    ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), borderaxespad=0.0,
+              fontsize=6.5, ncol=1)
+    ax.text(1.02, 0.0, "\n".join(rows), transform=ax.transAxes, va="bottom", ha="left",
+            family="monospace", fontsize=6.5,
+            bbox=dict(boxstyle="round", facecolor="white", edgecolor="#cccccc", alpha=0.9))
+    fig.subplots_adjust(left=0.06, right=0.74, top=0.9, bottom=0.13)
     return fig
 
 

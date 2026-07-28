@@ -214,7 +214,8 @@ def _print_model_table(comparison: dict) -> None:
 
 
 def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
-                      qlearning_overlay: bool = True, defer_figures: bool = False) -> Optional[dict]:
+                      qlearning_overlay: bool = True, defer_figures: bool = False,
+                      around_switch: bool = False, plot_trials: int = 200) -> Optional[dict]:
     """Fit, print and plot one SHORT/LONG sequence -- a whole animal, or one A/B split of it.
 
     Figures are built in the order they should be read: strategy, model comparison, posterior.
@@ -272,7 +273,8 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
     }
     if not defer_figures:
         for kind in _FIGURE_KINDS:
-            fig = _build_sequence_figure(result, kind, rewarded_only, likelihood_window)
+            fig = _build_sequence_figure(result, kind, rewarded_only, likelihood_window,
+                                         around_switch, plot_trials)
             if fig is not None:
                 result["figures"][kind] = fig
     return result
@@ -283,17 +285,20 @@ def _analyse_sequence(prep: dict, rewarded_only: bool, likelihood_window: int,
 _FIGURE_KINDS = ("strategy", "model_comparison", "posterior", "generative")
 
 
-def _build_sequence_figure(result: dict, kind: str, rewarded_only: bool, likelihood_window: int):
+def _build_sequence_figure(result: dict, kind: str, rewarded_only: bool, likelihood_window: int,
+                           around_switch: bool = False, plot_trials: int = 200):
     """Create one figure of the given kind for a sequence analysed by ``_analyse_sequence``.
 
     Kept separate from the maths so ``run_analysis`` can interleave the A and B splits by figure
     kind. Returns None for ``generative`` when the Q-learning overlay was off for this sequence.
+    ``around_switch`` / ``plot_trials`` crop the model-comparison figure's x-axis to the switch.
     """
     prep = result["prep"]
     if kind == "strategy":
         return plot_strategy(prep, rewarded_only)
     if kind == "model_comparison":
-        return plot_model_comparison(prep, result["comparison"], result["qlearning"])
+        return plot_model_comparison(prep, result["comparison"], result["qlearning"],
+                                     around_switch=around_switch, plot_trials=plot_trials)
     if kind == "posterior":
         return plot_posterior(prep, result["fit"], likelihood_window)
     if kind == "generative":
@@ -336,6 +341,8 @@ def run_analysis(
     split_ab: bool = False,
     show: bool = True,
     qlearning_overlay: bool = True,
+    around_switch: bool = False,
+    plot_trials: int = 200,
 ) -> dict:
     """Fit and plot the strategy switch for each subject independently.
 
@@ -380,6 +387,12 @@ def run_analysis(
         on the model-comparison figure and an extra ``generative`` figure is produced. Set False
         to skip the fits entirely -- the figures and the printed output then match the
         pre-Q-learning behaviour, and no ``generative`` figure is built.
+    around_switch : bool
+        Crop each model-comparison figure's x-axis to ``plot_trials`` trials either side of the
+        switch tau (default False, showing the whole trial axis). Only the view changes; the fits
+        are unaffected.
+    plot_trials : int
+        Half-width in trials of the ``around_switch`` crop (default 200).
 
     Returns
     -------
@@ -418,13 +431,15 @@ def run_analysis(
                     # rather than every A figure preceding every B figure.
                     for kind in _FIGURE_KINDS:
                         for letter, r in splits.items():
-                            fig = _build_sequence_figure(r, kind, rewarded_only, likelihood_window)
+                            fig = _build_sequence_figure(r, kind, rewarded_only, likelihood_window,
+                                                         around_switch, plot_trials)
                             if fig is not None:
                                 r["figures"][kind] = fig
                     results[subjid] = splits
             else:
                 result = _analyse_sequence(prep, rewarded_only, likelihood_window,
-                                           qlearning_overlay)
+                                           qlearning_overlay, around_switch=around_switch,
+                                           plot_trials=plot_trials)
                 if result is not None:
                     results[subjid] = result
             # Per animal: build figures for this subject, then display. In the notebook the
@@ -980,6 +995,10 @@ def main() -> int:
     analysis.add_argument("--no-qlearning", action="store_true",
                           help="skip the Q-learning null fits and their overlay on the "
                                "model-comparison figure")
+    analysis.add_argument("--around-switch", action="store_true",
+                          help="crop the model-comparison figure to trials near the switch")
+    analysis.add_argument("--plot-trials", type=int, default=200,
+                          help="half-width in trials of the --around-switch crop (default: 200)")
 
     qsweep = subparsers.add_parser("qsweep",
                                    help="Q-learning (alpha, b) parameter sweep, one figure per "
@@ -1024,7 +1043,8 @@ def main() -> int:
     if args.command == "analysis":
         run_analysis(subjids, date_ranges, rewarded_only=args.rewarded_only,
                      likelihood_window=args.likelihood_window, split_ab=args.split_ab, show=True,
-                     qlearning_overlay=not args.no_qlearning)
+                     qlearning_overlay=not args.no_qlearning, around_switch=args.around_switch,
+                     plot_trials=args.plot_trials)
     elif args.command == "qsweep":
         run_qlearning_sweep(subjids, date_ranges, rewarded_only=args.rewarded_only,
                             split_ab=args.split_ab, n_starts=args.n_starts, seed=args.seed,
