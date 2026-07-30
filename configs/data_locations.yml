@@ -23,3 +23,7 @@ profiles:
   local_1:
     rawdata: 'E:\rawdata'
     derivatives: 'E:\derivatives'
+
+  server-linux:
+    rawdata: '/mnt/harris/hypnose/rawdata'
+    derivatives: '/mnt/harris/hypnose/derivatives'
