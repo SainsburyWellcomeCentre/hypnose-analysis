@@ -40,6 +40,19 @@ Within your working directory use a terminal to clone the repo to your local fol
 ```conda env create -f environment.yml```
 ```conda activate hypnose-analysis```
 
+> **Installing by hand?** Use the `behavioral` extra — `pip install -e ".[behavioral]"`.
+> A bare `pip install -e .` gives the *base* install (analysis code, figure styles,
+> data-location helpers) but omits the behavioural/video stack (`swc-aeon`,
+> `harp-python`, `moviepy`, `opencv-python`), so the loaders and readers will fail with
+> `ModuleNotFoundError: aeon` / `harp`. If that happens, rerun with the extra.
+> `environment.yml` already uses it, so the command above is complete on its own.
+>
+> The split exists because `swc-aeon==0.1.0` requires Python ≥3.11. Keeping it out of
+> the base dependencies lets repos pinned to older Python — `hypnose-eeg-preprocessing`
+> is on 3.9 via pomegranate/somnotate — install this package and reuse
+> `hypnose.io.paths` and `hypnose.io.save` (the shared figure styles), which need
+> nothing from that stack.
+
 3. Add the environment as a kernel to run notebooks
 
 ```python -m ipykernel install --user --name=hypnose-analysis --display-name="Hypnose Analysis"```

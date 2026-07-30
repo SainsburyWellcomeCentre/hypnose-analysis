@@ -1,3 +1,7 @@
+# Defers evaluation of PEP-604 annotations (`X | None`), keeping this module
+# importable on Python 3.9 for repos pinned there (hypnose-eeg-preprocessing).
+from __future__ import annotations
+
 from pathlib import Path
 from functools import lru_cache
 import os

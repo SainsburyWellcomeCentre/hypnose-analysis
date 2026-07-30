@@ -1,9 +1,13 @@
+# PEP-604 annotations (`str | Path | None`) are evaluated lazily under this import,
+# so this module stays importable on Python 3.9 — hypnose-eeg-preprocessing is pinned
+# there by pomegranate and needs the shared figure styles defined below.
+from __future__ import annotations
+
 import os
 from pathlib import Path
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 from cycler import cycler
-from hypnose.io.paths import get_derivatives_root
 
 
 
@@ -378,6 +382,27 @@ def _resolve_session_dir(subj_dir: Path, date) -> Path:
     return candidates[0]
 
 
+# Optional hook letting a *consuming* repo with a different derivatives layout
+# reuse save_figure without wrapping it. Registered once at import; save_figure
+# then resolves through it instead of resolve_figure_dir(). None = use the
+# default hypnose-analysis layout below.
+_FIGURE_DIR_RESOLVER = None
+
+
+def set_figure_dir_resolver(fn) -> None:
+    """Register a ``(subjids, dates) -> Path`` callable used by save_figure.
+
+    Lets another project (e.g. hypnose-eeg-preprocessing, whose derivatives tree
+    is laid out differently) reuse save_figure — and therefore the shared styles —
+    with one registration call instead of a wrapper. Pass None to restore the
+    default `resolve_figure_dir` behaviour.
+
+    An explicit ``fig_dir=`` argument to save_figure still takes precedence.
+    """
+    global _FIGURE_DIR_RESOLVER
+    _FIGURE_DIR_RESOLVER = fn
+
+
 def resolve_figure_dir(subjids, dates=None) -> Path:
     """Determine where to save figures based on subject/session scope.
 
@@ -386,6 +411,10 @@ def resolve_figure_dir(subjids, dates=None) -> Path:
     - Single subject, multiple sessions: figures at subject_dir / "figures".
     - Single subject, single session: figures at session_dir / "figures".
     """
+    # Imported here rather than at module scope: paths.py requires Python 3.10+,
+    # and consumers that supply their own figure directory (see
+    # set_figure_dir_resolver) never reach this function.
+    from hypnose.io.paths import get_derivatives_root
 
     deriv_root = Path(get_derivatives_root())
     subj_list = _coerce_list(subjids)
@@ -441,6 +470,7 @@ def save_figure(
     subjids,
     dates=None,
     subdir: str | Path | None = None,
+    fig_dir: str | Path | None = None,
     dpi: int = 600,
     bbox_inches=None,
     clear_legends: bool = False,
@@ -461,6 +491,10 @@ def save_figure(
     subdir : str | Path | None
         Optional subdirectory inside the resolved figures directory. When provided,
         the folder is created automatically (e.g., "movement_figures").
+    fig_dir : str | Path | None
+        Save directly into this directory, bypassing subject/session resolution.
+        Takes precedence over any resolver registered via
+        `set_figure_dir_resolver`. The subject/date filename tags are still applied.
     dpi : int
         Dots per inch passed to savefig (default 300).
     boxplot : bool
@@ -482,7 +516,14 @@ def save_figure(
 
     filename = f"{save_name}_{subj_tag}_{date_tag}.pdf"
 
-    fig_dir = Path(resolve_figure_dir(subjids, dates))
+    # Directory resolution, most specific first: an explicit fig_dir wins; then a
+    # resolver registered by a consuming repo; otherwise the default layout.
+    if fig_dir is not None:
+        fig_dir = Path(fig_dir)
+    elif _FIGURE_DIR_RESOLVER is not None:
+        fig_dir = Path(_FIGURE_DIR_RESOLVER(subjids, dates))
+    else:
+        fig_dir = Path(resolve_figure_dir(subjids, dates))
     if subdir:
         # Normalize to a relative path segment and avoid absolute traversal
         subdir_path = Path(str(subdir).strip()).as_posix().strip("./")
