@@ -115,7 +115,9 @@ notebooks, `qc/fixtures/env.json` if it records the dist name, and the GitHub re
 
 ---
 
-## Phase 2 — Extract `hypnose-helpers`  *(1–2 days)*
+## Phase 2 — Extract `hypnose-helpers`  *(2–3 days total)*
+
+### 2a. The extraction  *(1–2 days)*
 
 New repo, minimal dependencies (roughly `matplotlib`, `pyyaml`, `pandas`), installable on any
 Python the family uses.
@@ -132,6 +134,7 @@ Python the family uses.
   tests) and this repo's `_parse_date_input`. Take the somnotate version, it's tested.
 - **Session/subject iteration** and derivatives path conventions.
 - **Generic parquet/JSON read-write.**
+- **Figure provenance** — new capability, see 2b below.
 
 **Two design corrections to make during the move** (both learned from the somnotate integration):
 
@@ -150,6 +153,60 @@ hypnose-somnotate. The move is mechanical but touches all of them.
 
 **Risk:** low–med (pure moves + import rewiring). **Done:** regression GREEN in this repo;
 hypnose-somnotate green against helpers; helpers has no family dependencies.
+
+### 2b. Embedded figure provenance  *(~½–1 day, new capability)*
+
+Goal: open any saved PDF months later and recover **what it shows and how it was made**, from
+the file itself — no sidecar, still one PDF.
+
+**Metadata to embed:** creation timestamp · git commit (+ dirty flag) · package version ·
+subjids · dates/session ids · the function that made the figure and the file it is defined in ·
+the parameters it was called with.
+
+**Verified constraints** (tested 2026-07-31, matplotlib PDF backend):
+
+- The PDF info dictionary accepts **only** `Title`, `Author`, `Subject`, `Keywords`, `Creator`,
+  `Producer`, `CreationDate`, `ModDate`, `Trapped`. Custom keys are **silently dropped** with
+  `UserWarning: Unknown infodict keyword`. `CreationDate` wants a `datetime`, not a string.
+- So: put a **JSON blob in `Subject`**, and a short human-readable summary in `Title`
+  (e.g. `"accuracy sub-040,045,066 20251124–20260203"`). A 244-char blob wrote fine and
+  survived round-trip; a realistic provenance record serialises to ~200 chars.
+
+**Auto-capture works** — `inspect.stack()` + `inspect.getargvalues(frame)` recovers the calling
+function, its file/lineno, its named arguments *and* its `**kwargs` extras, with no effort at
+the call site. Prototyped output:
+
+```json
+{"function": "plot_accuracy", "file": "visualization_utils.py", "lineno": 28,
+ "params": {"df": "<DataFrame 50x2>", "subjids": [40,45,66],
+            "dates": ["20251124","20260203"], "window": 30,
+            "kind": "line", "ax": null, "color": "red", "alpha": 0.5}}
+```
+
+**Where the work actually is:** not the plumbing — the **value summariser**. Arguments must
+become JSON-safe without exploding: scalars/str pass through (truncated), list/tuple/set/dict
+truncate at ~10 items, DataFrame/Series/ndarray become descriptors (`<DataFrame 50x2>`,
+`<ndarray (100,3) float64>`), anything else becomes `<TypeName>`. Expect a few more cases from
+real call sites; budget most of the day here.
+
+**Three design points:**
+
+1. **Frame-walking is fragile.** It takes the first frame not on a skip-list — but after
+   Phase 5 introduces thin plotter primitives the real function may be several frames up.
+   Give `save_figure` an explicit `provenance=` argument that overrides introspection, and
+   treat auto-capture as the fallback.
+2. **Record dirty state.** A bare commit hash on a dirty tree points at code that is not what
+   ran. Append `-dirty` when `git status --porcelain` is non-empty.
+3. **Ship the reader too.** Writing needs no new dependency; reading the info dict needs
+   `pypdf` or `pikepdf`. Provide `read_figure_metadata(path) -> dict` with that dependency
+   **optional**, or the metadata is write-only in practice.
+
+**Share one provenance helper with the manifest work.** Phase 7's manifest also wants git
+commit + package version — write `provenance()` once in helpers and call it from both, rather
+than two implementations that drift.
+
+**Done:** every `save_figure` PDF carries recoverable provenance; `read_figure_metadata`
+round-trips it; the same helper feeds the manifest.
 
 ---
 
@@ -283,7 +340,25 @@ pass.
 
 ---
 
-## Phase 7 — Schema & save formats
+## Phase 7 — Schema, save formats & manifest provenance
+
+### 7a. Manifest provenance  *(quick win, ~½ day)*
+
+Add the **git commit** (`git rev-parse --short HEAD` via subprocess, `"unknown"` on failure,
+`-dirty` suffix when `git status --porcelain` is non-empty) and the **package version**
+(`importlib.metadata.version("hypnose-behavior-analysis")`) alongside the existing `created_at`
+date in `manifest.json`.
+
+Keep these **in the manifest only** — the regression already ignores it, so they never enter
+the fingerprint and never cause spurious RED.
+
+**Use the same `provenance()` helper as Phase 2b** (figure metadata) rather than a second
+implementation; both want commit + dirty flag + version.
+
+**Risk:** low. **Progress:** ~40% (date exists; commit/version missing).
+**Done:** manifest carries commit + version + date; regression unaffected.
+
+### 7b. Schema & save formats
 
 `trial_data` already saves parquet + CSV. Decisions:
 
@@ -380,17 +455,17 @@ Revisit only if a concrete consumer appears.
 ## Suggested order
 
 ```
-Phase 0   decisions: hypnose_behavior, helpers boundary        blocks everything named
-Phase 1   rename                                               ~½ day
-Phase 2   extract hypnose-helpers                              1–2 days
-Phase 3   re-baseline QC                                       ~1 hour, do not skip
-Phase 4   metrics single source of truth (4a then 4b)          the real de-bloat
-Phase 5   visualization primitives + thin plotters             only after 4a
-Phase 6   trial classification dedup + modularise              highest risk, tests first
-Phase 7   schema & formats                                     couples with Phase 6
-Phase 8   profile, then vectorise                              evidence-led
-Phase 9   validation                                           woven throughout
-∥         time-base audit                                      parallelisable
+Phase 0   decisions: hypnose_behavior, helpers boundary   blocks everything named
+Phase 1   rename                                          ~½ day
+Phase 2   extract hypnose-helpers (+ figure provenance)   2–3 days
+Phase 3   re-baseline QC                                  ~1 hour, do not skip
+Phase 4   metrics single source of truth (4a then 4b)     the real de-bloat
+Phase 5   visualization primitives + thin plotters        only after 4a
+Phase 6   trial classification dedup + modularise         highest risk, tests first
+Phase 7   manifest provenance, schema & formats           couples with Phase 6
+Phase 8   profile, then vectorise                         evidence-led
+Phase 9   validation                                      woven throughout
+∥         time-base audit                                 parallelisable
 ```
 
 After each step: `qc/regression.py` (+ `verify_scripts.py`, `check_imports.py`). GREEN ⇒
