@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Run trial classification for given subject(s) and date(s).
 
-Thin CLI wrapper over hypnose.trial_classification.run.batch_analyze_sessions;
+Thin CLI wrapper over hypnose_behavior.trial_classification.run.batch_analyze_sessions;
 contains no analysis logic.
 
 Examples
@@ -17,8 +17,8 @@ from pathlib import Path
 # Make the package importable when running straight from the repo (no install needed).
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from hypnose.trial_classification.run import batch_analyze_sessions
-from hypnose.qc.validate import validate_subject
+from hypnose_behavior.trial_classification.run import batch_analyze_sessions
+from hypnose_behavior.qc.validate import validate_subject
 
 
 def _resolve_dates(args):

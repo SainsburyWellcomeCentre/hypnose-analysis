@@ -2,13 +2,13 @@
 
 Model fits to behavioural trial sequences. Like the other `scripts/`, these are thin entry
 points — this script holds only the `run_*` functions, the printed tables, and the CLI. All
-the maths and figures live in `src/hypnose/`:
+the maths and figures live in `src/hypnose_behavior/`:
 
-- **numeric core** — [`hypnose.modelling.switchpoint`](../../src/hypnose/modelling/switchpoint/),
+- **numeric core** — [`hypnose_behavior.modelling.switchpoint`](../../src/hypnose_behavior/modelling/switchpoint/),
   one module per role: `data` (build the sequence), `switch` (the switch-point model family),
   `qlearning` (stub), `compare` (AIC/BIC), `permutation` (the sleep test), `autocorr` (the
   residual check), `bootstrap` (planned).
-- **figures** — [`hypnose.visualization.modelling.switchpoint.plots`](../../src/hypnose/visualization/modelling/switchpoint/plots.py).
+- **figures** — [`hypnose_behavior.visualization.modelling.switchpoint.plots`](../../src/hypnose_behavior/visualization/modelling/switchpoint/plots.py).
 
 Run from the repo root in the project conda environment; the script adds `src/` to the path, so
 no install is required.
@@ -275,7 +275,7 @@ perm["observed_mean"], perm["p_value"], perm["null_means"], perm["n_pairs_droppe
 
 `date_ranges` maps each subject to an inclusive `(start, end)` `YYYYMMDD` tuple, an explicit
 date list, or `None` for all sessions. A `{subjid: date_range}` dict may be passed as
-`subjids` on its own, matching the convention of the plotters in `hypnose.visualization`.
+`subjids` on its own, matching the convention of the plotters in `hypnose_behavior.visualization`.
 
 ### `run_analysis` — figures per animal
 
@@ -445,7 +445,7 @@ python scripts/modelling/switchpoint_analysis.py permutation --subjids 40 45 48 
 
 `--dates` and `--date-range` are mutually exclusive; omit both for all dates. The CLI applies
 one date range to every subject — for per-subject ranges, call the functions directly.
-Subjects with no data are skipped via `hypnose.qc.validate.validate_subject`, as in the other
+Subjects with no data are skipped via `hypnose_behavior.qc.validate.validate_subject`, as in the other
 scripts.
 
 ## Deferred (planned follow-ups)

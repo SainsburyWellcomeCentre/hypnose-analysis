@@ -96,7 +96,7 @@ Update this table at the end of each phase, in the same commit as the work.
 | 0.1 package name decision | not started | | |
 | 0.2 helpers boundary decision | not started | | |
 | 0.3 collapse loaders/readers | **done** 2026-08-03 | | `readers.py` is now the single definition site for the 8 primitives (tolerant bodies); `loaders.py` re-exports them. Kept as two files: deleting `readers.py` would make `loaders → detect_settings → loaders` a cycle. Dead `create_unique_series` / `find_session_roots` deleted. regression GREEN |
-| 1 rename | not started | | |
+| 1 rename | **done** 2026-08-03 | | `hypnose` → `hypnose_behavior`, dist/repo → `hypnose-behavior-analysis`. 210 anchored replacements + `git mv`. No reinstall needed (editable install is a static-path `.pth` onto `src/`). `HYPNOSE_*` env vars, ceph data paths, Jupyter kernel names and this doc deliberately untouched. **GitHub repo rename still outstanding** — README/pyproject already point at the new name |
 | 2a helpers extraction | not started | | |
 | 2b canonical session discovery | not started | | |
 | 2c figure provenance | not started | | |

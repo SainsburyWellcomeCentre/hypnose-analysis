@@ -1,7 +1,7 @@
 # scripts
 
 Terminal entry points for running the pipeline. They are thin wrappers over
-functions in `src/hypnose/` and contain no analysis logic. Run from the repo
+functions in `src/hypnose_behavior/` and contain no analysis logic. Run from the repo
 root in the project conda environment; the scripts add `src/` to the path, so no
 install is required.
 
@@ -24,7 +24,7 @@ classification results from the derivatives tree.
 
 `--dates` and `--date-range` are mutually exclusive; omit both to run **all dates**
 for the selected subjects. Subjects/dates with no data are validated and skipped
-with a clear message (`hypnose.qc.validate.validate_subject`).
+with a clear message (`hypnose_behavior.qc.validate.validate_subject`).
 
 Script-specific:
 

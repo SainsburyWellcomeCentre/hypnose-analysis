@@ -3,9 +3,9 @@
 
 Entry points and CLI only -- the numeric models, stats and figures live in ``src/``:
 
-- ``hypnose.modelling.switchpoint``                 -- data prep, model fits, comparison,
+- ``hypnose_behavior.modelling.switchpoint``                 -- data prep, model fits, comparison,
   permutation and autocorrelation maths (numpy in, dicts out).
-- ``hypnose.visualization.modelling.switchpoint``   -- every figure.
+- ``hypnose_behavior.visualization.modelling.switchpoint``   -- every figure.
 
 This module wires those together: it selects subjects, fits, prints the tables, builds the
 figures, and exposes four entry points, each callable from a notebook (import, call, get
@@ -49,9 +49,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 import numpy as np
 import matplotlib.pyplot as plt
 
-from hypnose.io.save import nature_style, save_figure
-from hypnose.qc.validate import validate_subject
-from hypnose.modelling.switchpoint import (
+from hypnose_behavior.io.save import nature_style, save_figure
+from hypnose_behavior.qc.validate import validate_subject
+from hypnose_behavior.modelling.switchpoint import (
     ACF_MATERIAL_THRESHOLD,
     ACF_MAX_LAG,
     AB_LETTERS,
@@ -80,7 +80,7 @@ from hypnose.modelling.switchpoint import (
     subject_label,
     subset_by_ab,
 )
-from hypnose.visualization.modelling.switchpoint.plots import (
+from hypnose_behavior.visualization.modelling.switchpoint.plots import (
     plot_model_comparison,
     plot_multistart,
     plot_permutation,
@@ -384,7 +384,7 @@ def run_analysis(
     Unless ``qlearning_overlay=False``, the three Q-learning variants -- the mechanistic null --
     are also fitted per animal (per A/B subset, with ``split_ab``), tabulated, and overlaid on
     the model-comparison figure as dash-dot curves. They are never fitted on pooled or averaged
-    data; see ``hypnose.modelling.switchpoint.qlearning``.
+    data; see ``hypnose_behavior.modelling.switchpoint.qlearning``.
 
     Parameters
     ----------
@@ -695,7 +695,7 @@ def run_logistic_diagnostic(
 # trials from the fitted model. That is only valid if the *residuals* of the fitted model are
 # serially independent -- if consecutive trials still co-vary once the strategy curve is
 # removed, the bootstrap will understate the null's spread and inflate significance. This checks
-# that assumption per animal. The maths is in ``hypnose.modelling.switchpoint.autocorr``.
+# that assumption per animal. The maths is in ``hypnose_behavior.modelling.switchpoint.autocorr``.
 
 
 def _autocorr_sequence(prep: dict, max_lag: int) -> Optional[dict]:

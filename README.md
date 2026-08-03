@@ -15,7 +15,7 @@ configs/                 user-facing setup configs (rig/olfactometer .yml)
 data/rawdata             symlink to the read-only data on the server; all output -> derivatives
 notebooks/               analysis/visualisation notebooks (import from src; no definitions)
 scripts/                 terminal entry points (thin CLI wrappers; no analysis logic)
-src/hypnose/
+src/hypnose_behavior/
     io/                  data loading, saving, paths (readers, loaders, save, save_results, paths)
     trial_classification/ trial detection + classification (classification_utils, detect_trials/stage/settings, merge, summary, run)
     metric_analysis/     behavioural metric calculation (metrics_utils)
@@ -25,7 +25,7 @@ src/hypnose/
     resources/device_schemas/  harp schemas (behavior.yml, olfactometer.yml), loaded as package data
 ```
 
-The importable package is `hypnose` (e.g. `from hypnose.trial_classification.run import batch_analyze_sessions`).
+The importable package is `hypnose_behavior` (e.g. `from hypnose_behavior.trial_classification.run import batch_analyze_sessions`).
 
 ## How to Use
 
@@ -33,12 +33,12 @@ The importable package is `hypnose` (e.g. `from hypnose.trial_classification.run
 
 Within your working directory use a terminal to clone the repo to your local folder:
 
-```git clone github.com/SainsburyWellcomeCentre/hypnose-analysis```
+```git clone github.com/SainsburyWellcomeCentre/hypnose-behavior-analysis```
 
 2. Create and activate the conda environment using the environment.yml file
 
 ```conda env create -f environment.yml```
-```conda activate hypnose-analysis```
+```conda activate hypnose-behavior-analysis```
 
 > **Installing by hand?** Use the `behavioral` extra — `pip install -e ".[behavioral]"`.
 > A bare `pip install -e .` gives the *base* install (analysis code, figure styles,
@@ -50,12 +50,12 @@ Within your working directory use a terminal to clone the repo to your local fol
 > The split exists because `swc-aeon==0.1.0` requires Python ≥3.11. Keeping it out of
 > the base dependencies lets repos pinned to older Python — `hypnose-eeg-preprocessing`
 > is on 3.9 via pomegranate/somnotate — install this package and reuse
-> `hypnose.io.paths` and `hypnose.io.save` (the shared figure styles), which need
+> `hypnose_behavior.io.paths` and `hypnose_behavior.io.save` (the shared figure styles), which need
 > nothing from that stack.
 
 3. Add the environment as a kernel to run notebooks
 
-```python -m ipykernel install --user --name=hypnose-analysis --display-name="Hypnose Analysis"```
+```python -m ipykernel install --user --name=hypnose-behavior-analysis --display-name="Hypnose Analysis"```
 
 5. Symlink: 
 
@@ -65,7 +65,7 @@ Directories in this repo are resolved with a symlink inside /data pointing to th
 
 - Open a PowerShell Terminal as Administrator
 
-- cd into hypnose-analysis (repo main folder)
+- cd into hypnose-behavior-analysis (repo main folder)
 
 - Remove any possible existing items in the symlink folder by running  ```Remove-Item -LiteralPath .\data\rawdata -Recurse -Force```
 
@@ -104,7 +104,7 @@ python scripts/run_metrics_analysis.py     --subjids 53 --dates 20260528
 python scripts/batch_process.py            --subjids 53 --date-range 20260501 20260531
 ```
 
-`--subjids` and `--dates` are optional (omit to run all); use `--date-range START END` for an inclusive range. Run trial classification before metric analysis (metrics read the saved classification results). The scripts validate that data exists first (`hypnose.io.validate.validate_subject`) and are thin wrappers over `hypnose.trial_classification.run.batch_analyze_sessions` and `hypnose.metric_analysis.metrics_utils.batch_run_all_metrics_with_merge`.
+`--subjids` and `--dates` are optional (omit to run all); use `--date-range START END` for an inclusive range. Run trial classification before metric analysis (metrics read the saved classification results). The scripts validate that data exists first (`hypnose_behavior.io.validate.validate_subject`) and are thin wrappers over `hypnose_behavior.trial_classification.run.batch_analyze_sessions` and `hypnose_behavior.metric_analysis.metrics_utils.batch_run_all_metrics_with_merge`.
 
 1. Trial Classification
 
@@ -247,7 +247,7 @@ Results are saved per session and merged for all sessions analyzed, either withi
 
 Results are saved as a json and csv file combination with a summary txt file. 
 
-## Quality control (`src/hypnose/qc/`)
+## Quality control (`src/hypnose_behavior/qc/`)
 
 The `qc` package holds tools to run **after major changes** to confirm the analysis output is unaffected (or to mark what changed, if intended). Run them in the project conda environment.
 
@@ -255,19 +255,19 @@ The `qc` package holds tools to run **after major changes** to confirm the analy
 
 - **`regression.py`** — golden-master value regression. For a fixed set of coverage sessions (`sessions.yml`) it fingerprints `trial_data` (canonical CSV) and the metrics dict and md5-compares against stored baselines in `fixtures/`. It reads the read-only rawdata and writes only to a temp dir (never the server).
   ```
-  python src/hypnose/qc/regression.py            # compare against fixtures (exit 0 = GREEN)
-  python src/hypnose/qc/regression.py --generate # regenerate baselines (only when a change is intended)
+  python src/hypnose_behavior/qc/regression.py            # compare against fixtures (exit 0 = GREEN)
+  python src/hypnose_behavior/qc/regression.py --generate # regenerate baselines (only when a change is intended)
   ```
 
 - **`verify_scripts.py`** — runs the actual terminal scripts via subprocess and md5-checks their `trial_data` + metrics against the same fixtures (covers the CLI arg wiring, which the function-level regression does not).
   ```
-  python src/hypnose/qc/verify_scripts.py
+  python src/hypnose_behavior/qc/verify_scripts.py
   ```
 
 - **`check_imports.py`** — static checker: disassembles every function and flags any referenced global that isn't imported (catches missing-import NameErrors that only surface at call time). Run on the whole package or a single module/file.
   ```
-  python src/hypnose/qc/check_imports.py                                   # whole package
-  python src/hypnose/qc/check_imports.py hypnose.trial_classification.run  # one module
+  python src/hypnose_behavior/qc/check_imports.py                                   # whole package
+  python src/hypnose_behavior/qc/check_imports.py hypnose_behavior.trial_classification.run  # one module
   ```
 
 A RED regression means output changed — revert/fix, or, if the change was intended, regenerate the fixtures in a separate reviewed commit. Fixtures are only valid in the pinned environment recorded in `fixtures/env.json`.

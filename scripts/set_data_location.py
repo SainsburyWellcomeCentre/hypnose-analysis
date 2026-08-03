@@ -2,7 +2,7 @@
 """Select the active data location (rawdata / derivatives roots) for this machine.
 
 Profiles live in the committed `configs/data_locations.yml`. This writes your choice
-to `configs/data_locations.local.yml` (git-ignored), which `hypnose.io.paths` reads —
+to `configs/data_locations.local.yml` (git-ignored), which `hypnose_behavior.io.paths` reads —
 so the selection persists across kernels / terminals / reboots and is never committed.
 
 Usage
@@ -13,7 +13,7 @@ Usage
   python scripts/set_data_location.py --list          # list available profiles
 
 Note: a running kernel caches the paths — after switching, restart the kernel or call
-`hypnose.io.paths.reload()`. Terminal runs pick up the new choice automatically.
+`hypnose_behavior.io.paths.reload()`. Terminal runs pick up the new choice automatically.
 Any HYPNOSE_* env var still overrides this (that's how the QC sandbox / CI work).
 """
 import os
@@ -22,7 +22,7 @@ import argparse
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from hypnose.io import paths
+from hypnose_behavior.io import paths
 
 # These override the active profile (RAWDATA/DERIVATIVES/SERVER) or change the fallback (DATA_ROOT).
 _ENV_VARS = ["HYPNOSE_RAWDATA_ROOT", "HYPNOSE_DERIVATIVES_ROOT", "HYPNOSE_SERVER_ROOT", "HYPNOSE_DATA_ROOT"]
@@ -101,7 +101,7 @@ def main() -> int:
     paths.set_active(args.profile)
     print(f"Active data location set to '{args.profile}' (written to {paths._local_path()}).")
     _print_resolved()
-    print("\n(If a Jupyter kernel is running, restart it or call hypnose.io.paths.reload() to pick this up.)")
+    print("\n(If a Jupyter kernel is running, restart it or call hypnose_behavior.io.paths.reload() to pick this up.)")
     return 0
 
 

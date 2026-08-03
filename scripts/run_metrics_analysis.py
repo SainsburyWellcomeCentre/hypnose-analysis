@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Run behavioural metric analysis for given subject(s) and date(s).
 
-Thin CLI wrapper over hypnose.metric_analysis.metrics_utils.batch_run_all_metrics_with_merge;
+Thin CLI wrapper over hypnose_behavior.metric_analysis.metrics_utils.batch_run_all_metrics_with_merge;
 contains no analysis logic. Metrics read previously-saved trial-classification
 results from the derivatives tree, so run trial classification first.
 
@@ -17,8 +17,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from hypnose.metric_analysis.metrics_utils import batch_run_all_metrics_with_merge
-from hypnose.qc.validate import validate_subject
+from hypnose_behavior.metric_analysis.metrics_utils import batch_run_all_metrics_with_merge
+from hypnose_behavior.qc.validate import validate_subject
 
 
 def _resolve_dates(args):
