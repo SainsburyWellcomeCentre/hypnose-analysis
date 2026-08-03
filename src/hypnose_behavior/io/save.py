@@ -58,20 +58,6 @@ def _resolve_session_dir(subj_dir: Path, date) -> Path:
 _FIGURE_DIR_RESOLVER = None
 
 
-def set_figure_dir_resolver(fn) -> None:
-    """Register a ``(subjids, dates) -> Path`` callable used by save_figure.
-
-    Lets another project (e.g. hypnose-eeg-preprocessing, whose derivatives tree
-    is laid out differently) reuse save_figure — and therefore the shared styles —
-    with one registration call instead of a wrapper. Pass None to restore the
-    default `resolve_figure_dir` behaviour.
-
-    An explicit ``fig_dir=`` argument to save_figure still takes precedence.
-    """
-    global _FIGURE_DIR_RESOLVER
-    _FIGURE_DIR_RESOLVER = fn
-
-
 def resolve_figure_dir(subjids, dates=None) -> Path:
     """Determine where to save figures based on subject/session scope.
 
