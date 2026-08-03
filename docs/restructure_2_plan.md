@@ -2,15 +2,12 @@
 
 Hand-off plan for the next round of work on `hypnose-analysis`.
 
-**This document lives on `main`.** Branch from `main` when you start the work — the old
-`restructure_2` branch is far behind and should not be resumed; treat it as abandoned. This
-plan supersedes the version at `restructure_2:docs/restructure_2_plan.md`.
+**The restructure is planned on the new branch `hypnose-restructure`.** 
 
 Goal: make the code tidier, faster and reusable across the growing repo family — **without
 accidentally changing analysis output**.
 
-All measurements in this document were taken **2026-07-31**. Re-measure before trusting
-them; `visualization_utils.py` grew 43% in the month before that date.
+All measurements in this document were taken **2026-07-31**. .
 
 ---
 
@@ -71,6 +68,116 @@ terminal entry points in `scripts/`; no back-compat shims, all imports canonical
 
 **Out of scope (explicit):** do NOT change protocol detection — the
 `"odourdiscrimination" in name` string matching stays as-is.
+
+---
+
+## 2. How to work through this plan
+
+### One phase per chat
+
+**Do not attempt this in a single long session.** Start a fresh chat for each phase,
+using this document as the handoff. Section 0 exists precisely so a cold session can
+pick up without prior context.
+
+Long sessions degrade in exactly the way this work cannot tolerate: dropped items when
+summarising, repeated identical tool mistakes, and mislabelled results where the
+narration disagrees with the output. On work whose entire premise is *do not silently
+change the output*, that failure mode matters more than the convenience of continuity.
+
+Commit at every phase boundary so each new chat starts from a green, known state.
+
+### Progress
+
+Update this table at the end of each phase, in the same commit as the work.
+
+| phase | status | commit | notes |
+|---|---|---|---|
+| Step 0 — re-baseline QC fixtures | **done** 2026-08-03 | `481110b` | 9 sessions (8 re-run + sub-053 20260520 kept for seqLen 2 & the singrew-name guard). Old sub-040 20251124 fixture was **stale, not drifted** — cb724d5's own code reproduces the new md5. regression / verify_scripts / check_imports all green |
+| 0.1 package name decision | not started | | |
+| 0.2 helpers boundary decision | not started | | |
+| 0.3 collapse loaders/readers | not started | | blocks Phases 1–2 |
+| 1 rename | not started | | |
+| 2a helpers extraction | not started | | |
+| 2b canonical session discovery | not started | | |
+| 2c figure provenance | not started | | |
+| 3 re-baseline QC | not started | | folded into Step 0 if done first |
+| 4a strip metrics from visualization | not started | | |
+| 4b modularise metric_analysis | not started | | |
+| 5 visualization primitives | not started | | after 4a only |
+| 6 trial classification dedup | not started | | unit tests first |
+| 7a manifest provenance | not started | | |
+| 7b schema & formats | not started | | intended output change |
+| 8 profile, then vectorise | not started | | |
+| 9 validation | not started | | |
+| ∥ time-base audit | not started, deferred | | parallelisable |
+
+### Model and reasoning effort
+
+Use **Opus 5 throughout** — the failure modes here are subtle correctness, not
+throughput. Vary the effort by phase:
+
+| phase | effort | why |
+|---|---|---|
+| 0.3 collapse loaders/readers | **max** | judging which of 4 diverged functions is correct; a wrong pick is invisible and regression may not catch it |
+| 1 rename | standard | mechanical over ~265 references; needs care, not reasoning |
+| 2a extraction | standard–high | the inventory is already decided; mostly execution |
+| 2b session API | high | new API, 11 call sites, duplicate-`ses` semantics |
+| 2c figure provenance | high | value summariser has the edge cases |
+| 4a metrics audit | **max** | mapping ~27 recomputes to canonical metrics across 16k lines without losing one |
+| 4b, 5 | standard–high | mostly moves once 4a has decided what goes where |
+| **6 classification dedup** | **max** | riskiest item in the plan — 3 divergent implementations of one rule, ~1000-line function |
+| 7–9 | high | schema is deliberate-change territory; profiling is evidence-led |
+| any unexpected RED | **max** | always — diagnose before touching anything |
+
+Max effort on the rename is just slow. Standard effort on Phase 6 is how a subtle
+behaviour change passes regression on 8 sessions and breaks on the 9th.
+
+### Context strategy for the large audits
+
+Phase 4a spans **16,044 lines** of `visualization/`. That is a context-capacity problem,
+not a reasoning one — no effort setting fixes files that do not fit.
+
+Work file by file and **write the audit into the repo as you go**, e.g.
+`docs/metric_audit.md`: every function, whether it computes a metric or only plots, and
+where the canonical version lives. The moves then happen in a later chat reading that
+file instead of re-reading 16k lines — and you get something reviewable before any code
+changes. The same approach suits any phase whose inputs exceed one context.
+
+### Handoff prompt for each new chat
+
+Adapt the phase name and paste:
+
+```
+I'm continuing a planned restructure of this repo, on branch `hypnose-restructure`.
+
+FIRST: read `docs/restructure_2_plan.md` in full before doing anything. It is the
+authoritative plan. Check the Progress table in section 2 for what is already done —
+do not redo completed phases.
+
+This chat covers exactly one phase: <PHASE>. Do not start any other phase.
+
+Hard constraints:
+1. The ceph mount `/Volumes/harris` is STRICTLY READ-ONLY. Never write, move, rename,
+   chmod or delete anything under it. The only thing that may read it is the QC
+   regression harness. If you think you need to write there, stop and ask me.
+2. Do not explore ceph — no browsing subject folders, no inventorying sessions, no
+   `find` over the mount. If it is unavailable, stop and tell me.
+3. Run everything with `~/miniconda3/envs/hypnose-analysis-test/bin/python`. Do not
+   install, upgrade or remove packages in any conda env — fixtures are only valid in
+   the env recorded in `qc/fixtures/env.json`. If something is missing, tell me.
+4. All work is in the repo: edit files, run the QC tools, commit.
+
+Workflow:
+- Tell me what you are about to do and what regression result you expect, before doing it.
+- After the change, run `qc/regression.py` (plus `check_imports.py`) and show me the result.
+- GREEN → commit. Unexpected RED → stop and diagnose, do not regenerate fixtures to
+  make it pass.
+- An intended output change gets fixtures regenerated in the same commit, with the
+  +/-/~ diff confirming only the intended fields moved — and ask me first.
+- At the end: update the Progress table in the plan, and commit that with the work.
+
+Ask me rather than guessing if a decision is not settled in the plan.
+```
 
 ---
 
@@ -423,6 +530,8 @@ style_axis(ax, xlabel=…, ylabel=…, legend=…, title=…)
 # per-metric plotters stay thin and explicit
 plot_accuracy(ses, kind="line")   ->  load_metric(...) + primitives
 ```
+These thin helpers should live in extra visualization helper py files, so they are shared across
+visualization code and can be re-imported in different files. 
 
 **Deliberately avoid** a single `plot_metric(kind, ses)` dispatcher — it accumulates kwargs
 for every plot type it supports and becomes a god-function. Thin primitives plus one small
@@ -509,7 +618,7 @@ additively, keep blobs during transition, drop blobs last. Couples tightly with 
 **Risk:** med (touches downstream readers). **Done:** no pickle outputs; `position_data`
 side-table exists; blobs removed; fixtures regenerated with only the intended diff.
 
----
+--- OPTIONAL BONUS, NOT PART OF THE CORE CHANGES: Phase 8 and Phase 9
 
 ## Phase 8 — Profile, then vectorise
 
@@ -540,7 +649,7 @@ stripped under `python -O`. Reserve `assert` for internal invariants. Optionally
 
 ---
 
-## Parallel track — time-base audit for ephys/movement alignment
+## Parallel track — time-base audit for ephys/movement alignment - Keep this as a note! This will be checked later, as part of it lives within sleap-hypnose (where tracking is done)
 
 Ensure every saved event carries a **canonical, documented timestamp** suitable for aligning
 with electrophysiology and movement data. The pipeline already does harp timestamp
@@ -563,7 +672,7 @@ regression stays local — CI can't reach the data.
 
 ---
 
-## Afterthought — cross-repo API
+## Afterthought — cross-repo API - Done later, kept as a TODO
 
 Previously planned as a facade (`hypnose.behavior.accuracy(subjid, date)`). **Demoted**: the
 repos do largely independent work and don't obviously need to call each other's analysis.
