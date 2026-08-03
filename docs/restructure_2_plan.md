@@ -76,12 +76,16 @@ terminal entry points in `scripts/`; no back-compat shims, all imports canonical
 
 ## Phase 0 — Decisions to make before touching code
 
-**0.1 Package name.** Repo and distribution become `hypnose-behavior-analysis`; the import
+### 0.1 Package name
+
+Repo and distribution become `hypnose-behavior-analysis`; the import
 package becomes **`hypnose_behavior`** (not `hypnose_behavior_analysis` — you type it
 constantly and "analysis" adds nothing inside an import). Repo name and package name need
 not match; `pyproject` already does this today (dist `hypnose-analysis`, package `hypnose`).
 
-**0.2 What goes in hypnose-helpers.** Decide the boundary before extracting, using one test:
+### 0.2 What goes in hypnose-helpers
+
+Decide the boundary before extracting, using one test:
 
 > **Would this need to change if you added a third modality?** If yes, it is not a helper.
 
@@ -95,6 +99,35 @@ not match; `pyproject` already does this today (dist `hypnose-analysis`, package
 
 **Hard constraint: `hypnose_helpers` imports nothing from the family.** Strictly one-way, or
 you get cycles the first time someone is lazy.
+
+**A sharper form of the test**, easier to apply per function:
+
+> **Does it know what the data *is*, or only where it lives and what format it's in?**
+> Knows the data (harp streams, odors, EDF channels, sleep stages, trials) → **stays**.
+> Knows only layout/format (`sub-XXX/` dirs, parquet-vs-CSV, JSON serialisation) → **helper**.
+
+### 0.3 Collapse `io/loaders.py` vs `io/readers.py`  *(blocks Phase 2)*
+
+These two files **both define the same 8 names**, and they have already diverged
+(measured 2026-07-31):
+
+```
+identical   SessionData, TimestampedCsvReader, Video, concat_digi_events
+DIFFERENT   load, load_csv, load_json, load_video
+readers-only: create_unique_series, find_session_roots
+imported by:  loaders.py ×8    readers.py ×2
+```
+
+Four functions sharing a name with different bodies in the same package. This must be
+resolved **before** deciding what moves to helpers — extracting from the wrong copy would
+silently freeze the wrong behaviour.
+
+Work out which `load*` variant is canonical, collapse to one file, delete the other, repoint
+the imports. Regression will tell you whether the two behaved differently. This is a latent
+bug in its own right, independent of the helpers work.
+
+**Risk:** med (two live code paths). **Done:** one definition per name in `io/`; regression
+GREEN (or an understood, deliberate diff).
 
 ---
 
@@ -115,26 +148,48 @@ notebooks, `qc/fixtures/env.json` if it records the dist name, and the GitHub re
 
 ---
 
-## Phase 2 — Extract `hypnose-helpers`  *(2–3 days total)*
+## Phase 2 — Extract `hypnose-helpers`  *(3–4 days total)*
 
 ### 2a. The extraction  *(1–2 days)*
 
 New repo, minimal dependencies (roughly `matplotlib`, `pyyaml`, `pandas`), installable on any
 Python the family uses.
 
-**Seed contents:**
+**Extract functions, not files.** Almost nothing moves whole — every candidate file splits
+along the 0.2 test. Both repos keep a thinner `io/paths.py` and `io/loading.py` holding only
+what knows the data.
 
-- **Figure styles + `save_figure`** — from `io/save.py` (570 lines). Already proven shared:
-  hypnose-somnotate uses it today.
-- **Data-location resolution** — from `io/paths.py` (165 lines). The *mechanism* (profiles,
-  env vars, precedence) is shared; decide whether the `configs/data_locations.yml` config
-  itself moves too or stays per-repo.
-- **Subject/date selectors** — normalising `66` / `"066"` / `"sub-066"` / `"66,67"` /
-  date ranges. **This is already written twice**: `hypnose_somnotate/io/selectors.py` (with
-  tests) and this repo's `_parse_date_input`. Take the somnotate version, it's tested.
-- **Session/subject iteration** and derivatives path conventions.
-- **Generic parquet/JSON read-write.**
-- **Figure provenance** — new capability, see 2b below.
+**Inventory — `hypnose-analysis`** (line counts 2026-07-31):
+
+| file | verdict |
+|---|---|
+| `io/paths.py` (165) | **moves whole.** Profile mechanism — `load_profiles`, `get_active`, `set_active`, `get_rawdata_root`, `get_server_root`, `get_derivatives_root`. Pure layout; the cleanest win in either repo. |
+| `io/save.py` (570) | **splits ~90/10.** → helpers: `nature_style`, `poster_style`, `presentation_style`, `use_style`, `_resolve_style`, `_presentation_active`, `nice_x_locator`, `set_size`, `strip_legends`, `_format_span`, `_coerce_list`, `_unique_sorted`, `save_figure`. **Stays:** `_resolve_subject_dir`, `_resolve_session_dir`, `resolve_figure_dir` — they glob `sub-{id:03d}_id-*`, i.e. the behaviour layout. |
+| `io/save_results.py` (491) | **splits.** → helpers: `_json_safe`, `_json_default`, `_normalize_df_for_io` (generic serialisation). **Stays:** `save_session_analysis_results` (takes a classification dict + data/events). `resolve_derivatives_output_dir` / `_find_rawdata_root` are a judgement call — probably helpers if the derivatives convention is family-wide. |
+| `io/loaders.py` (906) | **stays.** `load_all_streams`, `load_experiment_events`, `load_odor_mapping` are harp/aeon and know about odors. |
+| `io/readers.py` (145) | **stays** — after the 0.3 collapse. `find_session_roots` may be generic enough to move. |
+
+**Inventory — `hypnose-somnotate`:**
+
+| file | verdict |
+|---|---|
+| `io/selectors.py` (100) | **moves whole.** Pure parsing, already unit-tested. Supersedes this repo's `_parse_date_input`. |
+| `io/style.py` (62) | **moves whole.** `ensure_style` / `active_style` — this *is* the lazy-application pattern helpers should own (see correction 2 below). |
+| `io/paths.py` (260) | **splits.** → helpers: `normalize_subjid`, `_iter_subject_dirs`, `_find_subject_dir`, `_parse_session_dir`, `_date_in_filter` (generic `sub-XXX` / `ses-YY_date-…` walking). **Stays:** `RecordingRef`, `find_recordings` (globs `.edf`), `get_eeg_root`. |
+| `io/loading.py` (579) | **mostly stays.** → helpers: `load_signal_table` (parquet/CSV dispatch), `list_csv_files`. Everything else is somnotate predictions, stage vectors, `ScoredRef`. |
+| `io/save.py` (113) | **mostly disappears.** `resolve_eeg_figure_dir` stays; the `save_figure` wrapper and `_register_resolver` evaporate once helpers' `save_figure` takes `fig_dir` (correction 1). |
+
+**Two more decisions:**
+
+- **`scripts/set_data_location.py`** moves with `io/paths.py` — it is the CLI for that
+  mechanism, and becomes `hypnose-helpers`' own entry point, usable from any repo.
+- **`configs/data_locations.yml` stays per-repo; only the loader moves.** The mechanism
+  (format, precedence, `set_active`) is shared; the *contents* are per-dataset. Note
+  hypnose-somnotate currently derives its EEG root from the behaviour profile's `server_root`
+  — a coupling worth loosening rather than enshrining in helpers.
+- **Canonical session discovery** — see 2b below. This is the single biggest de-duplication
+  in the whole plan.
+- **Figure provenance** — new capability, see 2c below.
 
 **Two design corrections to make during the move** (both learned from the somnotate integration):
 
@@ -154,7 +209,78 @@ hypnose-somnotate. The move is mechanical but touches all of them.
 **Risk:** low–med (pure moves + import rewiring). **Done:** regression GREEN in this repo;
 hypnose-somnotate green against helpers; helpers has no family dependencies.
 
-### 2b. Embedded figure provenance  *(~½–1 day, new capability)*
+### 2b. Canonical session discovery  *(~1 day — the biggest single de-duplication)*
+
+**The layout contract is identical everywhere** — behaviour and EEG both use
+`sub-0XX_id-XXX/ses-0XX_date-YYYYMMDD/<modality>/`. Yet "find the session directory for this
+subject + date" is currently implemented **11 times independently** (measured 2026-07-31):
+
+```
+HA visualization_utils.py:121      HA metric_analysis/metrics_utils.py:50
+HA movement_analysis_utils.py:116  HA metric_analysis/metrics_utils.py:189
+HA movement_analysis_utils.py:241  HA qc/verify_scripts.py:66
+HA io/save.py:379                  HA qc/_common.py:130
+HA io/loaders.py:218               HA debug/debug.py:44
+HS io/save.py:37
+```
+
+Plus **4+ separate implementations** of `sub-*_id-*` subject discovery (`io/save.py:371`,
+`utils/helpers.py:82`, `metrics_utils.py:516`, `trial_classification/run.py:460`) and
+`sub-{n:03d}` formatting scattered throughout both repos.
+
+**One function replaces all of them:**
+
+```python
+find_sessions(subjid, *, ses=None, date=None,
+              ses_range=None, date_range=None) -> list[SessionRef]
+```
+
+`SessionRef` carries `subject`, `subject_dir`, `ses` (int), `date` (str), `path`, and
+`session_index`. Selection is forgiving in the same way the CLI already is —
+`66` / `"066"` / `"sub-066"`, single values, lists, `"66,67"`.
+
+**`ses` and `date` are interchangeable selectors.** Both resolve to the same session, because
+the directory name carries both. `find_sessions(66, ses="03-09")` works; so does
+`find_sessions(66, date_range="20260707-20260718")`. This is what makes
+`sub 66 ses 03-09` usable across every function in the family.
+
+**Duplicate `ses` within a subject raises**, naming both candidate directories. Silently
+taking the first is exactly the failure that surfaces months later as an unexplained result.
+Only `sub-036` (`ses-60` twice, known human error) triggers this today; once fixed it never
+fires.
+
+#### `session_index` — the plotting ordinal
+
+`ses` is a good *identifier* but **not** a gap-free ordinal. Measured across all 48 subjects /
+2045 sessions:
+
+| | subjid ≤ 35 | subjid ≥ 36 |
+|---|---|---|
+| duplicates / out-of-order | 8 subjects | **1** (`sub-036`, known) |
+| **gaps in `ses` numbers** | 6 subjects | **8 subjects (29%)** |
+
+Gaps are irrelevant for selection — `ses-38` is still unique whether or not `ses-37` exists —
+but they break `ses` as an x-axis. `sub-038, 045, 046, 047, 048, 057, 058, 062` all have holes,
+and these are *current* subjects, not legacy.
+
+So helpers also provides:
+
+```python
+session_index(subjid, date_or_ses) -> int   # rank by date within subject: 1..N, gap-free
+```
+
+Use `ses`/`date` to *select*, `session_index` to *plot*. They answer different questions and
+neither replaces the other. Add `session_index` as a column at load time so plotters never
+recompute it.
+
+**Do this in the same pass as collapsing the 11 sites.** Adding a second lookup key to one
+resolver costs about an hour; retrofitting it to 11 call sites later costs days.
+
+**Done:** one session-discovery function in helpers; all 11 date-lookup sites and all subject-
+discovery sites repointed; `ses`, `date`, and both range forms accepted; duplicate `ses`
+raises with both paths named; `session_index` available and gap-free; regression GREEN.
+
+### 2c. Embedded figure provenance  *(~½–1 day, new capability)*
 
 Goal: open any saved PDF months later and recover **what it shows and how it was made**, from
 the file itself — no sidecar, still one PDF.
@@ -352,7 +478,7 @@ date in `manifest.json`.
 Keep these **in the manifest only** — the regression already ignores it, so they never enter
 the fingerprint and never cause spurious RED.
 
-**Use the same `provenance()` helper as Phase 2b** (figure metadata) rather than a second
+**Use the same `provenance()` helper as Phase 2c** (figure metadata) rather than a second
 implementation; both want commit + dirty flag + version.
 
 **Risk:** low. **Progress:** ~40% (date exists; commit/version missing).
@@ -455,9 +581,9 @@ Revisit only if a concrete consumer appears.
 ## Suggested order
 
 ```
-Phase 0   decisions: hypnose_behavior, helpers boundary   blocks everything named
+Phase 0   decisions + collapse loaders/readers            blocks Phases 1-2
 Phase 1   rename                                          ~½ day
-Phase 2   extract hypnose-helpers (+ figure provenance)   2–3 days
+Phase 2   extract hypnose-helpers, session API, provenance 3–4 days
 Phase 3   re-baseline QC                                  ~1 hour, do not skip
 Phase 4   metrics single source of truth (4a then 4b)     the real de-bloat
 Phase 5   visualization primitives + thin plotters        only after 4a
