@@ -1,8 +1,12 @@
-"""Loading Hypnose session data: harp/aeon reader classes and the high-level
-loaders (load_experiment, load_all_streams, load_experiment_events, load_odor_mapping).
+"""Loading Hypnose session data: the high-level loaders (load_experiment,
+load_all_streams, load_experiment_events, load_odor_mapping) and the trial-data
+table readers.
 
 Extracted from trial_classification/classification_utils.py during the restructuring
 (Phase 3). Pure move -- behaviour unchanged (verified by the regression harness).
+
+The harp/aeon reader classes and file-reading primitives used to be duplicated here;
+they now live once in io/readers.py and are re-exported below (restructure_2 Phase 0.3).
 """
 from __future__ import annotations
 
@@ -24,161 +28,18 @@ import aeon.io.api as api
 import hypnose.trial_classification.detect_settings as detect_settings
 from hypnose.io.paths import get_rawdata_root, get_derivatives_root, get_server_root
 from hypnose.utils.helpers import vprint, _get_from_cache, _update_cache
+# Reader classes and file-reading primitives are defined once, in io/readers.py. They are
+# re-exported here because callers (classification_utils, notebooks) import them from this
+# module; readers.py imports nothing from hypnose, so this direction stays acyclic.
+from hypnose.io.readers import (  # noqa: F401
+    SessionData, Video, TimestampedCsvReader,
+    load, load_json, load_video, load_csv, concat_digi_events,
+)
 
 SCHEMA_DIR = files("hypnose.resources.device_schemas")
 BEHAVIOR_SCHEMA_PATH = SCHEMA_DIR / "behavior.yml"
 OLFACTOMETER_SCHEMA_PATH = SCHEMA_DIR / "olfactometer.yml"
 
-
-class SessionData(Reader):
-    """Extracts metadata information from a settings .jsonl file."""
-
-    def __init__(self, pattern="Metadata"):
-        super().__init__(pattern, columns=["metadata"], extension="jsonl")
-
-    def read(self, file):
-        """Returns metadata for the specified epoch."""
-        with open(file) as fp:
-            metadata = [json.loads(line) for line in fp] 
-
-        data = {
-            "metadata": [DotMap(entry['value']) for entry in metadata]
-        }
-        timestamps = [api.aeon(entry['seconds']) for entry in metadata]
-
-        return pd.DataFrame(data, index=timestamps, columns=self.columns)
-
-class Video(Csv):
-    """Extracts video frame metadata."""
-
-    def __init__(self, pattern="VideoData"):
-        super().__init__(pattern, columns=["hw_counter", "hw_timestamp", "_frame", "_path", "_epoch"])
-        self._rawcolumns = ["Time"] + self.columns[0:2]
-
-    def read(self, file):
-        """Reads video metadata from the specified file."""
-        data = pd.read_csv(file, header=0, names=self._rawcolumns)
-        data["_frame"] = data.index
-        data["_path"] = os.path.splitext(file)[0] + ".avi"
-        data["_epoch"] = file.parts[-3]
-        data["Time"] = data["Time"].transform(lambda x: api.aeon(x))
-        data.set_index("Time", inplace=True)
-        return data
-    
-class TimestampedCsvReader(Csv):
-    def __init__(self, pattern, columns):
-        super().__init__(pattern, columns, extension="csv")
-        self._rawcolumns = ["Time"] + columns
-
-    def read(self, file):
-        data = pd.read_csv(file, header=0, names=self._rawcolumns)
-        data["Seconds"] = data["Time"]
-        data["Time"] = data["Time"].transform(lambda x: api.aeon(x))
-        data.set_index("Time", inplace=True)
-        return data
-
-
-def load_json(reader: SessionData, root: Path) -> pd.DataFrame:
-    root = Path(root)
-    pattern = f"{root.joinpath(root.name)}_*.{reader.extension}"
-    files = sorted(glob(pattern))
-    chunks = []
-    for file in files:
-        try:
-            df = reader.read(Path(file))
-            if df is None or (hasattr(df, "empty") and df.empty):
-                continue
-            chunks.append(df)
-        except Exception:
-            # skip bad file
-            continue
-    if not chunks:
-        return pd.DataFrame()
-    out = pd.concat(chunks, axis=0)
-    try:
-        out = out.sort_index()
-    except Exception:
-        pass
-    return out
-
-
-def load(reader: Reader, root: Path) -> pd.DataFrame:
-    root = Path(root)
-    pattern = f"{root.joinpath(root.name)}_{reader.register.address}_*.bin"
-    files = sorted(glob(pattern))
-    chunks = []
-    for file in files:
-        try:
-            df = reader.read(file)
-            if df is None or (hasattr(df, "empty") and df.empty):
-                continue
-            chunks.append(df)
-        except Exception:
-            # skip bad file
-            continue
-    if not chunks:
-        return pd.DataFrame()
-    out = pd.concat(chunks, axis=0)
-    try:
-        out = out.sort_index()
-    except Exception:
-        pass
-    return out
-
-
-def load_video(reader: Video, root: Path) -> pd.DataFrame:
-    root = Path(root)
-    pattern = f"{root.joinpath(root.name)}_*.csv"
-    files = sorted(glob(pattern))
-    chunks = []
-    for file in files:
-        try:
-            df = reader.read(Path(file))
-            if df is None or (hasattr(df, "empty") and df.empty):
-                continue
-            chunks.append(df)
-        except Exception:
-            # skip bad file
-            continue
-    if not chunks:
-        return pd.DataFrame()
-    out = pd.concat(chunks, axis=0)
-    try:
-        out = out.sort_index()
-    except Exception:
-        pass
-    return out
-
-
-def concat_digi_events(series_low: pd.DataFrame, series_high: pd.DataFrame) -> pd.DataFrame:
-    """Concatenate seperate high and low dataframes to produce on/off vector"""
-    data_off = ~series_low[series_low==True]
-    data_on = series_high[series_high==True]
-    return pd.concat([data_off, data_on]).sort_index()
-
-
-def load_csv(reader: Csv, root: Path) -> pd.DataFrame:
-    root = Path(root)
-    pattern = f"{root.joinpath(reader.pattern).joinpath(reader.pattern)}_*.{reader.extension}"
-    files = sorted(glob(pattern))
-    chunks = []
-    for file in files:
-        try:
-            df = reader.read(Path(file))
-            if df is None or (hasattr(df, "empty") and df.empty):
-                continue
-            chunks.append(df)
-        except Exception:
-            # skip bad file
-            continue
-    if not chunks:
-        return pd.DataFrame()
-    out = pd.concat(chunks, axis=0)
-    try:
-        out = out.sort_index()
-    except Exception:
-        pass
-    return out
 
 def load_experiment(subjid, date, index=None):
     """

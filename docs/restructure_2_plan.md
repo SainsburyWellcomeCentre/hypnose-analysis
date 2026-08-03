@@ -95,7 +95,7 @@ Update this table at the end of each phase, in the same commit as the work.
 | Step 0 — re-baseline QC fixtures | **done** 2026-08-03 | `481110b` | 9 sessions (8 re-run + sub-053 20260520 kept for seqLen 2 & the singrew-name guard). Old sub-040 20251124 fixture was **stale, not drifted** — cb724d5's own code reproduces the new md5. regression / verify_scripts / check_imports all green |
 | 0.1 package name decision | not started | | |
 | 0.2 helpers boundary decision | not started | | |
-| 0.3 collapse loaders/readers | not started | | blocks Phases 1–2 |
+| 0.3 collapse loaders/readers | **done** 2026-08-03 | | `readers.py` is now the single definition site for the 8 primitives (tolerant bodies); `loaders.py` re-exports them. Kept as two files: deleting `readers.py` would make `loaders → detect_settings → loaders` a cycle. Dead `create_unique_series` / `find_session_roots` deleted. regression GREEN |
 | 1 rename | not started | | |
 | 2a helpers extraction | not started | | |
 | 2b canonical session discovery | not started | | |

@@ -1,3 +1,15 @@
+"""Low-level harp/aeon reader classes and the file-reading primitives built on them.
+
+Single definition site for these eight names. ``io/loaders.py`` imports them from here
+rather than redefining them, and this module deliberately imports nothing from
+``hypnose`` -- it is a leaf, so ``detect_settings`` / ``detect_stage`` can use it without
+creating a cycle back through ``loaders``.
+
+The ``load*`` functions are tolerant by design: an unreadable or empty chunk is skipped
+rather than propagated, and a root with no matching files yields an empty DataFrame
+instead of raising ``ValueError: No objects to concatenate``. Callers detect "nothing
+here" from the empty frame.
+"""
 import os
 import json
 from dotmap import DotMap
@@ -17,7 +29,7 @@ class SessionData(Reader):
     def read(self, file):
         """Returns metadata for the specified epoch."""
         with open(file) as fp:
-            metadata = [json.loads(line) for line in fp] 
+            metadata = [json.loads(line) for line in fp]
 
         data = {
             "metadata": [DotMap(entry['value']) for entry in metadata]
@@ -43,7 +55,7 @@ class Video(Csv):
         data["Time"] = data["Time"].transform(lambda x: api.aeon(x))
         data.set_index("Time", inplace=True)
         return data
-    
+
 
 class TimestampedCsvReader(Csv):
     def __init__(self, pattern, columns):
@@ -56,28 +68,78 @@ class TimestampedCsvReader(Csv):
         data["Time"] = data["Time"].transform(lambda x: api.aeon(x))
         data.set_index("Time", inplace=True)
         return data
-    
+
 
 def load_json(reader: SessionData, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(root.name)}_*.{reader.extension}"
-    # print(pattern)
-    data = [reader.read(Path(file)) for file in sorted(glob(pattern))]
-    return pd.concat(data)
+    files = sorted(glob(pattern))
+    chunks = []
+    for file in files:
+        try:
+            df = reader.read(Path(file))
+            if df is None or (hasattr(df, "empty") and df.empty):
+                continue
+            chunks.append(df)
+        except Exception:
+            # skip bad file
+            continue
+    if not chunks:
+        return pd.DataFrame()
+    out = pd.concat(chunks, axis=0)
+    try:
+        out = out.sort_index()
+    except Exception:
+        pass
+    return out
 
 
 def load(reader: Reader, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(root.name)}_{reader.register.address}_*.bin"
-    data = [reader.read(file) for file in sorted(glob(pattern))]
-    return pd.concat(data)
+    files = sorted(glob(pattern))
+    chunks = []
+    for file in files:
+        try:
+            df = reader.read(file)
+            if df is None or (hasattr(df, "empty") and df.empty):
+                continue
+            chunks.append(df)
+        except Exception:
+            # skip bad file
+            continue
+    if not chunks:
+        return pd.DataFrame()
+    out = pd.concat(chunks, axis=0)
+    try:
+        out = out.sort_index()
+    except Exception:
+        pass
+    return out
 
 
 def load_video(reader: Video, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(root.name)}_*.csv"
-    data = [reader.read(Path(file)) for file in sorted(glob(pattern))]
-    return pd.concat(data)
+    files = sorted(glob(pattern))
+    chunks = []
+    for file in files:
+        try:
+            df = reader.read(Path(file))
+            if df is None or (hasattr(df, "empty") and df.empty):
+                continue
+            chunks.append(df)
+        except Exception:
+            # skip bad file
+            continue
+    if not chunks:
+        return pd.DataFrame()
+    out = pd.concat(chunks, axis=0)
+    try:
+        out = out.sort_index()
+    except Exception:
+        pass
+    return out
 
 
 def concat_digi_events(series_low: pd.DataFrame, series_high: pd.DataFrame) -> pd.DataFrame:
@@ -90,57 +152,22 @@ def concat_digi_events(series_low: pd.DataFrame, series_high: pd.DataFrame) -> p
 def load_csv(reader: Csv, root: Path) -> pd.DataFrame:
     root = Path(root)
     pattern = f"{root.joinpath(reader.pattern).joinpath(reader.pattern)}_*.{reader.extension}"
-    print(pattern)
-    print([file for file in glob(pattern)])
-    data = pd.concat([reader.read(Path(file)) for file in glob(pattern)])
-    return data
-
-def create_unique_series(events_df):
-    """Creates a unique-timestamp boolean series adding slight offsets to duplicate timestamps."""
-    timestamps = events_df['Time']
-    if len(timestamps) != len(set(timestamps)):
-        unique_timestamps = []
-        seen = set()
-        for ts in timestamps:
-            counter = 0
-            ts_modified = ts
-            while ts_modified in seen:
-                counter += 1
-                ts_modified = ts + pd.Timedelta(microseconds=counter)
-            seen.add(ts_modified)
-            unique_timestamps.append(ts_modified)
-        timestamps = unique_timestamps
-    return pd.Series(True, index=timestamps)
-
-def find_session_roots(subject_folder):
-    """
-    Find all session root directories for a subject following the structure:
-    subject_folder/ses-*_date-*/behav/*
-    Returns a list of tuples: (session_id, session_date, session_path)
-    """
-    subject_path = Path(subject_folder)
-    session_roots = []
-    
-    # Find all session directories following pattern 'ses-*_date-*'
-    session_dirs = list(subject_path.glob('ses-*_date-*/behav/*'))
-    
-    for session_dir in session_dirs:
-        if not session_dir.is_dir() or not (session_dir / "SessionSettings").exists():
-            continue
-            
-        # Extract session ID and date from parent directory names
-        parent_dir = session_dir.parent.parent.name
+    files = sorted(glob(pattern))
+    chunks = []
+    for file in files:
         try:
-            # Parse the ses-X_date-YYYYMMDD format
-            parts = parent_dir.split('_')
-            session_id = parts[0].replace('ses-', '')
-            session_date = parts[1].replace('date-', '')
-            session_roots.append((session_id, session_date, session_dir))
-        except (IndexError, AttributeError):
-            print(f"Warning: Could not parse session information from {parent_dir}")
-            session_roots.append(("unknown", "unknown", session_dir))
-    
-    # Sort session roots by session_id (numerically if possible)
-    session_roots.sort(key=lambda x: int(x[0]) if x[0].isdigit() else float('inf'))
-    
-    return session_roots
+            df = reader.read(Path(file))
+            if df is None or (hasattr(df, "empty") and df.empty):
+                continue
+            chunks.append(df)
+        except Exception:
+            # skip bad file
+            continue
+    if not chunks:
+        return pd.DataFrame()
+    out = pd.concat(chunks, axis=0)
+    try:
+        out = out.sort_index()
+    except Exception:
+        pass
+    return out
