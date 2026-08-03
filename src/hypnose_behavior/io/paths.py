@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from pathlib import Path
-from functools import lru_cache
-import os
 
-RAW_SUBDIR = "rawdata"
-DERIV_SUBDIR = "derivatives"
+from hypnose_helpers.io.paths import DataLocations, RAW_SUBDIR, DERIV_SUBDIR, env_path
 
+# The data-location *mechanism* (profile format, precedence, active selection) lives in
+# hypnose-helpers; only the knowledge of where THIS repo keeps its config and its legacy
+# data dir stays here. See restructure_2 Phase 2a.
+#
 # Resolution order for the data roots (highest priority first):
 #   1. HYPNOSE_* environment variables  (deliberate override: CI, the QC sandbox, one-offs)
 #   2. the active data-location profile  (configs/data_locations.yml + the per-machine
@@ -27,139 +28,31 @@ def get_repo_root() -> Path:
     # paths.py → io → hypnose_behavior → src → hypnose-behavior-analysis
 
 
-def _env_path(var_name: str) -> Path | None:
-    val = os.getenv(var_name)
-    if not val:
-        return None
-    return Path(os.path.expanduser(os.path.expandvars(val)))
+_locations = DataLocations(
+    config_dir=get_repo_root() / "configs",
+    data_root=get_repo_root() / "data",
+)
 
+# Bound methods, so `get_rawdata_root()` and friends keep working unchanged at ~17 call
+# sites -- and still expose `.cache_clear()`, which qc/_common.py relies on to redirect
+# derivatives into a temp dir per session.
+load_profiles = _locations.load_profiles
+get_active = _locations.get_active
+set_active = _locations.set_active
+reload = _locations.reload
+get_data_root = _locations.get_data_root
+get_rawdata_root = _locations.get_rawdata_root
+get_server_root = _locations.get_server_root
+get_derivatives_root = _locations.get_derivatives_root
 
-def get_data_root() -> Path:
-    env_root = _env_path("HYPNOSE_DATA_ROOT")
-    return env_root if env_root is not None else get_repo_root() / "data"
+# Used by scripts/set_data_location.py to report where the selection was written.
+_local_path = _locations._local_path
+_profiles_path = _locations._profiles_path
+_active_profile = _locations._active_profile
+_env_path = env_path
 
-
-# --- data-location config ---------------------------------------------------
-
-def _configs_dir() -> Path:
-    return get_repo_root() / "configs"
-
-
-def _profiles_path() -> Path:
-    """Committed file with the shared profiles (server-mac, server-windows, local_*, ...)."""
-    return _configs_dir() / "data_locations.yml"
-
-
-def _local_path() -> Path:
-    """Per-machine, git-ignored file selecting the `active` profile."""
-    return _configs_dir() / "data_locations.local.yml"
-
-
-def _read_yaml(path: Path) -> dict:
-    if not path.exists():
-        return {}
-    # The file exists, so the user intends to use it -- if we can't read it, WARN rather than
-    # silently falling back (a silent fallback to the legacy symlink is exactly the surprise this
-    # system is meant to prevent).
-    try:
-        import yaml  # lazy: keep paths.py importable even if yaml is unavailable
-    except Exception:
-        import warnings
-        warnings.warn(
-            f"pyyaml is unavailable, so the data-location config '{path.name}' is being IGNORED "
-            f"(falling back to the legacy symlink). Are you in the project conda env? "
-            f"`conda activate hypnose-env`.",
-            stacklevel=2,
-        )
-        return {}
-    try:
-        return yaml.safe_load(path.read_text()) or {}
-    except Exception as e:
-        import warnings
-        warnings.warn(f"could not read data-location config '{path}': {e}", stacklevel=2)
-        return {}
-
-
-def load_profiles() -> dict:
-    """Return {profile_name: {'rawdata': ..., 'derivatives': ...}} from the committed config."""
-    return _read_yaml(_profiles_path()).get("profiles", {}) or {}
-
-
-def get_active() -> str | None:
-    """The active profile name: the per-machine local override, else the committed default."""
-    active = _read_yaml(_local_path()).get("active")
-    if active:
-        return active
-    return _read_yaml(_profiles_path()).get("default_active")
-
-
-def set_active(name: str) -> None:
-    """Write the active profile to the git-ignored local config (used by scripts/set_data_location.py)."""
-    import yaml
-    _configs_dir().mkdir(parents=True, exist_ok=True)
-    _local_path().write_text(
-        "# Per-machine data-location selection (git-ignored). Set via scripts/set_data_location.py\n"
-        + yaml.safe_dump({"active": name}, sort_keys=False)
-    )
-
-
-def _active_profile() -> dict | None:
-    """Resolved active profile: {'name', 'rawdata', 'derivatives'} or None.
-    `derivatives` defaults to the sibling of `rawdata` when not given explicitly."""
-    name = get_active()
-    if not name:
-        return None
-    prof = load_profiles().get(name)
-    if not isinstance(prof, dict) or not prof.get("rawdata"):
-        return None
-    raw = str(prof["rawdata"])
-    deriv = prof.get("derivatives") or str(Path(raw).parent / DERIV_SUBDIR)
-    return {"name": name, "rawdata": raw, "derivatives": str(deriv)}
-
-
-def reload() -> None:
-    """Clear cached path lookups so a changed data-location config (or env var) is picked up
-    in a running process. Call after `set_data_location` / `set_active` in a live kernel."""
-    for fn in (get_rawdata_root, get_server_root, get_derivatives_root):
-        try:
-            fn.cache_clear()
-        except Exception:
-            pass
-
-
-# --- resolved roots ---------------------------------------------------------
-
-@lru_cache
-def get_rawdata_root() -> Path:
-    env_root = _env_path("HYPNOSE_RAWDATA_ROOT")
-    if env_root is not None:
-        return env_root.resolve(strict=False)
-    prof = _active_profile()
-    if prof is not None:
-        return Path(prof["rawdata"]).resolve(strict=False)
-    return (get_data_root() / RAW_SUBDIR).resolve(strict=False)  # legacy symlink fallback
-
-
-@lru_cache
-def get_server_root() -> Path:
-    env_root = _env_path("HYPNOSE_SERVER_ROOT")
-    if env_root is not None:
-        return env_root.resolve(strict=False)
-    rawdata_root = get_rawdata_root()
-    return rawdata_root.parent if rawdata_root.name == RAW_SUBDIR else rawdata_root
-
-
-@lru_cache
-def get_derivatives_root() -> Path:
-    env_root = _env_path("HYPNOSE_DERIVATIVES_ROOT")
-    if env_root is not None:
-        return env_root.resolve(strict=False)
-    prof = _active_profile()
-    if prof is not None:
-        return Path(prof["derivatives"]).resolve(strict=False)
-    server_root = get_server_root()
-    deriv = server_root / DERIV_SUBDIR
-    if deriv.exists():
-        return deriv
-    # fallback for local-only layouts
-    return (get_data_root() / DERIV_SUBDIR).resolve(strict=False)
+__all__ = [
+    "get_repo_root", "get_data_root", "get_rawdata_root", "get_server_root",
+    "get_derivatives_root", "load_profiles", "get_active", "set_active", "reload",
+    "RAW_SUBDIR", "DERIV_SUBDIR",
+]

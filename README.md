@@ -40,6 +40,18 @@ Within your working directory use a terminal to clone the repo to your local fol
 ```conda env create -f environment.yml```
 ```conda activate hypnose-behavior-analysis```
 
+> **`hypnose-helpers` is a required dependency** and is not on PyPI, so install it from a
+> clone before this package. It owns the data-location mechanism (`io/paths.py`), the
+> figure styles and the shared layout/selector parsing:
+>
+> ```
+> git clone github.com/SainsburyWellcomeCentre/hypnose-helpers
+> pip install -e /path/to/hypnose-helpers
+> ```
+>
+> Without it, `import hypnose_behavior.io.paths` fails outright — this is a hard
+> dependency, not the optional/lazy kind hypnose-somnotate uses.
+
 > **Installing by hand?** Use the `behavioral` extra — `pip install -e ".[behavioral]"`.
 > A bare `pip install -e .` gives the *base* install (analysis code, figure styles,
 > data-location helpers) but omits the behavioural/video stack (`swc-aeon`,
