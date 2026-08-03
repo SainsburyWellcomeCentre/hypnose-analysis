@@ -22,19 +22,18 @@ from hypnose_helpers.viz.save import (  # noqa: F401
 from hypnose_helpers.viz.save import save_figure as _save_figure
 
 
-# Apply the default (nature) style globally so display and saved figures match.
-# To switch styles for a notebook, call one of:
-#     mpl.rcParams.update(poster_style())
-#     use_presentation_style()          # presentation (also caps y-ticks)
+# NOTE (restructure_2 Phase 2a): this module no longer applies a style at import.
+# Two packages mutating global rcParams at module scope means whoever imports last
+# silently wins -- which is how this collided with hypnose-somnotate's vendored
+# configuration.py. Apply a style explicitly at the top of a notebook or script:
 #
-# NOTE (restructure_2): helpers deliberately does NOT mutate rcParams at import. This
-# line is kept here for now so figure appearance is unchanged; removing it is a separate,
-# deliberate change -- the regression fingerprint covers trial_data + metrics, not
-# figures, so it cannot catch a restyle.
-mpl.rcParams.update(nature_style())
-
-mpl.rcParams["pdf.fonttype"] = 42
-mpl.rcParams["ps.fonttype"] = 42
+#     use_style()                  # nature (the default)
+#     use_style("presentation")    # presentation (also caps y-ticks)
+#     with plt.rc_context(nature_style()): ...   # scoped, as scripts/modelling does
+#
+# `pdf.fonttype`/`ps.fonttype` = 42 (editable PDF text rather than Type 3) is part of
+# every style dict, and save_figure enforces it regardless, so saved PDFs are safe even
+# when no style has been applied.
 
 
 def _resolve_subject_dir(deriv_root: Path, subjid: int) -> Path:
