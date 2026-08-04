@@ -22,7 +22,7 @@ from hypnose_behavior.io.loaders import (
     load_experiment, load_all_streams, load_experiment_events, load_odor_mapping,
 )
 from hypnose_behavior.io.save_results import save_session_analysis_results
-from hypnose_behavior.io.paths import get_rawdata_root
+from hypnose_behavior.io.layout import rawdata
 from hypnose_behavior.trial_classification.merge import merge_classifications
 from hypnose_behavior.trial_classification.summary import print_merged_session_summary
 from hypnose_behavior.utils.helpers import vprint
@@ -452,30 +452,26 @@ def batch_analyze_sessions(
     - Handles missing subjects/dates gracefully.
     Returns a dict: {(subjid, date): result_dict}
     """
-    base_path = get_rawdata_root()
     results = {}
 
     # Discover subjects
     if subjids is None:
-        subj_dirs = sorted(base_path.glob("sub-*_id-*"))
-        subjids = [int(str(d.name).split('_')[0].replace('sub-', '')) for d in subj_dirs]
+        subjids = [sid for sid, _ in rawdata.iter_subjects()]
     else:
         subjids = [int(s) for s in subjids]
 
     dates_to_run_global = _parse_date_input(dates)
 
     for subjid in subjids:
-        subj_str = f"sub-{str(subjid).zfill(3)}"
-        subj_dirs = list(base_path.glob(f"{subj_str}_id-*"))
-        if not subj_dirs:
+        # A missing subject and a subject with no sessions are different problems;
+        # only the first is worth warning about, as before.
+        if rawdata.subject_dir(subjid, missing_ok=True) is None:
             print(f"[batch_analyze_sessions] WARNING: Subject {subjid} not found.")
             continue
-        subj_dir = subj_dirs[0]
-        
+
         # Discover available dates for this subject
-        session_dirs = sorted(subj_dir.glob("ses-*_date-*"))
-        available_dates = [int(d.name.split('date-')[-1]) for d in session_dirs]
-        
+        available_dates = [int(s.date) for s in rawdata.find_sessions(subjid)]
+
         # Determine which dates to run for this subject
         if dates_to_run_global is None:
             # Analyze all available dates

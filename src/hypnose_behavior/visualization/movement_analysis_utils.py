@@ -28,12 +28,14 @@ from hypnose_behavior.io.paths import (
 )
 from hypnose_behavior.utils.helpers import (
     _filter_session_dirs,
+    _filter_sessions,
     _get_from_cache,
     _iter_subject_dirs,
     _update_cache,
     find_tracking_file,
     read_tracking_table,
 )
+from hypnose_behavior.io.layout import derivatives, normalize_subjid
 from hypnose_behavior.visualization.visualization_utils import (
     _clean_graph,
     _extract_metric_value,
@@ -105,18 +107,7 @@ def _load_tracking_and_behavior(subjid, date, tracking_source='sleap'):
     server_root = get_server_root()
     derivatives_dir = get_derivatives_root()
 
-    sub_str = f"sub-{str(subjid).zfill(3)}"
-    date_str = str(date)
-
-    subject_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
-    if not subject_dirs:
-        raise FileNotFoundError(f"No subject directory found for {sub_str}")
-    subject_dir = subject_dirs[0]
-
-    session_dirs = list(subject_dir.glob(f"ses-*_date-{date_str}"))
-    if not session_dirs:
-        raise FileNotFoundError(f"No session found for date {date_str}")
-    session_dir = session_dirs[0]
+    session_dir = derivatives.find_session(subjid, date=date).path
 
     results_dir = session_dir / "saved_analysis_results"
     if not results_dir.exists():
@@ -229,20 +220,10 @@ def plot_movement_trace(subjid, date, smooth_window=10, linewidth=1, alpha=0.5, 
     server_root = get_server_root()
     derivatives_dir = get_derivatives_root()
     
-    # Find subject directory
-    sub_str = f"sub-{str(subjid).zfill(3)}"
-    subject_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
-    if not subject_dirs:
-        raise FileNotFoundError(f"No subject directory found for {sub_str}")
-    subject_dir = subject_dirs[0]
-    
-    # Find session directory
-    date_str = str(date)
-    session_dirs = list(subject_dir.glob(f"ses-*_date-{date_str}"))
-    if not session_dirs:
-        raise FileNotFoundError(f"No session found for date {date_str}")
-    session_dir = session_dirs[0]
-    
+    session = derivatives.find_session(subjid, date=date)
+    session_dir = session.path
+    date_str = session.date  # used in the figure title below
+
     # Find combined tracking CSV
     results_dir = session_dir / "saved_analysis_results"
     if not results_dir.exists():
@@ -993,12 +974,9 @@ def plot_trial_traces_by_mode(
     speed_cmap = cm.get_cmap("viridis")
     speed_vals_global = []
 
-    subj_str = f"sub-{str(subjid).zfill(3)}"
+    subj_str = normalize_subjid(subjid)
     derivatives_dir = get_derivatives_root()
-    subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-    if not subj_dirs:
-        raise FileNotFoundError(f"No subject directory found for {subj_str}")
-    subj_dir = subj_dirs[0]
+    subj_dir = derivatives.subject_dir(subjid)
 
     ses_dirs = _filter_session_dirs(subj_dir, dates)
     if not ses_dirs:
@@ -1954,12 +1932,9 @@ def compute_speed_analysis(
         except TypeError:
             fa_labels = {str(fa_label_filter).strip().lower()}
 
-    subj_str = f"sub-{str(subjid).zfill(3)}"
+    subj_str = normalize_subjid(subjid)
     derivatives_dir = get_derivatives_root()
-    subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-    if not subj_dirs:
-        raise FileNotFoundError(f"No subject directory found for {subj_str}")
-    subj_dir = subj_dirs[0]
+    subj_dir = derivatives.subject_dir(subjid)
 
     ses_dirs = _filter_session_dirs(subj_dir, dates)
     if not ses_dirs:
@@ -2543,12 +2518,9 @@ def plot_epoch_speeds_by_condition(
         except TypeError:
             fa_labels = {str(fa_label_filter).strip().lower()}
 
-    subj_str = f"sub-{str(subjid).zfill(3)}"
+    subj_str = normalize_subjid(subjid)
     derivatives_dir = get_derivatives_root()
-    subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*") )
-    if not subj_dirs:
-        raise FileNotFoundError(f"No subject directory found for {subj_str}")
-    subj_dir = subj_dirs[0]
+    subj_dir = derivatives.subject_dir(subjid)
 
     ses_dirs = _filter_session_dirs(subj_dir, dates)
     if not ses_dirs:
@@ -2837,12 +2809,9 @@ def plot_traces_with_speed_threshold(
     if pre_buffer_s < 0.15:
         print("pre_buffer_s < 0.15s: baseline window [-0.15, -0.05] may be empty")
 
-    subj_str = f"sub-{str(subjid).zfill(3)}"
+    subj_str = normalize_subjid(subjid)
     derivatives_dir = get_derivatives_root()
-    subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-    if not subj_dirs:
-        raise FileNotFoundError(f"No subject directory found for {subj_str}")
-    subj_dir = subj_dirs[0]
+    subj_dir = derivatives.subject_dir(subjid)
 
     ses_dirs = _filter_session_dirs(subj_dir, dates)
     if not ses_dirs:
@@ -3372,11 +3341,8 @@ def plot_tortuosity_lines_overlay(
         suffix_parts.append(_slugify(fa_label_display))
     save_suffix = "_".join(filter(None, suffix_parts))
 
-    subj_str = f"sub-{str(subjid).zfill(3)}"
-    subj_dirs = list(get_derivatives_root().glob(f"{subj_str}_id-*"))
-    if not subj_dirs:
-        raise FileNotFoundError(f"No subject directory found for {subj_str}")
-    subj_dir = subj_dirs[0]
+    subj_str = normalize_subjid(subjid)
+    subj_dir = derivatives.subject_dir(subjid)
 
     ses_dirs = _filter_session_dirs(subj_dir, dates)
     if not ses_dirs:
@@ -3652,11 +3618,8 @@ def plot_movement_analysis_statistics(
         def fa_filter_fn(lbl):
             return str(lbl).lower() in fa_set if pd.notna(lbl) else False
 
-    subj_str = f"sub-{str(subjid).zfill(3)}"
-    subj_dirs = list(get_derivatives_root().glob(f"{subj_str}_id-*"))
-    if not subj_dirs:
-        raise FileNotFoundError(f"No subject directory found for {subj_str}")
-    subj_dir = subj_dirs[0]
+    subj_str = normalize_subjid(subjid)
+    subj_dir = derivatives.subject_dir(subjid)
 
     ses_dirs = _filter_session_dirs(subj_dir, dates)
     if not ses_dirs:

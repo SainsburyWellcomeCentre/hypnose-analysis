@@ -27,6 +27,7 @@ import aeon.io.api as api
 
 import hypnose_behavior.trial_classification.detect_settings as detect_settings
 from hypnose_behavior.io.paths import get_rawdata_root, get_derivatives_root, get_server_root
+from hypnose_behavior.io.layout import rawdata
 from hypnose_behavior.utils.helpers import vprint, _get_from_cache, _update_cache
 # Reader classes and file-reading primitives are defined once, in io/readers.py. They are
 # re-exported here because callers (classification_utils, notebooks) import them from this
@@ -59,37 +60,15 @@ def load_experiment(subjid, date, index=None):
     Path object to experiment root, or None if selection needed
     """
     
-    base_path = get_rawdata_root()    
-
-    # Format inputs
-    subjid_str = f"sub-{str(subjid).zfill(3)}"  
-    date_str = str(date)
-    
-    subject_dirs = list(base_path.glob(f"{subjid_str}_id-*"))
-    
-    if not subject_dirs:
-        raise FileNotFoundError(f"No subject directory found for {subjid_str}")
-    
-    if len(subject_dirs) > 1:
-        print(f"Warning: Multiple subject directories found for {subjid_str}, using first one")
-    
-    subject_dir = subject_dirs[0]
+    # One resolver for the whole family (restructure_2 Phase 2b). It reports the
+    # available sessions on a miss, as this function used to do by hand, and raises on
+    # an ambiguous subject or date rather than warning and taking the first match.
+    session = rawdata.find_session(subjid, date=date)
+    subject_dir = session.subject_dir
     print(f"Using subject directory: {subject_dir}")
 
-    session_dirs = list(subject_dir.glob(f"ses-*_date-{date_str}"))
-    
-    if not session_dirs:
-        # Better error reporting - show what sessions actually exist
-        all_sessions = list(subject_dir.glob("ses-*"))
-        session_names = [d.name for d in all_sessions]
-        raise FileNotFoundError(f"No session found for date {date_str} in {subject_dir}.\n"
-                              f"Available sessions: {session_names}")
-    
-    if len(session_dirs) > 1:
-        print(f"Warning: Multiple sessions found for date {date_str}, using first one")
-    
-    session_dir = session_dirs[0]
-    
+    session_dir = session.path
+
     behav_dir = session_dir / "behav"
     if not behav_dir.exists():
         raise FileNotFoundError(f"No behav directory found in {session_dir}")
@@ -116,7 +95,7 @@ def load_experiment(subjid, date, index=None):
     
     elif index is None:
         # Multiple experiments, no index specified
-        print(f"Multiple experiments detected for subject {subjid_str} on {date_str}:")
+        print(f"Multiple experiments detected for subject {session.subject} on {session.date}:")
         for i, exp_dir in enumerate(experiment_dirs):
             print(f"  Index {i}: {exp_dir.name}")
         print(f"\nPlease run again with index parameter:")

@@ -24,12 +24,14 @@ from hypnose_behavior.trial_classification.classification_utils import load_all_
 from hypnose_behavior.utils.helpers import (
     CACHE,
     _filter_session_dirs,
+    _filter_sessions,
     _get_from_cache,
     _iter_subject_dirs,
     _update_cache,
     find_tracking_file,
     read_tracking_table,
 )
+from hypnose_behavior.io.layout import derivatives, list_sessions, normalize_subjid
 from hypnose_behavior.io.paths import (
     get_data_root,
     get_rawdata_root,
@@ -112,17 +114,7 @@ def load_tracking_with_behavior(subjid, date):
         base_path = get_rawdata_root()
         server_root = get_server_root()
         derivatives_dir = get_derivatives_root()
-        sub_str = f"sub-{str(subjid).zfill(3)}"
-        subject_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
-        if not subject_dirs:
-            raise FileNotFoundError(f"No subject directory found for {sub_str}")
-        subject_dir = subject_dirs[0]
-        date_str = str(date)
-        session_dirs = list(subject_dir.glob(f"ses-*_date-{date_str}"))
-        if not session_dirs:
-            raise FileNotFoundError(f"No session found for date {date_str}")
-        session_dir = session_dirs[0]
-        results_dir = session_dir / "saved_analysis_results"
+        results_dir = derivatives.find_session(subjid, date=date).path / "saved_analysis_results"
         tracking_file = find_tracking_file(results_dir, "*_combined_tracking_with_timestamps")
         if tracking_file is None:
             # Fallback to SLEAP combined file
@@ -359,13 +351,13 @@ def plot_behavior_metrics(
                 if verbose:
                     print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
                 continue
-            subj_str = f"sub-{str(subjid).zfill(3)}"
-            subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-            if not subj_dirs:
+            subj_str = normalize_subjid(subjid)
+            subj_dir = derivatives.subject_dir(subjid, missing_ok=True)
+            if subj_dir is None:
                 if verbose:
                     print(f"Warning: No subject directory found for {subj_str}")
                 continue
-            subject_iter.append((int(subjid), subj_dirs[0], subj_dates))
+            subject_iter.append((int(subjid), subj_dir, subj_dates))
 
     # Gather sessions
     for sid, subj_dir, subj_dates in subject_iter:
@@ -726,8 +718,8 @@ def _hr_odor_associations(subj_dirs) -> dict:
     for subj_dir in subj_dirs:
         if subj_dir is None:
             continue
-        for ses in sorted(subj_dir.glob("ses-*_date-*")):
-            results_dir = ses / "saved_analysis_results"
+        for session in list_sessions(subj_dir):
+            results_dir = session.path / "saved_analysis_results"
             summary_path = results_dir / "summary.json"
             if not summary_path.exists():
                 continue
@@ -905,13 +897,13 @@ def hidden_rule_and_false_alarm(
                 if verbose:
                     print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
                 continue
-            subj_str = f"sub-{str(subjid).zfill(3)}"
-            subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-            if not subj_dirs:
+            subj_str = normalize_subjid(subjid)
+            subj_dir = derivatives.subject_dir(subjid, missing_ok=True)
+            if subj_dir is None:
                 if verbose:
                     print(f"Warning: No subject directory found for {subj_str}")
                 continue
-            subject_iter.append((int(subjid), subj_dirs[0], subj_dates))
+            subject_iter.append((int(subjid), subj_dir, subj_dates))
 
     rows = []
     observed_hr_letters = set()
@@ -3012,12 +3004,11 @@ def plot_cumulative_rewards(
         base_path = get_rawdata_root()
         server_root = get_server_root()
         derivatives_dir = get_derivatives_root()
-        subj_str = f"sub-{str(subjid).zfill(3)}"
-        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-        if not subj_dirs:
+        subj_str = normalize_subjid(subjid)
+        subj_dir = derivatives.subject_dir(subjid, missing_ok=True)
+        if subj_dir is None:
             print(f"Warning: No subject directory found for {subj_str}")
             continue
-        subj_dir = subj_dirs[0]
 
         # Use _filter_session_dirs to get session directories
         ses_dirs = _filter_session_dirs(subj_dir, subj_dates)
@@ -3312,12 +3303,11 @@ def plot_cumulative_rewards_by_trial(
             continue
 
         derivatives_dir = get_derivatives_root()
-        subj_str = f"sub-{str(subjid).zfill(3)}"
-        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-        if not subj_dirs:
+        subj_str = normalize_subjid(subjid)
+        subj_dir = derivatives.subject_dir(subjid, missing_ok=True)
+        if subj_dir is None:
             print(f"Warning: No subject directory found for {subj_str}")
             continue
-        subj_dir = subj_dirs[0]
 
         # Sessions in chronological (date) order.
         sessions = []
@@ -3440,12 +3430,11 @@ def _load_subject_trial_timeline(subjid, subj_dates):
     trial-axis gap spans and session boundaries. ``None`` if no data.
     """
     derivatives_dir = get_derivatives_root()
-    subj_str = f"sub-{str(subjid).zfill(3)}"
-    subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-    if not subj_dirs:
+    subj_str = normalize_subjid(subjid)
+    subj_dir = derivatives.subject_dir(subjid, missing_ok=True)
+    if subj_dir is None:
         print(f"Warning: No subject directory found for {subj_str}")
         return None
-    subj_dir = subj_dirs[0]
 
     sessions = []
     for ses in _filter_session_dirs(subj_dir, subj_dates):
@@ -3898,11 +3887,7 @@ def plot_choice_history(
     else:
         fa_set = {str(s).strip().lower() for s in fa_types} if fa_types is not None else set()
     
-    subj_str = f"sub-{str(subjid).zfill(3)}"
-    subject_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-    if not subject_dirs:
-        raise FileNotFoundError(f"No subject directory found for {subj_str}")
-    subject_dir = subject_dirs[0]
+    subject_dir = derivatives.subject_dir(subjid)
     
     # Get session directories
     ses_dirs = _filter_session_dirs(subject_dir, dates)
@@ -4337,13 +4322,12 @@ def plot_position_completion_rate(
             print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
             continue
 
-        subj_str = f"sub-{str(subjid).zfill(3)}"
-        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-        if not subj_dirs:
+        subj_str = normalize_subjid(subjid)
+        subj_dir = derivatives.subject_dir(subjid, missing_ok=True)
+        if subj_dir is None:
             if verbose:
                 print(f"Warning: No subject directory found for {subj_str}")
             continue
-        subj_dir = subj_dirs[0]
 
         ses_dirs = _filter_session_dirs(subj_dir, subj_dates)
         for ses_dir in ses_dirs:
@@ -4625,13 +4609,12 @@ def plot_false_alarm_rate_by_position(
             print(f"Warning: No date range provided in dict for subject {subjid}, skipping")
             continue
 
-        subj_str = f"sub-{str(subjid).zfill(3)}"
-        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-        if not subj_dirs:
+        subj_str = normalize_subjid(subjid)
+        subj_dir = derivatives.subject_dir(subjid, missing_ok=True)
+        if subj_dir is None:
             if verbose:
                 print(f"Warning: No subject directory found for {subj_str}")
             continue
-        subj_dir = subj_dirs[0]
 
         ses_dirs = _filter_session_dirs(subj_dir, subj_dates)
         for ses_dir in ses_dirs:
@@ -5248,13 +5231,12 @@ def plot_decision_accuracy(
                       f"(expected 8-digit YYYYMMDD); skipping")
             continue
 
-        subj_str = f"sub-{str(subjid).zfill(3)}"
-        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-        if not subj_dirs:
+        subj_str = normalize_subjid(subjid)
+        subj_dir = derivatives.subject_dir(subjid, missing_ok=True)
+        if subj_dir is None:
             if verbose:
                 print(f"Warning: No subject directory found for {subj_str}")
             continue
-        subj_dir = subj_dirs[0]
 
         main_vals, hr_vals = [], []
         for ses in _filter_session_dirs(subj_dir, subj_dates):
@@ -5598,13 +5580,12 @@ def plot_poke_duration_by_odor(
                 print(f"Warning: No date range provided in dict for subject {sid}, skipping")
             continue
 
-        subj_str = f"sub-{str(sid).zfill(3)}"
-        subj_dirs = list(derivatives_dir.glob(f"{subj_str}_id-*"))
-        if not subj_dirs:
+        subj_str = normalize_subjid(sid)
+        subj_dir = derivatives.subject_dir(sid, missing_ok=True)
+        if subj_dir is None:
             if verbose:
                 print(f"Warning: No subject directory found for {subj_str}")
             continue
-        subj_dir = subj_dirs[0]
         used_subj_dirs.append(subj_dir)
 
         # Day index = consecutive session order in the derivatives (NOT calendar

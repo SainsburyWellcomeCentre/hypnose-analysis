@@ -9,7 +9,7 @@ import re
 import pandas as pd
 
 from hypnose_behavior.io.loaders import load_all_streams, load_odor_mapping
-from hypnose_behavior.io.paths import get_derivatives_root, get_rawdata_root
+from hypnose_behavior.io.layout import derivatives, normalize_subjid, rawdata
 
 
 _TIMESTAMP_DIR_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}")
@@ -23,38 +23,18 @@ def _digits_only(value) -> str:
 
 
 def _normalize_subjid(subjid) -> str:
-	return f"sub-{int(_digits_only(subjid)):03d}"
+	return normalize_subjid(_digits_only(subjid))
 
 
 def _normalize_date(date) -> str:
 	return _digits_only(date)
 
 
-def _find_subject_dir(root: Path, subjid) -> Path:
-	subj_token = _normalize_subjid(subjid)
-	matches = sorted(Path(root).glob(f"{subj_token}_id-*"))
-	if not matches:
-		raise FileNotFoundError(f"No subject directory found for {subj_token} under {root}")
-	return matches[0]
-
-
-def _find_session_dir(root: Path, subjid, date) -> Path:
-	subject_dir = _find_subject_dir(root, subjid)
-	date_token = _normalize_date(date)
-	matches = sorted(subject_dir.glob(f"ses-*_date-{date_token}"))
-	if not matches:
-		available = sorted(p.name for p in subject_dir.glob("ses-*"))
-		raise FileNotFoundError(
-			f"No session directory found for date {date_token} under {subject_dir}. "
-			f"Available sessions: {available}"
-		)
-	return matches[0]
-
-
 def _resolve_session_paths(subjid, date) -> tuple[Path, Path, Path, Path]:
-	raw_subject_dir = _find_subject_dir(get_rawdata_root(), subjid)
-	raw_session_dir = _find_session_dir(get_rawdata_root(), subjid, date)
-	deriv_session_dir = _find_session_dir(get_derivatives_root(), subjid, date)
+	raw_session = rawdata.find_session(subjid, date=_normalize_date(date))
+	raw_subject_dir = raw_session.subject_dir
+	raw_session_dir = raw_session.path
+	deriv_session_dir = derivatives.find_session(subjid, date=_normalize_date(date)).path
 	results_dir = deriv_session_dir / "saved_analysis_results"
 	if not results_dir.exists():
 		raise FileNotFoundError(f"Results directory not found: {results_dir}")
@@ -500,15 +480,9 @@ def _normalize_pairs(subjids, dates):
 	return list(product(subj_list, date_list))
 
 
-def _available_session_dates(root: Path, subjid) -> list[str]:
+def _available_session_dates(layout, subjid) -> list[str]:
 	"""Return all session date tokens that exist on disk for a subject."""
-	subject_dir = _find_subject_dir(root, subjid)
-	dates = []
-	for session_dir in subject_dir.glob("ses-*_date-*"):
-		match = re.search(r"_date-(\d{8})", session_dir.name)
-		if match:
-			dates.append(match.group(1))
-	return sorted(set(dates))
+	return sorted({session.date for session in layout.find_sessions(subjid)})
 
 
 def _expand_date_range(subjid, start, end) -> list[str]:
@@ -517,7 +491,7 @@ def _expand_date_range(subjid, start, end) -> list[str]:
 	end_token = _normalize_date(end)
 	if start_token > end_token:
 		start_token, end_token = end_token, start_token
-	available = _available_session_dates(get_derivatives_root(), subjid)
+	available = _available_session_dates(derivatives, subjid)
 	return [date for date in available if start_token <= date <= end_token]
 
 

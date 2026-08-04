@@ -2,8 +2,9 @@
 styling/saving re-exported from hypnose-helpers.
 
 The styles, `save_figure` and the small figure utilities moved to
-`hypnose_helpers.viz` during restructure_2 Phase 2a. What stays here is the part that
-knows THIS dataset's layout: resolving `sub-{id:03d}_id-*` / `ses-*_date-*` directories.
+`hypnose_helpers.viz` during restructure_2 Phase 2a; directory discovery moved to
+`hypnose_helpers.io.layout` in Phase 2b. What stays here is the part neither of them
+can know: which *scope* of figure belongs at which level of the tree.
 """
 from __future__ import annotations
 
@@ -36,21 +37,6 @@ from hypnose_helpers.viz.save import save_figure as _save_figure
 # when no style has been applied.
 
 
-def _resolve_subject_dir(deriv_root: Path, subjid: int) -> Path:
-    candidates = list(deriv_root.glob(f"sub-{subjid:03d}_id-*"))
-    if not candidates:
-        raise FileNotFoundError(f"No subject directory found for sub-{subjid:03d} under {deriv_root}")
-    return candidates[0]
-
-
-def _resolve_session_dir(subj_dir: Path, date) -> Path:
-    date_str = str(date)
-    candidates = list(subj_dir.glob(f"ses-*_date-{date_str}"))
-    if not candidates:
-        raise FileNotFoundError(f"No session directory for date {date_str} under {subj_dir}")
-    return candidates[0]
-
-
 # Optional hook letting a *consuming* repo with a different derivatives layout
 # reuse save_figure without wrapping it. Registered once at import; save_figure
 # then resolves through it instead of resolve_figure_dir(). None = use the
@@ -69,9 +55,8 @@ def resolve_figure_dir(subjids, dates=None) -> Path:
     # Imported here rather than at module scope: paths.py requires Python 3.10+,
     # and consumers that supply their own figure directory (see
     # set_figure_dir_resolver) never reach this function.
-    from hypnose_behavior.io.paths import get_derivatives_root
+    from hypnose_behavior.io.layout import derivatives
 
-    deriv_root = Path(get_derivatives_root())
     subj_list = _coerce_list(subjids)
     date_list = _coerce_list(dates)
 
@@ -79,16 +64,15 @@ def resolve_figure_dir(subjids, dates=None) -> Path:
         raise ValueError("At least one subjid is required to resolve figure path")
 
     if len(subj_list) > 1:
-        fig_dir = deriv_root / "figures"
+        fig_dir = derivatives.root / "figures"
         fig_dir.mkdir(parents=True, exist_ok=True)
         return fig_dir
 
     # Single subject
-    subj_dir = _resolve_subject_dir(deriv_root, int(subj_list[0]))
+    subj_dir = derivatives.subject_dir(subj_list[0])
 
-    if len(date_list) <= 1 and len(date_list) == 1:
-        ses_dir = _resolve_session_dir(subj_dir, date_list[0])
-        fig_dir = ses_dir / "figures"
+    if len(date_list) == 1:
+        fig_dir = derivatives.find_session(subj_list[0], date=date_list[0]).path / "figures"
     else:
         fig_dir = subj_dir / "figures"
 

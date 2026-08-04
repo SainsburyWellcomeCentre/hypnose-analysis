@@ -22,6 +22,7 @@ from matplotlib import cm
 from typing import Iterable, Optional, Union
 from hypnose_behavior.utils.helpers import _filter_session_dirs
 from hypnose_behavior.io.paths import get_derivatives_root
+from hypnose_behavior.io.layout import derivatives, normalize_subjid
 from hypnose_behavior.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_metrics,
     compute_sing_rew_rates,
@@ -34,29 +35,12 @@ def load_session_results(subjid, date):
     Load saved analysis results for a given subject and date.
     Returns a dict with trial_data, non-initiated tables, and metadata.
     """
-    derivatives_dir = get_derivatives_root()
-    sub_str = f"sub-{str(subjid).zfill(3)}"
-    date_str = str(date)
-
-    # Find subject directory (may have multiple _id-*)
-    subject_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
-    if not subject_dirs:
-        raise FileNotFoundError(f"No subject directory found for {sub_str}")
-    if len(subject_dirs) > 1:
-        print(f"Warning: Multiple subject directories found for {sub_str}, using first one")
-    subject_dir = subject_dirs[0]
-
-    # Find session directory for the date
-    session_dirs = list(subject_dir.glob(f"ses-*_date-{date_str}"))
-    if not session_dirs:
-        # Show available sessions for better error reporting
-        all_sessions = list(subject_dir.glob("ses-*"))
-        session_names = [d.name for d in all_sessions]
-        raise FileNotFoundError(f"No session found for date {date_str} in {subject_dir}.\n"
-                                f"Available sessions: {session_names}")
-    if len(session_dirs) > 1:
-        print(f"Warning: Multiple sessions found for date {date_str}, using first one")
-    session_dir = session_dirs[0]
+    # One resolver for the whole family (restructure_2 Phase 2b); it reports the
+    # available sessions on a miss and raises rather than warning on an ambiguous
+    # subject or date.
+    session = derivatives.find_session(subjid, date=date)
+    subject_dir = session.subject_dir
+    session_dir = session.path
 
     results_dir = session_dir / "saved_analysis_results"
     if not results_dir.exists():
@@ -177,19 +161,18 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         return derivatives_dir / sub_comp / ses_comp / "saved_analysis_results"
 
     def _session_dir_from_ids() -> Path | None:
+        # One link in a fallback chain, so every failure is None rather than an
+        # exception -- including the ambiguous-tree errors the shared resolver
+        # raises, which the next candidate may well sidestep.
         sub_norm = _normalize_subjid(subjid)
         date_norm = _normalize_date(date)
         if not sub_norm or not date_norm:
             return None
-        subject_dirs = sorted(derivatives_dir.glob(f"{sub_norm}_id-*"))
-        if not subject_dirs:
+        try:
+            found = derivatives.find_sessions(sub_norm, date=date_norm, missing_ok=True)
+        except (ValueError, OSError):
             return None
-        # prefer deterministic ordering
-        for subj_dir in subject_dirs:
-            session_dirs = sorted(subj_dir.glob(f"ses-*_date-{date_norm}"))
-            if session_dirs:
-                return session_dirs[0] / "saved_analysis_results"
-        return None
+        return found[0].path / "saved_analysis_results" if found else None
 
     def _determine_output_dir() -> Path:
         if results_dir_hint:
@@ -466,11 +449,7 @@ def merged_results_output_dir(subjids, dates, protocol):
     subjids = sorted(set(str(s) for s in subjids))
     dates = sorted(set(str(d) for d in dates))
     if len(subjids) == 1:
-        sub_str = f"sub-{str(subjids[0]).zfill(3)}"
-        subj_dirs = list(derivatives_dir.glob(f"{sub_str}_id-*"))
-        if not subj_dirs:
-            raise FileNotFoundError(f"No subject directory found for {sub_str}")
-        subj_dir = subj_dirs[0]
+        subj_dir = derivatives.subject_dir(subjids[0])
         merged_dir = subj_dir / "merged_results"
     else:
         merged_dir = derivatives_dir / "merged"
@@ -512,11 +491,10 @@ def batch_run_all_metrics_with_merge(
     # Track session processing stats per subject
     session_stats = {}  # Format: {subjid: {'analyzed': [dates], 'skipped': [(date, reason)], 'failed': [(date, error)]}}
 
-    # Find all subject directories
-    subj_dirs = list(derivatives_dir.glob("sub-*_id-*")) if subjids is None else [
-        d for subjid in subjids
-        for d in derivatives_dir.glob(f"sub-{str(subjid).zfill(3)}_id-*")
-    ]
+    # Find all subject directories. Sorted by subject number, where the previous glob
+    # returned them in filesystem order -- so a cohort now merges in the same order on
+    # every machine.
+    subj_dirs = [d for _, d in derivatives.iter_subjects(subjids)]
     if verbose:
         print(f"Found {len(subj_dirs)} subject directories.")
 

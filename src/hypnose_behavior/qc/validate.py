@@ -9,7 +9,7 @@ Only lists directories (cheap) -- it does not read data files.
 """
 from __future__ import annotations
 
-from hypnose_behavior.io.paths import get_rawdata_root
+from hypnose_behavior.io.layout import normalize_subjid, rawdata
 
 
 def _normalize_dates(dates):
@@ -39,21 +39,20 @@ def validate_subject(subjid, dates=None, *, verbose: bool = True) -> dict:
     found_dates, missing_dates, ok. ``ok`` is False only when there is nothing
     to run (subject missing, or none of the requested dates exist).
     """
-    subj_str = f"sub-{str(subjid).zfill(3)}"
+    subj_str = normalize_subjid(subjid)
     result = {
         "subjid": str(subjid), "subject_dir": None, "requested_dates": None,
         "available_dates": [], "found_dates": [], "missing_dates": [], "ok": False,
     }
 
-    subj_dirs = sorted(get_rawdata_root().glob(f"{subj_str}_id-*"))
-    if not subj_dirs:
+    subj_dir = rawdata.subject_dir(subjid, missing_ok=True)
+    if subj_dir is None:
         if verbose:
             print(f"[validate_subject] No rawdata directory for {subj_str}; nothing to run.")
         return result
-    subj_dir = subj_dirs[0]
     result["subject_dir"] = str(subj_dir)
 
-    available = sorted({d.name.split("_date-")[-1] for d in subj_dir.glob("ses-*_date-*")})
+    available = sorted({s.date for s in rawdata.find_sessions(subjid)})
     result["available_dates"] = available
 
     requested = _normalize_dates(dates)
