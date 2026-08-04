@@ -60,6 +60,27 @@ terminal entry points in `scripts/`; no back-compat shims, all imports canonical
 - Run everything with `~/miniconda3/envs/hypnose-analysis-test/bin/python`. Fixtures are only
   valid in the env recorded in `fixtures/env.json` — as of 2026-07-31 that is
   `py3.12.13 / pandas 3.0.1 / numpy 1.26.4`, and the test env still matches.
+
+- **Invoke the QC tools by absolute path, with no `cd`** (learned the hard way, 2026-08-04):
+
+  ```bash
+  PY=~/miniconda3/envs/hypnose-analysis-test/bin/python
+  QC=~/repos/harris_lab/hypnose/hypnose-behavior-analysis/src/hypnose_behavior/qc
+
+  $PY -u $QC/regression.py            # optional: subjid:date ... to limit scope
+  $PY -u $QC/check_imports.py
+  $PY -u $QC/verify_scripts.py
+  ```
+
+  Two reasons, both of which have already cost a session:
+
+  - The `cd <repo> && $PY src/...` form gets stopped at the agent permission layer, and
+    the tool reports it as a rejected call — indistinguishable from a hung or slow run.
+    None of the three tools needs a working directory: `regression.py` derives
+    `HERE`/`REPO` from `__file__` and puts `src/` on `sys.path` itself.
+  - `-u` matters when the output is redirected (backgrounded runs, tee to a log). Without
+    it Python block-buffers stdout, so a 5-minute run shows nothing at all until it exits
+    and there is no way to tell progress from a stall.
 - **Byte-identical philosophy.** Pure refactors and moves must keep regression GREEN.
   Intended output changes (schema, vectorisation numerics) get fixtures **regenerated
   deliberately in the same commit**, with the column/metric diff confirming only the
@@ -166,6 +187,9 @@ Hard constraints:
    install, upgrade or remove packages in any conda env — fixtures are only valid in
    the env recorded in `qc/fixtures/env.json`. If something is missing, tell me.
 4. All work is in the repo: edit files, run the QC tools, commit.
+5. Invoke the QC tools by ABSOLUTE path with `-u` and no `cd` — see "Operating rules"
+   in section 1. The `cd <repo> && python src/...` form is blocked at the permission
+   layer and surfaces as a rejected call that looks like a hang.
 
 Workflow:
 - Tell me what you are about to do and what regression result you expect, before doing it.
