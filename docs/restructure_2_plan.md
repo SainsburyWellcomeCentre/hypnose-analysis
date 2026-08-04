@@ -119,7 +119,7 @@ Update this table at the end of each phase, in the same commit as the work.
 | 0.3 collapse loaders/readers | **done** 2026-08-03 | `5d9c14a` | `readers.py` is now the single definition site for the 8 primitives (tolerant bodies); `loaders.py` re-exports them. Kept as two files: deleting `readers.py` would make `loaders → detect_settings → loaders` a cycle. Dead `create_unique_series` / `find_session_roots` deleted. regression GREEN |
 | 1 rename | **done** 2026-08-03 | `9aad717` | `hypnose` → `hypnose_behavior`, dist/repo → `hypnose-behavior-analysis`. 210 anchored replacements + `git mv`. No reinstall needed (editable install is a static-path `.pth` onto `src/`). `HYPNOSE_*` env vars, ceph data paths, Jupyter kernel names and this doc deliberately untouched. GitHub repo renamed, remote URL updated, local folder renamed to `hypnose-behavior-analysis`. That move invalidated the editable-install `.pth` in 6 conda envs; only `hypnose-analysis-test` was repointed — **`hypnose`, `hypnose-analysis`, `hypnose-somnotate`, `sleap`, `sleap-2` still need `pip install -e .`** |
 | 2a helpers extraction | **done** 2026-08-03 | `9793cbc`..`b840ba1` (+ helpers `1333955`..`d11d0dc`, somnotate `9e3c155`..`7de20a5`) | `hypnose-helpers` created (local only, no remote yet). Moved: `io/paths` → `DataLocations(config_dir=…)` (could NOT move whole — `__file__`-derived repo root), `io/save` → `viz/styles` + `viz/save` (`save_figure` takes `fig_dir`), `io/save_results` serialisation → `io/serialize`, somnotate `io/selectors` + `ensure_style`. rcParams no longer mutated at import. Behaviour repo −1226 lines. Regression GREEN at each step |
-| 2b canonical session discovery | not started | | |
+| 2b canonical session discovery | **done** 2026-08-04 | `312854d`..`2fbd5f5` (+ helpers `8dadcf8`, somnotate `80afbda`) | `hypnose_helpers.io.layout` owns the walking; each repo binds its own roots. All 17 session lookups and ~30 subject globs repointed. **`session_index` ships but is deliberately unused by the plotters** — see "State at the end of 2b". regression / verify_scripts / check_imports all green |
 | 2c figure provenance | not started | | |
 | 3 re-baseline QC | not started | | folded into Step 0 if done first |
 | 4a strip metrics from visualization | not started | | |
@@ -451,6 +451,50 @@ resolver costs about an hour; retrofitting it to 11 call sites later costs days.
 **Done:** one session-discovery function in helpers; all 11 date-lookup sites and all subject-
 discovery sites repointed; `ses`, `date`, and both range forms accepted; duplicate `ses`
 raises with both paths named; `session_index` available and gap-free; regression GREEN.
+
+### State at the end of 2b *(2026-08-04)* — read this before starting 2c or 5
+
+1. **The API is bound, not free-floating.** `hypnose_helpers.io.layout.SessionLayout` takes
+   the root as a **callable**, and each repo binds its own:
+   `hypnose_behavior.io.layout` exposes `rawdata` and `derivatives`; there is deliberately
+   **no bare `find_sessions()`** defaulting to one tree, because rawdata holds every
+   recorded session and derivatives only the analysed ones. Passing a resolved `Path`
+   would freeze the root and break `qc/_common`'s per-session redirect — the same
+   `__file__` trap as 2a, one layer along.
+
+2. **`session_index` exists and is used by nothing.** It is on every `SessionRef`, gap-free
+   and correct. The 8 plotters were *not* retrofitted onto it, by decision: they count
+   `enumerate(ses_dirs, 1)` **within the filtered selection**, so every plot's x-axis
+   starts at 1 no matter which sessions were requested. `session_index` is the animal's
+   full-history rank, so a filtered call would plot at x=12,27,33 with a mostly empty
+   axis. The plan's premise — that gaps in `ses` break the x-axis — did not apply here:
+   no plotter ever used `ses` as x. **Do not "finish the retrofit" in Phase 5.** Use
+   `session_index` only where an ordinal must mean the same thing across different calls.
+
+3. **The two central helpers absorbed most of the work.** `utils/helpers._iter_subject_dirs`
+   (21 call sites) and `_filter_session_dirs` (36) became thin wrappers, so 57 sites needed
+   no edit; only the ~22 that bypassed them were touched. `_filter_sessions` is the new
+   `SessionRef`-returning form — prefer it in new code.
+
+4. **Ambiguity now raises.** Duplicate `ses`, duplicate date, or two `sub-NNN_id-*` dirs
+   raise `DuplicateSessionError` naming both paths. Consequence: a batch run over *all*
+   subjects hard-fails on `sub-036` (duplicate `ses-060`) instead of skipping it. Tolerant
+   callers pass `missing_ok=True` or catch.
+
+5. **`qc/_common.py` and `qc/verify_scripts.py` keep their own `**/ses-*_date-*` glob**,
+   deliberately: a harness must not share an implementation with the code it validates.
+   They are the only remaining hand-rolled session lookups, and that is correct.
+
+6. **Of the 66 `sub-NNN` sites, ~26 were directory tokens** (now `normalize_subjid`); the
+   other ~40 are display labels (`Subject 040`, `Sub 040`) and QC fixture filenames, left
+   alone. The count was never 66 lookups.
+
+**Testing note:** regression cannot see any of this — it fingerprints `trial_data` and the
+metrics dict, not session ordering, selectors, or `session_index`. The real guards are
+`hypnose-helpers/tests/test_layout.py` (20 tests, mount-free, runs without pytest) and a
+throwaway old-vs-new parity harness (93 comparisons) that caught two silent divergences
+before they landed: `dates=[]` flipping from "no sessions" to "all sessions", and
+`iter_subjects` widening `sub-*_id-*` to `sub-*`.
 
 ### 2c. Embedded figure provenance  *(~½–1 day, new capability)*
 
