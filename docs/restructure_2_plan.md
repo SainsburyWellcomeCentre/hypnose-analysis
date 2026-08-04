@@ -316,7 +316,48 @@ hypnose-somnotate. The move is mechanical but touches all of them.
 **Risk:** low–med (pure moves + import rewiring). **Done:** regression GREEN in this repo;
 hypnose-somnotate green against helpers; helpers has no family dependencies.
 
+### State at the end of 2a *(2026-08-03)* — read this before starting 2b
+
+Five things differ from what this document assumed when it was written. All are done and
+committed; they change the ground 2b starts from.
+
+1. **`io/paths.py` did NOT "move whole".** Everything in it derived from `get_repo_root()`
+   = `Path(__file__).parents[3]`, so relocating the file silently repointed the config at
+   `hypnose-helpers/configs` (absent) and fell through to a wrong rawdata root — no error.
+   The mechanism moved as `DataLocations(config_dir=…, data_root=…, env_prefix=…)`; each
+   repo instantiates one and re-exports the bound methods. **Any later "move whole" in this
+   plan deserves the same suspicion: check for `__file__`-derived state first.**
+2. **hypnose-somnotate no longer imports the behaviour repo at all.** It owns
+   `configs/data_locations.yml` (EEG profiles, `env_prefix: HYPNOSE_EEG`) and installs with
+   hypnose-helpers alone. The plan's "4 sites in hypnose-somnotate" was correct at the time;
+   it is now genuinely 0.
+3. **`rcParams` are no longer mutated at import**, and `set_figure_dir_resolver` is gone —
+   both design corrections from 2a are complete. Two notebooks (`sing_rew_visualization`,
+   `trial_classification`) still rely on the old implicit styling and need a `use_style()`
+   call; deliberately deferred.
+4. **hypnose-helpers exists** at `hypnose/hypnose-helpers` with `io/{paths,selectors,
+   serialize}`, `viz/{styles,save}`, `cli/set_data_location`. It imports nothing from the
+   family — verify that still holds after every 2b move.
+
+**Environment:** hypnose-helpers must be `pip install -e`'d into any env that runs either
+repo. As of 2026-08-03 only `hypnose-analysis-test` has it; `hypnose`, `hypnose-somnotate`,
+`sleap` and `sleap-2` might still need it. To be done by user. 
+
 ### 2b. Canonical session discovery  *(~1 day — the biggest single de-duplication)*
+
+**Re-measured 2026-08-03** (the counts below supersede the pre-rename figures further down —
+those line numbers are stale after the rename and the 2a extractions):
+
+| | plan said | actually, now |
+|---|---|---|
+| session-directory lookups | 11 | **17** (16 in the behaviour repo, 1 in somnotate) |
+| `sub-NNN` zero-pad formatting | "4+ implementations" | **66 sites** |
+| files touched by a full repoint | — | **15** |
+
+The `sub-NNN` figure is the surprising one: `f"sub-{str(subjid).zfill(3)}"` appears 66 times,
+mostly in `visualization/`. Most are *label* formatting rather than directory discovery, so
+they do not all become `find_sessions()` calls — but they do all want the same
+`normalize_subjid()` helper, and deciding which is which is part of the phase.
 
 **The layout contract is identical everywhere** — behaviour and EEG both use
 `sub-0XX_id-XXX/ses-0XX_date-YYYYMMDD/<modality>/`. Yet "find the session directory for this
