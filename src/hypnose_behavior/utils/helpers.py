@@ -4,7 +4,7 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Iterable, Optional, Union
 
-from hypnose_behavior.io.paths import get_derivatives_root
+from hypnose_behavior.io.layout import filter_sessions, layout_for, list_sessions
 
 CACHE = OrderedDict()
 CACHE_MAX_ITEMS = 40
@@ -76,52 +76,35 @@ def clear_cache():
 
 
 def _iter_subject_dirs(derivatives_dir: Optional[Path], subjids: Optional[Iterable[int]]):
-    """Yield (subjid, subject_dir) tuples from derivatives."""
-    base_dir = derivatives_dir or get_derivatives_root()
-    if subjids is None:
-        for subj_dir in sorted(base_dir.glob("sub-*_id-*")):
-            try:
-                subjid = int(subj_dir.name.split("_")[0].replace("sub-", ""))
-            except Exception:
-                subjid = None
-            yield subjid, subj_dir
-    else:
-        for subjid in subjids:
-            sub_str = f"sub-{int(subjid):03d}"
-            for subj_dir in sorted(base_dir.glob(f"{sub_str}_id-*")):
-                yield int(subjid), subj_dir
+    """Yield (subjid, subject_dir) tuples from derivatives.
+
+    Thin wrapper over the shared layout walker (restructure_2 Phase 2b) so this repo's
+    ~21 call sites keep working unchanged. Named subjects that do not exist are still
+    skipped rather than raised on; two directories for one subject now raise instead of
+    yielding both.
+    """
+    yield from layout_for(derivatives_dir).iter_subjects(subjids)
 
 
-def _filter_session_dirs(subj_dir: Path, dates: Optional[Union[Iterable[Union[int, str]], tuple]]):
-    """Filter session directories by date list or (start, end) range."""
-    ses_dirs = sorted(subj_dir.glob("ses-*_date-*"))
-    if dates is None:
-        return ses_dirs
+def _filter_sessions(subj_dir: Path,
+                     dates: Optional[Union[Iterable[Union[int, str]], tuple]]) -> list:
+    """`SessionRef`s for a subject directory, filtered by date list or (start, end) range.
 
-    def norm_date(d):
-        s = str(d)
-        return int(s) if s.isdigit() else None
+    A 2-tuple is an inclusive range (either bound may be None); any other iterable is a
+    membership test; None means every session. That is the convention the call sites in
+    `visualization/` already use.
 
+    Prefer this over `_filter_session_dirs` in new code: a `SessionRef` carries `ses`,
+    `date` and `session_index` alongside the path, which saves the caller re-parsing the
+    directory name -- the habit that produced 17 copies of this lookup.
+    """
+    sessions = list_sessions(subj_dir)
     if isinstance(dates, tuple) and len(dates) == 2:
-        start = norm_date(dates[0])
-        end = norm_date(dates[1])
-        out = []
-        for d in ses_dirs:
-            try:
-                ds = int(d.name.split("_date-")[-1])
-                if (start is None or ds >= start) and (end is None or ds <= end):
-                    out.append(d)
-            except Exception:
-                pass
-        return out
+        return filter_sessions(sessions, date_range=dates)
+    return filter_sessions(sessions, date=dates)
 
-    wanted = {norm_date(d) for d in dates}
-    out = []
-    for d in ses_dirs:
-        try:
-            ds = int(d.name.split("_date-")[-1])
-            if ds in wanted:
-                out.append(d)
-        except Exception:
-            pass
-    return out
+
+def _filter_session_dirs(subj_dir: Path,
+                         dates: Optional[Union[Iterable[Union[int, str]], tuple]]):
+    """Filter session directories by date list or (start, end) range."""
+    return [s.path for s in _filter_sessions(subj_dir, dates)]
