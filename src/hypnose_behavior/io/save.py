@@ -21,6 +21,8 @@ from hypnose_helpers.viz.save import (  # noqa: F401
     set_size, strip_legends, _coerce_list, _unique_sorted, _format_span,
 )
 from hypnose_helpers.viz.save import save_figure as _save_figure
+from hypnose_helpers.viz.metadata import read_figure_metadata  # noqa: F401  (re-exported)
+from hypnose_helpers.provenance import provenance as _provenance
 
 
 # NOTE (restructure_2 Phase 2a): this module no longer applies a style at import.
@@ -81,17 +83,24 @@ def resolve_figure_dir(subjids, dates=None) -> Path:
 
 
 def save_figure(fig, save_name: str, *, subjids, dates=None, subdir=None,
-                fig_dir=None, **kwargs):
+                fig_dir=None, provenance=None, **kwargs):
     """Save a figure into the behavioural derivatives tree.
 
     Resolves the destination, then delegates to `hypnose_helpers.viz.save.save_figure`.
     Directory resolution, most specific first: an explicit `fig_dir` wins; then a resolver
     registered by a consuming repo; otherwise this repo's subject/session layout.
+
+    Provenance is captured *here*, and this module is added to the skip list, because
+    this function is a wrapper: helpers' own frame walk would stop at it, and capturing
+    without the skip would stop at it too. Excluding this module is what makes the
+    record name the plotting function that actually called us (restructure_2 Phase 2c).
     """
     if fig_dir is None:
         if _FIGURE_DIR_RESOLVER is not None:
             fig_dir = _FIGURE_DIR_RESOLVER(subjids, dates)
         else:
             fig_dir = resolve_figure_dir(subjids, dates)
+    if provenance is None:
+        provenance = _provenance(skip_modules=(__name__,))
     return _save_figure(fig, save_name, fig_dir=fig_dir, subjids=subjids, dates=dates,
-                        subdir=subdir, **kwargs)
+                        subdir=subdir, provenance=provenance, **kwargs)

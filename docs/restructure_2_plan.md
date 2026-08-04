@@ -120,7 +120,7 @@ Update this table at the end of each phase, in the same commit as the work.
 | 1 rename | **done** 2026-08-03 | `9aad717` | `hypnose` → `hypnose_behavior`, dist/repo → `hypnose-behavior-analysis`. 210 anchored replacements + `git mv`. No reinstall needed (editable install is a static-path `.pth` onto `src/`). `HYPNOSE_*` env vars, ceph data paths, Jupyter kernel names and this doc deliberately untouched. GitHub repo renamed, remote URL updated, local folder renamed to `hypnose-behavior-analysis`. That move invalidated the editable-install `.pth` in 6 conda envs; only `hypnose-analysis-test` was repointed — **`hypnose`, `hypnose-analysis`, `hypnose-somnotate`, `sleap`, `sleap-2` still need `pip install -e .`** |
 | 2a helpers extraction | **done** 2026-08-03 | `9793cbc`..`b840ba1` (+ helpers `1333955`..`d11d0dc`, somnotate `9e3c155`..`7de20a5`) | `hypnose-helpers` created (local only, no remote yet). Moved: `io/paths` → `DataLocations(config_dir=…)` (could NOT move whole — `__file__`-derived repo root), `io/save` → `viz/styles` + `viz/save` (`save_figure` takes `fig_dir`), `io/save_results` serialisation → `io/serialize`, somnotate `io/selectors` + `ensure_style`. rcParams no longer mutated at import. Behaviour repo −1226 lines. Regression GREEN at each step |
 | 2b canonical session discovery | **done** 2026-08-04 | `312854d`..`2fbd5f5` (+ helpers `8dadcf8`, somnotate `80afbda`) | `hypnose_helpers.io.layout` owns the walking; each repo binds its own roots. All 17 session lookups and ~30 subject globs repointed. **`session_index` ships but is deliberately unused by the plotters** — see "State at the end of 2b". regression / verify_scripts / check_imports all green |
-| 2c figure provenance | not started | | |
+| 2c figure provenance | **done** 2026-08-04 | `2db9e1d` (+ helpers `059c652`, somnotate `892e56c`) | `hypnose_helpers.provenance` + `viz/metadata`. Every `save_figure` PDF carries commit/version/caller/params; `read_figure_metadata` reads it back **without pypdf**. Phase 7a can call `provenance()` directly. regression / verify_scripts / check_imports all green |
 | 3 re-baseline QC | not started | | folded into Step 0 if done first |
 | 4a strip metrics from visualization | not started | | |
 | 4b modularise metric_analysis | not started | | |
@@ -549,6 +549,43 @@ than two implementations that drift.
 
 **Done:** every `save_figure` PDF carries recoverable provenance; `read_figure_metadata`
 round-trips it; the same helper feeds the manifest.
+
+### State at the end of 2c *(2026-08-04)* — read this before Phase 5 or 7a
+
+1. **A thin `save_figure` wrapper must skip its own module, or it names itself.** Both
+   consumer repos wrap helpers' `save_figure`; the frame walk stops at the *first*
+   non-helpers frame, which is the wrapper. Capturing inside the wrapper does not fix
+   this — `capture_call()` still returns the wrapper's own frame. The fix is
+   `provenance(skip_modules=(__name__,))`, which both wrappers now pass. **Phase 5's
+   plotting primitives will reintroduce this**: once `plot_accuracy` calls `line(ax, …)`
+   which calls `save_figure`, the primitive's module needs skipping too, or pass
+   `provenance=` explicitly. There is a regression test for the wrapper case.
+
+2. **The record is ASCII-only, deliberately.** matplotlib writes a PDF string containing
+   any non-ASCII character as UTF-16BE with a BOM. The truncation markers were `…`,
+   which silently switched the encoding and broke the reader for exactly the records
+   large enough to need truncating. Markers are now `...`, `json.dumps` uses
+   `ensure_ascii=True`, and the reader honours a BOM anyway.
+
+3. **Reading needs no dependency.** The plan expected `pypdf` and worried the metadata
+   would be "write-only in practice". matplotlib writes the info dictionary
+   uncompressed, so a ~15-line stdlib parser recovers it; `pypdf` is used when present
+   but is not required. The `pdf` extra remains for PDFs written by other tools.
+
+4. **`package_version` needs `packages_distributions()`.** The import package and the
+   distribution differ here (`hypnose_behavior` ← `hypnose-behavior-analysis`), so
+   guessing by swapping `_` for `-` returns None. Worth remembering in Phase 7a, which
+   wants the same version string in `manifest.json`.
+
+5. **Cost is ~40 ms per saved figure**, almost all of it the two `git` calls. Not cached:
+   a stale commit hash in a provenance record is worse than the milliseconds.
+
+6. **`read_figure_metadata` returns `{}` for a figure with no provenance**, so
+   `if not read_figure_metadata(p)` is meaningful. matplotlib stamps its own `Creator` on
+   every PDF, and returning that alone would have made the emptiness test useless.
+
+**Phase 7a is now mostly done in advance:** call
+`hypnose_helpers.provenance.provenance()` and put `commit`/`version` in the manifest.
 
 ---
 
