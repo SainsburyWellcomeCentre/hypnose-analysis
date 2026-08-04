@@ -552,6 +552,13 @@ round-trips it; the same helper feeds the manifest.
 
 ### State at the end of 2c *(2026-08-04)* — read this before Phase 5 or 7a
 
+0. **`function` is only ever "the nearest frame we did not skip".** In real plotting code
+   that is frequently a *local closure* — `movement_analysis_utils` has four nested
+   `_save_fig` helpers, and a figure saved through one reports `function: _save_fig`
+   rather than the analysis that made it. Found by reading an actual saved figure, not
+   by testing. The record therefore also carries **`chain`**, the enclosing function
+   names, which is what makes the real caller recoverable. Read `chain` before `function`.
+
 1. **A thin `save_figure` wrapper must skip its own module, or it names itself.** Both
    consumer repos wrap helpers' `save_figure`; the frame walk stops at the *first*
    non-helpers frame, which is the wrapper. Capturing inside the wrapper does not fix
