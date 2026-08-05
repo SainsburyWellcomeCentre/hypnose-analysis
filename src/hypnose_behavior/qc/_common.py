@@ -151,8 +151,14 @@ def env_fingerprint() -> dict:
     """Versions that the md5s depend on; recorded with the fixtures."""
     import sys
     import numpy as np
+    try:
+        import pyarrow
+        pyarrow_version = pyarrow.__version__
+    except ImportError:
+        pyarrow_version = None
     return {
         "python": sys.version.split()[0],
         "pandas": pd.__version__,
         "numpy": np.__version__,
+        "pyarrow": pyarrow_version,
     }
