@@ -476,6 +476,187 @@ Carries metric math:
 **Count for this file:** ~25 helpers stay (mostly to the shared prep/primitives modules),
 **7 carry metric math** — 6 `NEW`, 1 `VARIANT`, 0 exact `DEDUP`.
 
+---
+
+## `sing_rew.py` — 1,291 lines
+
+**The closest file to the 4a target already.** It imports `compute_sing_rew_metrics`,
+`compute_sing_rew_rates` and `_classify_trial` from `metric_analysis.sing_rew_metrics` and
+drives them per session (`_singrew_session_records:604`), so the eight headline plotters
+(`dprime`, `hit_fa_rate`, `criterion`, `hit_earned_reward`, `early_rejection_anticipatory`,
+`efficient_early_rejection`, `premature_omission_rates`, `correct_rejection_rate`) are
+6-12 line wrappers that fetch and plot. **This is the shape every other file should end up
+in.** Only three things carry metric math.
+
+| function | lines | verdict | what it computes | action |
+|---|---|---|---|---|
+| `_metric_value` | 580-601 | MIXED | two rates the canonical `compute_sing_rew_rates` does **not** return, derived here from `counts`: `ambiguous_rate = n_amb / n_tot` and `correct_rejection_rate = correct_rejection / n_nogo`. The docstring says "(not stored)" | `NEW →` add both to `compute_sing_rew_rates`. Both are one line from counts already in the dict — **the cheapest, lowest-risk win in the whole of 4a** |
+| `FR_ratio` | 167-304 | METRIC (no plotting; delegates) | false-response trials ÷ completed trials per session, filterable by `fr_label` via `_fr_mask` | `NEW → false_response_ratio(trials, fr_types)`. **Not** the canonical `fa_rate`, which is `false_alarm / n_nogo` off a different column (`fa_label`, not `fr_label`) |
+| `_response_time_ms` | 72-87 | MIXED | `first_supply_time − poke_odor_end` — its own docstring says "computed as in `pred_seq_utils`" | duplicate of `pred_seq_utils.response_time:1041` — **the same `NEW` metric written twice** (finding 11) |
+
+Everything else stays: `_normalize_fr_types`, `_port_label`, `_fr_mask`, `_trim_leading_empty`,
+`_subject_color_map`, `_pretty_metric`, `_isnan`, `_size_legend_handles` are `PREP`;
+`_session_fr_latencies:392` correctly reads the stored `fr_latency_ms` column;
+`_plot_fr_ratio_daily`, `_plot_latency_box_AB`, `_plot_sing_rew_metrics`,
+`_plot_outcome_composition` are `PLOT`; `_partition_total` and the `cumsum` in
+`_plot_cumulative_hit_cr:1186` are `DISPLAY-AGG`; `_trim_timeline_to_singrew:1121` is `PREP`.
+
+---
+
+## `valve_poke_plots.py` — 646 lines, 1 public function
+
+`plot_valve_and_poke_events` (27-646) is a single 620-line raw-data debugging plot: it reads
+harp registers straight off disk and draws valve/poke event traces on a time axis. **No metric
+math anywhere in the file** — the arithmetic the AST flagged is all timestamp offsetting,
+window slicing and tick formatting.
+
+**Finding 15 — it re-implements a loader, not a metric.** `_compute_real_time_offset`
+(219-258) opens with *"Compute the same real_time_offset used by `load_all_streams`"* and then
+does exactly that: parse the `YYYY-MM-DDTHH-MM-SS` folder timestamp, read the heartbeat
+register, take the difference. Also `_load_register_files` (189-217) and `_safe_concat`,
+`_apply_offset_and_localize`, `_slice` are loader plumbing.
+
+This is out of 4a's literal remit (it is not metric math) but squarely inside its *goal*:
+`visualization/` should fetch, not re-implement fetching. The offset computation belongs in
+`io/loaders.py` next to `load_all_streams`, and drift between the two would silently shift
+every timestamp on this plot relative to every other figure in the package. **Recommend
+folding it in during 4a** while the file is open; it is a small, self-contained move.
+
+| function | lines | verdict | action |
+|---|---|---|---|
+| `plot_valve_and_poke_events` | 27-646 | PLOT + FETCH | stays; extract the loader helpers |
+| `_compute_real_time_offset` | 219-258 | FETCH (duplicated) | `DEDUP →` `io/loaders.load_all_streams`'s offset logic (finding 15) |
+| `_load_register_files`, `_try_load`, `_safe_concat`, `_apply_offset_and_localize`, `_slice`, `parse_exp_ts_to_uk`, `_parse_hhmmss` | 73-307 | FETCH / PREP | → `visualization/io/` or `io/loaders.py` |
+| `restrict`, `extend_to_window_end`, `__call__`, `update_ticks` | 415-621 | PLOT | stays |
+
+---
+
+## `modelling/switchpoint/plots.py` — 638 lines
+
+One of the two files the plan's original count missed. **It needs nothing in 4a.**
+
+Every function consumes an already-fitted model artifact produced by
+`hypnose_behavior/modelling/switchpoint/` (`prep`, `fit`, `comparison`, `qlearning_fits`,
+`qlearning_bands`, `sweep`, `acf`, `null_means`) and draws it. The model math correctly lives
+in the `modelling/` package, and this file imports `logistic_p` and
+`qlearning_generative_band` from there rather than re-deriving them — **the separation 4a is
+trying to achieve elsewhere is already in place here.**
+
+The only arithmetic is drawing math: FWHM bracket bounds for the posterior
+(`plot_posterior:157`), a curve offset that keeps two overlapping lines legible
+(`plot_model_comparison:253`), jitter, and the AIC/BIC table rows read from `comparison`.
+
+| function | lines | verdict |
+|---|---|---|
+| `_rolling_mean` | 95-100 | PLOT (stat primitive) — centred moving average via `convolve`. **The third rolling-mean implementation** in `visualization/`, after `_rolling_median_iqr` (visualization_utils:3549) and `_rolling_pts` / `_plot_summary_rolling` (pred_seq_utils). → Phase 5 primitive |
+| `_mark_sessions`, `plot_strategy`, `plot_posterior`, `_qlearn_label`, `_overlay_qlearning`, `plot_model_comparison`, `plot_qlearning_generative`, `plot_multistart`, `plot_qlearning_sweep`, `_plot_acf_panel`, `plot_residual_autocorr`, `_box_with_points`, `_null_distribution`, `plot_permutation` | 103-638 | PLOT — all of them |
+
+---
+
+## `movement_analysis/sing_rew_movement.py` — 433 lines
+
+The other file the plan's original count missed. **No metric math**, but it is the worst
+single case of `PREP` duplication.
+
+It uses the canonical `_classify_trial` from `sing_rew_metrics` to sort trials into
+Hit/Miss/FA/CR and draws one trace figure per (sub)category. The derivations it does —
+where a trial's trace starts and ends — are `DERIVE`, not metrics.
+
+| function | lines | verdict | note |
+|---|---|---|---|
+| `_port_letter`, `_odor_letter`, `_trial_port_group`, `_naive_dt` | 76-141 | PREP | `_odor_letter` is a fourth copy of the odor-token normaliser (also at `visualization_utils:874`, `:5511`, `pred_seq_utils._canonical_odor:333`) |
+| `_last_poke_out` | 144-177 | DERIVE | final cue-port exit time — **third copy**, after `movement_analysis_utils:1059` and `:2829` |
+| `_segment_end` | 180-202 | DERIVE | per-category trace endpoint (reward poke for Hit/FA, next initiation for Miss/CR) |
+| `_smooth_tracking` | 205-212 | PREP | duplicate of `movement_analysis_utils:1035` / `:2928` |
+| `_extract_segment` | 215-225 | PREP | duplicate of `movement_analysis_utils:1048` |
+| `_resample_trace` | 228-241 | PREP | duplicate of `movement_analysis_utils:1083` (finding 10) |
+| `_plot_category` | 244-305 | PLOT + DISPLAY-AGG | `nanmean` average trace across resampled traces |
+| `plot_category_traces` | 308-433 | PLOT | |
+
+Every `PREP`/`DERIVE` row here has a twin in `movement_analysis_utils.py`. They all go to the
+shared `visualization/` prep module together — this file and `movement_analysis_utils.py`
+should be de-duplicated in one pass, not two.
+
+---
+
+## Consolidated checklist — every metric that must exist afterwards
+
+The hard constraint is **lose no metric**. These are the quantities computed in
+`visualization/` today that have **no canonical version at all**. If a name below has no
+home in `metric_analysis` when 4a finishes, a metric was dropped — and the QC regression
+will not tell you, because it never sees a plot.
+
+**Behavioural (from `visualization_utils.py`)**
+
+| # | metric | current site | definition |
+|---|---|---|---|
+| 1 | FA rate by odor | `hidden_rule_and_false_alarm:1003` | FA-filtered aborts at odor ÷ (odor occurrences in completed `odor_sequence` + those aborts) |
+| 2 | rolling reward fraction | `plot_decision_accuracy_rolling_average:1573` | rewarded ÷ window; warm-up back-filled with the session mean; optional HR-only numerator |
+| 3 | poke duration by position | `plot_sampling_times_analysis`, `plot_poke_duration_by_position` | mean ± SD of `poke_time_ms` per position, split completed/aborted |
+| 4 | poke duration by odor, aborted trials | `plot_sampling_times_analysis:1950` | canonical pools all aborted trials into one scalar; per-odor does not exist |
+| 5 | FA rate by position | `plot_false_alarm_rate_by_position:4655` | FA aborts at *p* ÷ trials reaching *p* ("reached" definition C) |
+| 6 | inter-trial interval | `_load_subject_trial_timeline:3459` | `sequence_start.shift(-1) − sequence_end`, within session only |
+| 7 | decision accuracy, HR vs non-HR | `plot_decision_accuracy:5209` | `decision_accuracy` restricted to hidden-rule / non-hidden-rule trials |
+| 8 | HR abort poke gap | `plot_hidden_rule_abort_poke_gap:7013` | last poke end − HR-position poke end, on aborts that hit the hidden rule |
+| 9 | rolling HR reward fraction | `plot_hr_reward_fraction_over_trials:7229` | rolling % of rewarded trials that are HR-rewarded |
+
+**Movement (from `movement_analysis_utils.compute_speed_analysis`)** — all seven, none canonical
+
+| # | metric | definition |
+|---|---|---|
+| 10 | binned speed epoch | gradient speed, binned mean/max, aligned to last poke-out |
+| 11 | baseline μ/σ and `vthresh` | `[-0.15,-0.05] s` pooled baseline; `max(αμ, μ+βσ)` |
+| 12 | movement-onset latency | first supra-threshold crossing, linearly interpolated between samples |
+| 13 | `movement_onset_from_valve_s` | onset re-referenced to the last valve start |
+| 14 | `path_length_px` | `Σ hypot(diff(x), diff(y))` |
+| 15 | `travel_time_s` | `t_end − t_zero` |
+| 16 | `tortuosity` | path length ÷ straight-line distance |
+
+**Trial timing (from `pred_seq_utils.py` / `sing_rew.py`)**
+
+| # | metric | current site | definition |
+|---|---|---|---|
+| 17 | trial poke span | `trial_poke_duration:746` | last `poke_odor_end` − first `poke_odor_start` |
+| 18 | reward-delivery latency | `pred_seq_utils:1041` **and** `sing_rew.py:87` | `first_supply_time − poke_odor_end` — **not** `response_time_ms` |
+| 19 | FA latency from poke-out | `fa_analysis:1221` | `fa_time − poke_odor_end` — **not** `fa_latency_ms` |
+| 20 | valve-to-reward latency | `valve_to_reward:1493` | `first_supply_time − valve_start` of the last position |
+| 21 | trial poke total | `cummulative_poke_time:1835` | `Σ poke_time_ms` across positions, per trial |
+
+**Single-reward (from `sing_rew.py`)**
+
+| # | metric | current site | definition |
+|---|---|---|---|
+| 22 | false-response ratio | `FR_ratio:281` | FR trials ÷ completed trials, filterable by `fr_label` |
+| 23 | `ambiguous_rate` | `_metric_value:591` | `n_amb / n_tot` — add to `compute_sing_rew_rates` |
+| 24 | `correct_rejection_rate` | `_metric_value:595` | `correct_rejection / n_nogo` — add to `compute_sing_rew_rates` |
+
+Plus the definitional questions that must be **settled, not silently picked**: which
+"reached at position *p*" (finding 2), and whether the 10× outlier rule is part of the
+metrics or part of the plots (finding 13).
+
+---
+
+## Tally
+
+| file | lines | functions carrying metric math | of which DEDUP / VARIANT / NEW |
+|---|---|---|---|
+| `visualization_utils.py` | 7,264 | 19 | 6 / 8 / 8 |
+| `movement_analysis_utils.py` | 4,460 | 3 (+2 threshold dedups) | 2 / 0 / 1 (but that one is 591 lines and 7 metrics) |
+| `pred_seq_utils.py` | 1,886 | 7 | 0 / 1 / 6 |
+| `sing_rew.py` | 1,291 | 3 | 0 / 0 / 3 |
+| `valve_poke_plots.py` | 646 | 0 (1 loader dedup) | — |
+| `modelling/switchpoint/plots.py` | 638 | 0 | — |
+| `movement_analysis/sing_rew_movement.py` | 433 | 0 | — |
+| **total** | **16,618** | **32 sites** | **24 metrics to add** |
+
+The plan estimated "~27 metric/accuracy/rate-ish functions". The measured figure is **32
+sites of metric math across 4 of the 7 files**, resolving to **24 metrics that do not exist
+in `metric_analysis` today** plus 8 exact duplicates and 9 granularity variants.
+
+Two of the three files that need no metric work are the two the plan's original count
+missed — `modelling/switchpoint/plots.py` is already exemplary, and
+`movement_analysis/sing_rew_movement.py` needs only de-duplication.
+
 <!-- AUDIT-APPEND-HERE -->
 
 ---
@@ -503,4 +684,12 @@ Carries metric math:
    moved metrics (`exclude_above_mean_multiple=10`), or is it a plotting-only display filter
    that should stay behind?
 
-*(further questions appended as the remaining files are audited)*
+5. **Which "reached at position *p*"** (finding 2) becomes canonical — the per-trial
+   `position_poke_times` walk (A, current `metrics_utils`), the session-wide `max(num_odors)`
+   (B), or the `presentations` membership test (C)? Every per-position rate depends on it,
+   and A and B disagree whenever a session mixes sequence lengths. This is the one decision
+   in 4a that can change existing metric values, so it needs regenerated fixtures if A moves.
+
+6. **`_compute_real_time_offset`** (`valve_poke_plots:219`) duplicates `load_all_streams`'s
+   offset logic. Fold it into `io/loaders.py` during 4a while the file is open, or leave it
+   for Phase 5?
