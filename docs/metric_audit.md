@@ -922,10 +922,26 @@ missed — `modelling/switchpoint/plots.py` is already exemplary, and
    is none. Clean source-only move.
 
 3. **`_kw_mwu_by_group`** → **`metric_analysis/stats/kw_mwu.py`**, one module per test family
-   rather than a single `stats.py` that accretes. Stays in this repo for now; it is generic
-   enough to graduate to `hypnose_helpers` by the 0.2 test, but that only earns its place once
-   a second repo (eeg, ephys) actually wants it — narrower is cheaper to move later than
-   broader is to unpick.
+   rather than a single `stats.py` that accretes.
+
+   **Chosen for consistency with an existing convention, not on architectural grounds.**
+   `modelling/switchpoint/` already holds `permutation.py`, `bootstrap.py` and `autocorr.py`
+   — generic statistics (permutation testing, bootstrap null, autocorrelation with
+   significance bounds) that take plain numpy arrays and import nothing from the modelling
+   package. So the repo's established pattern is **generic stats live next to their consumer,
+   one module per concern**, and `metric_analysis/stats/kw_mwu.py` follows it.
+
+   A top-level `hypnose_behavior/stats/` is defensible and more honest about the code being
+   modality-agnostic, but it breaks that precedent to hold one function. A literal top-level
+   `src/stats/` is the one option to avoid: a second distribution namespace, `pyproject.toml`
+   `packages.find` changes, and `stats` is a collision-prone top-level import name against a
+   family convention of `hypnose_*` packages.
+
+   **The real long-term home is `hypnose_helpers.stats`** — by the 0.2 test `_kw_mwu_by_group`
+   knows only its input's shape, not what the data is. So do `bootstrap_null`, `residual_acf`
+   and `acf_bounds`. When a second repo (eeg, ephys) wants any of them, **graduate the family
+   in one pass** rather than one function at a time; keeping `kw_mwu` in the same shape as its
+   three siblings is what makes that a single clean move.
 
 4. **The 10× outlier rule** (`pred_seq_utils:1052`, `:1249`) → **stays in `visualization/` as
    a display filter.** Establishes a general principle for the rest of 4a:
