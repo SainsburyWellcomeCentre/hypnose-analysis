@@ -462,14 +462,28 @@ raises with both paths named; `session_index` available and gap-free; regression
    would freeze the root and break `qc/_common`'s per-session redirect — the same
    `__file__` trap as 2a, one layer along.
 
-2. **`session_index` exists and is used by nothing.** It is on every `SessionRef`, gap-free
-   and correct. The 8 plotters were *not* retrofitted onto it, by decision: they count
-   `enumerate(ses_dirs, 1)` **within the filtered selection**, so every plot's x-axis
+2. **`session_index` is a selector, never a plot axis.** It is on every `SessionRef`,
+   gap-free and correct, and since 2026-08-04 it is also a **selector**:
+   `find_sessions(62, index_range=(1, 9))` — "this animal's first nine sessions",
+   comparable across cohorts recorded months apart, which `ses` cannot express (see
+   Phase 5). Use it for that.
+
+   The 8 plotters were *not* retrofitted onto it as an **x-axis**, by decision: they
+   count `enumerate(ses_dirs, 1)` **within the filtered selection**, so every plot's x
    starts at 1 no matter which sessions were requested. `session_index` is the animal's
    full-history rank, so a filtered call would plot at x=12,27,33 with a mostly empty
-   axis. The plan's premise — that gaps in `ses` break the x-axis — did not apply here:
-   no plotter ever used `ses` as x. **Do not "finish the retrofit" in Phase 5.** Use
-   `session_index` only where an ordinal must mean the same thing across different calls.
+   axis. The plan's original premise — that gaps in `ses` break the x-axis — did not
+   apply: no plotter ever used `ses` as x. **Do not "finish the retrofit" in Phase 5.**
+
+   *Selection and positioning are different jobs.* `index` answers "which sessions";
+   `enumerate` answers "where on the axis". Conflating them is what would make the plots
+   look wrong.
+
+   **A caveat on the gap statistics quoted in this document.** The "29% of current
+   subjects have gaps in `ses`" figure was measured 2026-08-03 and is already dated: the
+   gaps are mostly in retired subjids, and recent subjects are contiguous bar one. So
+   `ses` and `index` usually agree — which is precisely why the difference must stay
+   explicit rather than being papered over. Re-measure before relying on that number.
 
 3. **The two central helpers absorbed most of the work.** `utils/helpers._iter_subject_dirs`
    (21 call sites) and `_filter_session_dirs` (36) became thin wrappers, so 57 sites needed
@@ -690,9 +704,72 @@ visualization code and can be re-imported in different files.
 for every plot type it supports and becomes a god-function. Thin primitives plus one small
 function per metric give the same ergonomics without that.
 
+#### Thread the session selectors through the plotters *(decided 2026-08-04)*
+
+Public plotting functions currently accept **`subjids` and `dates` only**. Phase 2b built
+three interchangeable selectors in `hypnose_helpers.io.layout`; the plotters expose none of
+them. Widening that interface is a Phase 5 job, because `dates` reaches ~36
+`_filter_session_dirs` call sites and changing it earlier would touch files 4a/5 rewrite
+anyway.
+
+**Accept all three, and pass them straight through:**
+
+```python
+def plot_accuracy(subjids, *, dates=None, ses=None, index=None,
+                  date_range=None, ses_range=None, index_range=None, ...):
+    for subjid in subjids:
+        for session in derivatives.find_sessions(subjid, dates=…, ses=…, index=…):
+            ...
+```
+
+`find_sessions` already takes exactly these six keywords, so a plotter should forward them
+rather than reinterpret them. `utils/helpers._filter_sessions` is the `SessionRef`-returning
+form to build on; `_filter_session_dirs` (paths only) is the legacy shim.
+
+**Semantics — none is required, and they combine.** Verified against the implementation:
+
+| given | result |
+|---|---|
+| all of `dates` / `ses` / `index` are `None` | **every session for the subject** — unchanged from today's `dates=None` |
+| exactly one | filter on that key |
+| two or more | **intersection** — a session must satisfy *all* of them |
+| `[]` (empty list) rather than `None` | **matches nothing** |
+
+So they are *not* mutually exclusive alternatives, and a plotter must not treat them as
+"pick one". `find_sessions(66, ses_range=(1, 9), index_range=(3, 5))` legitimately means
+"of ses 1-9, the 3rd to 5th sessions chronologically". No validation should reject a
+combination.
+
+The `None` vs `[]` distinction is load-bearing rather than incidental: callers build a
+per-subject date list and pass it straight through, so a subject with no requested dates
+must yield no sessions rather than its whole history. There is a regression test for it.
+
+**Why all three rather than picking one:**
+
+| key | question it answers | when it is the right one |
+|---|---|---|
+| `date` | "what happened on 7 July" | a specific session you can name |
+| `ses` | "session 40 of this animal" | the number in the lab book; stable, quotable |
+| `index` | "its first nine sessions" | **comparing subjects across cohorts** |
+
+`ses` and `index` are *not* interchangeable, and the difference is silent. Measured on a
+three-subject tree: `ses="01-09"` returns **9, 3 and 0** sessions for a contiguous subject,
+one with gaps, and one whose numbering carried over from an earlier protocol — while
+`index_range=(1, 9)` returns **9 each**, spanning cohorts months apart. A subject numbered
+from `ses-038` yields *nothing* for `ses 1-9` and does not error.
+
+Most current subjects are contiguous (the gaps are mostly in retired subjids — see the note
+in "State at the end of 2b"), so `ses` usually behaves like `index`. That is exactly why the
+distinction has to be explicit: it works until the one animal where it does not.
+
+**Do not make `index` the plotting x-axis.** It is the animal's full-history rank, so a
+filtered call would plot at x=12,27,33. The x-axis stays `enumerate(…, 1)` over the selected
+sessions — see "State at the end of 2b" §2. `index` selects; it does not position.
+
 **Risk:** low–med (plot-only changes don't affect the regression fingerprint, which covers
 `trial_data` + metrics — visual output needs eyeballing). **Done:** no metric math in
-`visualization/`; primitives used by all plotters; no plot function over ~100 lines.
+`visualization/`; primitives used by all plotters; no plot function over ~100 lines; every
+public plotter accepts `dates`/`ses`/`index` and their range forms.
 
 ---
 
