@@ -128,6 +128,10 @@ per-granularity functions.
    for every metric it supports and becomes a god-function. A uniform signature plus
    `by_group` / `over_windows` gives the same reach with none of that.
 
+> **Not yet agreed.** The "yes" above is the auditor's recommendation, not a decision — it
+> changes the signature of every canonical metric and is a precondition for 4b's registry.
+> See "Decision needing sign-off" under Open questions before acting on it.
+
 ---
 
 ## Canonical catalog — what `metric_analysis` already provides
@@ -662,6 +666,28 @@ missed — `modelling/switchpoint/plots.py` is already exemplary, and
 ---
 
 ## Open questions for Joschua
+
+### Decision needing sign-off — the metric signature *(blast radius: everything)*
+
+**"Should metrics take a trial frame, with `by_group` / `over_windows` resolvers?" — argued
+"yes" in the section above, but that was the auditor's call, not a settled decision. It needs
+confirming before 4a moves any code**, because it is the one choice here that changes
+`metric_analysis`'s public shape rather than just adding to it:
+
+- It rewrites the signature of all 28 canonical metrics (`f(results)` → `f(trials)`, plus a
+  thin `f(results)` wrapper so `run_all_metrics` and the saved JSON are untouched).
+- It decides whether ~9 of the `VARIANT` rows below collapse into resolver calls or become
+  ~9 new named metrics — i.e. whether `metric_analysis` ends 4a with ~32 or ~41 functions.
+- It is a **precondition for 4b's registry.** The plan asks 4b to add "a small registry
+  (list, or a `@metric` decorator) so `run_all_metrics` discovers them". A registry over
+  functions with a uniform `f(trials) -> value` signature works; a registry over functions
+  that each take a whole `results` dict and print to stdout does not.
+
+If the answer is no, that is fine — but then every `VARIANT` row becomes a separate named
+metric and the checklist grows from 24 to ~33. Deciding it *after* the moves start means
+redoing them.
+
+### Local judgement calls
 
 1. **`_hr_odor_associations` (visualization_utils:705)** — it infers `{HR odor → reward
    identity}` by voting over HR-success trials, and today only picks plot colours. It is a
