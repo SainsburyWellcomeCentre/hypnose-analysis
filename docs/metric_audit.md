@@ -961,6 +961,77 @@ missed — `modelling/switchpoint/plots.py` is already exemplary, and
 
 ---
 
+## Implementation progress — Phase 4a moves *(started 2026-08-05)*
+
+Tick items off here as they land, so a later chat sees what remains. Commits are on
+`hypnose-restructure`.
+
+### Done
+
+| # | item | commit | note |
+|---|---|---|---|
+| — | **QC re-baseline (not a 4a move)** | `9672f1e` | The gate was RED at HEAD before any 4a work: pyarrow 23.0.1 post-dates the fixtures, so `load_session_results` reads parquet where it used to fall back to CSV, and the CSV round-trip loses up to 1 ULP. Diff was exactly `avg_response_time` (sub-048 20260306) and `FA_avg_response_times` (sub-040 20251124); 7 fixtures untouched, no `trial_data` md5 moved, no keys added/removed. `env_fingerprint` now records pyarrow. |
+| Q5 | **`sequence_depth` / `presented_positions` / `sampled_positions` / `reached_counts`** → `metric_analysis/frames.py` | `0ed296e` | `abortion_rate_positionX` and `fa_abortion_stats` carried byte-identical copies of the reached walk; both now call `reached_counts`. `parse_json_column` moved here too and is re-exported from `metrics_utils`. See the caveat below. |
+| 10-16 | **`compute_speed_analysis` + `run_speed_analysis_batch` + `_binned_speed`** → `metric_analysis/movement.py` | `8b7d09f` | All seven movement metrics. 711 lines verified byte-identical. `_load_tracking_and_behavior` → **`io/tracking.py`**, not the audit's suggested `visualization/io/`, because `metric_analysis` is now a consumer and must not import `visualization`. `visualization/` 16,618 → 15,194 lines. |
+
+### One deviation from the audit, deliberate — read before touching per-position metrics
+
+**`sequence_depth` reproduces *today's* rule, not the `presentations`-sourced target this
+document specifies.** Q5's helper table says the source is `presentations` and the set is
+`1..max(presented position)` for every trial. That is the right end state, but it is not
+what the canonical metrics compute today: for an **aborted** trial they walk
+`1..last_odor_position`.
+
+Measured on the 9 fixture sessions (2026-08-05): **10 of 1731 trials disagree**, and the
+resulting `reached` counts differ on 3 sessions —
+
+```
+sub-048  A={1:181, 2:152, 3:117, 4:91, 5:65}   P={1:181, 2:153, 3:118, 4:92, 5:65}
+sub-057  A={1:338, 2:283, 3:226}               P={1:339, 2:287, 3:227}
+sub-059  A={1:221, 2:208, 3:139}               P={1:221, 2:209, 3:140}
+```
+
+so adopting the `presentations` form would move `abortion_rate_positionX` and
+`fa_abortion_stats` — an output change, which 4a does not make outside step 6. The
+disagreeing trials are precisely Q5's discrepancy patterns 1 and 3 (same trial ids), i.e.
+the grace artifact. **Switching now would not be more correct — it would bake that artifact
+into the denominators**, since nothing yet distinguishes a genuine short poke from a
+synthesised one. Phase 7b adds `poke_source`, writes the 0 ms positions, and only then can
+the two sources agree; at that point the aborted/completed branch in `sequence_depth`
+collapses to the single `presentations` form. Reasoning and numbers are in the docstring.
+
+### Regression cadence *(agreed 2026-08-05)*
+
+Gate on **reachability from `run_all_metrics`**, not on how large the change looks:
+
+- **Run it** for any edit inside a function `run_all_metrics` reaches — every `DEDUP`, every
+  `VARIANT` resolution, the tier-1/2/3 signature refactor, anything touching
+  `load_session_results`.
+- **Skip it** for code the metrics pipeline never calls — the `compute_speed_analysis` move,
+  and adding `NEW` metric functions that nothing yet calls. The fingerprint covers
+  `trial_data` + the metrics dict and cannot see them; a 15-minute run proves nothing.
+  Verify those by byte-identity against `git show HEAD:...` plus `check_imports`.
+
+Two things the fingerprint **never** sees, so they need eyeballing rather than a gate:
+figures, and `speed_analysis.parquet`.
+
+### Remaining
+
+1. `position_data` derived at load time (tier 2). Note the row sets differ per blob —
+   `position_valve_times` on a *completed* trial carries positions that
+   `position_poke_times` / `presentations` / `num_odors` all drop (this is Q5 pattern 2
+   seen from the other side), so the long table needs per-blob provenance flags or
+   `manual_vs_auto_stop_preference` will silently gain rows.
+2. The `f(frame)` cores + `f(results)` wrappers for the 28 canonical metrics (D0).
+   Keep them in `metrics_utils.py` — 4b owns the module split and its grouping is gated on
+   Joschua confirming it.
+3. `by_group` / `over_windows` resolvers.
+4. The exact `DEDUP`s, then the `NEW` metrics, then the helper consolidations.
+5. Step 6 (drop non-initiated) — **ask before running `--generate`**.
+
+
+---
+
 ## Open questions for Joschua
 
 ### Settled decisions
