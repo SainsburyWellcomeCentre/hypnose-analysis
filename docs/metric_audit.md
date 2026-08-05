@@ -305,6 +305,91 @@ whereas `plot_behavior_metrics` and `plot_decision_accuracy_by_odor` correctly r
 **Count for this file:** 17 stay, 4 derive/axis, **19 carry metric math** — of which 6 are
 exact `DEDUP`, 8 are `VARIANT`, 8 are `NEW` (several functions carry more than one).
 
+---
+
+## `movement_analysis_utils.py` — 4,460 lines, 12 top-level functions
+
+This file is structurally different from `visualization_utils.py`. Its metric math is not
+scattered through the plotters — it is concentrated in **one 591-line pure-compute function**
+that already writes a derivative artifact, and the plotters mostly read that artifact back.
+The problem here is not "metrics inside plots" but "a metrics module filed under
+`visualization/`".
+
+### `compute_speed_analysis` is a metric module in the wrong package
+
+`compute_speed_analysis` (1867-2457) contains **no plotting at all**. It loads SLEAP tracking,
+aligns each trial to its last cue-port poke-out, and derives a whole family of movement
+metrics, then writes `speed_analysis.parquet` per session:
+
+| quantity | how |
+|---|---|
+| binned speed epoch | `np.gradient(x, t)`, `np.gradient(y, t)`, `hypot` → `pd.cut` into `bin_ms` bins, `mean` or `max` per bin |
+| baseline μ, σ | pooled speed over the `[-0.15, -0.05] s` window across all trials in the session |
+| speed threshold `vthresh` | `max(alpha·μ, μ + beta·σ)` |
+| movement-onset latency | first bin after 0 crossing `vthresh`, then refined to the sample and **linearly interpolated** between the bracketing samples |
+| `movement_onset_from_valve_s` | onset time re-referenced to the last valve start |
+| `path_length_px` | `Σ hypot(diff(x), diff(y))` over the trial segment |
+| `travel_time_s` | `t_end − t_zero` |
+| `tortuosity` | path length ÷ straight-line distance, over the bin-aligned window |
+
+**None of these exist in `metric_analysis`.** This is the single largest move in 4a:
+`compute_speed_analysis` and its batch driver `run_speed_analysis_batch` (1784-1864) move
+wholesale into `metric_analysis` (a new `movement.py`, or `metric_analysis/movement/`), along
+with the nested primitives `_speed_by_bins`, `_speed_series`, `_compute_tortuosity`,
+`_path_length` and the module-level `_binned_speed`.
+
+It also means `metric_analysis` acquires a second saved artifact besides
+`metrics_*.json`. Worth confirming that `speed_analysis.parquet` keeps its current path and
+filename through the move — **open question 2**.
+
+### Findings specific to this file
+
+**7. The baseline/threshold block is computed three times.** `μ`, `σ` over `[-0.15, -0.05] s`
+and `vthresh = max(αμ, μ+βσ)` appear identically in `compute_speed_analysis:2318-2330`,
+`plot_epoch_speeds_by_condition:2556-2569` and `plot_traces_with_speed_threshold:3110-3114`.
+The latter two already read `speed_analysis.parquet` — they should read the threshold from it
+rather than re-deriving it, which also removes the risk of the plotted threshold disagreeing
+with the one used to compute the saved latencies.
+
+**8. Speed-from-tracking is implemented three times.** `_binned_speed` (57-93, module level),
+`_speed_by_bins` (2047, nested — a near-verbatim copy that takes `edges` as an argument
+instead of deriving them) and `_speed_series` (2079, the same derivation without binning).
+One `speed_series(tracking, t0, t1)` primitive plus an optional binner replaces all three.
+
+**9. `_kw_mwu_by_group` is generic statistics, not a metric.** It takes
+`(df, value_col, group_col)` and runs Kruskal-Wallis, then pairwise Mann-Whitney U with Holm
+correction. By the plan's own 0.2 test it knows only the *format* of its input, not what the
+data *is* — which makes it `hypnose_helpers`-shaped rather than `metric_analysis`-shaped.
+A `stats.py` is the right destination either way; **open question 3** is which repo.
+
+**10. Trajectory helpers duplicate across files.** `_resample_trace` (arc-length resampling
+onto a normalised grid) is written twice — `plot_trial_traces_by_mode:1083` and
+`movement_analysis/sing_rew_movement.py:228`. `_smooth_tracking`, `_infer_port`,
+`_last_poke_out` and `_extract_segment` likewise each appear 2-4 times across the four big
+plotters in this file. All `PREP`; all belong in the shared `visualization/` prep module.
+
+### Function table
+
+| function | lines | verdict | what it computes | action |
+|---|---|---|---|---|
+| `_binned_speed` | 57-93 | METRIC | speed from tracking gradient, binned mean/max | `NEW →` move with `compute_speed_analysis`; dedup against `_speed_by_bins` (finding 8) |
+| `_load_tracking_and_behavior` | 96-180 | FETCH | | → `visualization/io/` |
+| `plot_movement_trace` | 183-296 | PLOT | rolling-mean smoothing only | stays |
+| `plot_movement_by_trial_state` | 300-423 | PLOT | | stays |
+| `plot_movement_with_behavior` | 426-854 | PLOT + DERIVE | `_last_odor_series` infers last-odor identity; `_plot_segments_by_mask` splits contiguous runs | stays (segment splitting is a drawing technique) |
+| `plot_trial_traces_by_mode` | 857-1781 | PLOT + DISPLAY-AGG | mean trajectory ± SEM band across arc-length-resampled traces, with a normal-direction band | `DISPLAY-AGG` — stays. `_resample_trace` → shared prep (finding 10) |
+| `run_speed_analysis_batch` | 1784-1864 | METRIC (driver) | batch loop over subjects/dates | moves with `compute_speed_analysis` → `metric_analysis/run.py` shape |
+| **`compute_speed_analysis`** | **1867-2457** | **METRIC** | the whole movement-metric family above; writes `speed_analysis.parquet` | **`NEW →` `metric_analysis/movement.py`, wholesale. No plotting to leave behind.** |
+| `plot_epoch_speeds_by_condition` | 2460-2662 | FETCH + PLOT | reads the parquet, then **re-derives** baseline μ/σ and `vthresh`; averages traces across trials | `DEDUP →` read the threshold from the parquet (finding 7). Trace averaging is `DISPLAY-AGG` |
+| `plot_traces_with_speed_threshold` | 2664-3272 | FETCH + PLOT | reads `speed_threshold_time` from the parquet, but **re-derives** μ/σ/`vthresh` on the fallback path | `DEDUP →` same as above (finding 7) |
+| `plot_tortuosity_lines_overlay` | 3275-3554 | FETCH + PLOT | reads tortuosity/timing from the parquet; draws data-derived and fixed reference lines | stays — **already the correct 4a shape** |
+| `plot_movement_analysis_statistics` | 3557-4460 | FETCH + PLOT + STATS | reads all five per-trial movement metrics from the parquet; `_kw_mwu_by_group` (KW + MWU + Holm); `polyfit` trend lines; `groupby(condition, date).agg(mean, sem)`; min-max normalisation of session means | metrics already fetched — **correct shape**. `_kw_mwu_by_group` → `stats.py` (finding 9). Everything else is `DISPLAY-AGG` and stays |
+
+**Count for this file:** 5 stay unchanged, 3 are already correct fetch-and-plot, **2 carry
+metric math to move** (`compute_speed_analysis` + `_binned_speed`, with
+`run_speed_analysis_batch` following them), 2 need a `DEDUP` of the threshold block, and 1
+generic stats helper needs a home.
+
 <!-- AUDIT-APPEND-HERE -->
 
 ---
@@ -315,5 +400,15 @@ exact `DEDUP`, 8 are `VARIANT`, 8 are `NEW` (several functions carry more than o
    identity}` by voting over HR-success trials, and today only picks plot colours. It is a
    protocol fact, not a metric. Move it to `metric_analysis` (or `io`) as session metadata,
    or leave it in `visualization/` since colour is its only consumer?
+
+2. **`speed_analysis.parquet`** — `compute_speed_analysis` writes it into each session's
+   `saved_analysis_results/`. When the function moves to `metric_analysis`, does the artifact
+   keep its current path and filename? (Nothing else reads it outside `visualization/`, so
+   renaming is cheap now and expensive later.)
+
+3. **Generic statistics** — `_kw_mwu_by_group` (Kruskal-Wallis + Mann-Whitney U + Holm) knows
+   only the shape of its input, so by the 0.2 test it is a `hypnose_helpers` candidate rather
+   than a `metric_analysis` one. Put it in `hypnose_helpers.stats`, or keep it local as
+   `metric_analysis/stats.py` until a second repo wants it?
 
 *(further questions appended as the remaining files are audited)*
