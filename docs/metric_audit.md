@@ -390,6 +390,92 @@ metric math to move** (`compute_speed_analysis` + `_binned_speed`, with
 `run_speed_analysis_batch` following them), 2 need a `DEDUP` of the threshold block, and 1
 generic stats helper needs a home.
 
+---
+
+## `pred_seq_utils.py` — 1,886 lines, 9 public + ~25 private functions
+
+Predicted-sequence analysis. Structurally the cleanest file in `visualization/`: about two
+thirds of it is small `PREP` and `PLOT` helpers, and the public functions are boxplot/summary
+plotters. But the per-trial *quantities* those boxplots show are computed here from raw
+timestamps, and **almost none of them exist in `metric_analysis`** — this file is where the
+trial-level latency and duration family lives.
+
+### Finding 11 — three timing metrics silently disagree with their canonical namesakes
+
+Each of these is computed from a **different pair of events** than the identically-named
+canonical column. None is a `DEDUP`; all three are `NEW`.
+
+| here | definition here | canonical | canonical definition |
+|---|---|---|---|
+| `response_time:1041` | `first_supply_time − poke_odor_end` | `trial_data.response_time_ms` | `first_reward_poke − last_poke_out_time` (`classification_utils:2441`) |
+| `fa_analysis:1221` | `fa_time − poke_odor_end` | `trial_data.fa_latency_ms` | `fa_time − abortion_time` (`classification_utils:3039`) |
+| `performance:1737` | rewarded/(rewarded+unrewarded) **per odor sequence** | `decision_accuracy` | same formula, whole session |
+
+The first two measure **reward delivery** and **false alarm** relative to leaving the odor
+port; the canonical columns measure them relative to the reward-port poke and to the abortion
+timestamp. A function called `response_time` in `visualization/` therefore does not plot
+`response_time_ms`. Whatever is decided, these must be *named apart* when they move.
+
+### Finding 12 — two rolling accuracies with different denominators
+
+`performance` (rolling form, `_rolling_pts:1628`) and
+`visualization_utils.plot_decision_accuracy_rolling_average` both plot "rolling accuracy",
+and they are **not the same metric**:
+
+- `performance` drops `timeout_delayed` before windowing → denominator is
+  rewarded+unrewarded → it genuinely *is* `over_windows(decision_accuracy, …)`.
+- `plot_decision_accuracy_rolling_average` keeps every completed trial in the window →
+  denominator includes timeouts, and it back-fills the warm-up with the session mean.
+
+This is the concrete case for the resolver design above: the first collapses into
+`over_windows(decision_accuracy, …)` for free; the second must stay a separately named
+metric or its curve changes.
+
+### Finding 13 — an outlier rule lives in the plotters
+
+`response_time:1052` and `fa_analysis:1249` both drop values above `10 × group mean`
+(`thresholds = {g: 10.0 * mean(vs)}`). That is a data-cleaning policy, it changes the plotted
+numbers, it is written twice, and it exists nowhere in `metric_analysis`. It must travel with
+the metrics rather than being left behind in the plot code — **open question 4**.
+
+### Finding 14 — context-dependent odor labelling
+
+`poke_time_all_pos:936` and `fa_analysis:1198` both relabel `OdorG` by the odor that preceded
+it (`C → G(C)`, `F → G(F)`), because G means something different in each sequence. This is a
+`DERIVE` on the odor sequence, duplicated in two places, and it silently changes the grouping
+key of any per-odor metric computed here relative to one computed in `metric_analysis`.
+
+### Function table
+
+Stays as is — `PREP` and `PLOT` only:
+
+| functions | lines | verdict |
+|---|---|---|
+| `_parse_json_value`, `_normalize_date`, `_sequence_label`, `_sequence_len_ok`, `_normalize_odor_name`, `_last_position_entry`, `_extract_position_entry`, `_ordered_position_entries` | 21-150 | PREP — JSON/label parsing. Shared with `sing_rew.py` and `sing_rew_movement.py`, so → the shared prep module |
+| `_collect_sessions`, `_load_trial_data`, `_load_sorted_session` | 42-64, 359-372 | FETCH → `visualization/io/` |
+| `_count_to_marker_size`, `_nice_round`, `_add_size_legend` | 153-236 | PLOT — marker sizing/legend |
+| `_order_sequence_labels`, `_order_odor_labels`, `_darken`, `_resolve_color`, `_canonical_odor`, `_build_odor_filter`, `_ordered_groups` | 280-356 | PREP — ordering and colour |
+| `_plot_violins_with_stats` | 239-278 | PLOT + DISPLAY-AGG (mean/std per violin) |
+| `_plot_summary_daily`, `_plot_summary_rolling`, `_plot_summary`, `_is_multi_session`, `_apply_shared_ylim`, `_summary_save_suffix` | 375-589 | PLOT + DISPLAY-AGG — generic per-session mean and rolling mean of *whatever* values are passed in; no metric knowledge → **Phase 5 primitives** |
+| `_plot_performance_daily`, `_plot_performance_rolling` | 1544-1708 | PLOT + DISPLAY-AGG — but `_rolling_pts:1628` carries the windowing rule (finding 12) |
+
+Carries metric math:
+
+| function | lines | verdict | what it computes | action |
+|---|---|---|---|---|
+| `last_odor_poke_time` | 592-689 | PREP + PLOT | selects `poke_time_ms` of the last position | **selection, not computation** — stays once the tidy poke table exists (finding 5) |
+| `trial_poke_duration` | 692-793 | MIXED | `last.poke_odor_end − first.poke_odor_start` — the **wall-clock span** of the odor-sampling phase | `NEW → trial_poke_span(...)`. Distinct from `cummulative_poke_time` (span ≠ sum) |
+| `first_odor_poke_duration` | 796-882 | PREP + PLOT | selects `poke_time_ms` at position 1 | selection — stays |
+| `poke_time_all_pos` | 885-989 | PREP + PLOT + DERIVE | pools `poke_time_ms` across positions by odor; relabels `OdorG` by context (finding 14) | selection + the `DERIVE` of finding 14 |
+| `response_time` | 992-1125 | MIXED | `first_supply_time − poke_odor_end`, per sequence; drops values > 10× group mean | `NEW → reward_delivery_latency(...)` — **not** `response_time_ms` (finding 11). Outlier rule travels with it (finding 13) |
+| `fa_analysis` | 1128-1436 | MIXED | `fa_time − poke_odor_end` per last odor and FA port; A/B counts per odor; mean ± SEM | `NEW → fa_latency_from_pokeout(...)` (finding 11). The A/B counts at 1311 are the **9th** FA-port counting site (finding 1). Outlier rule as above |
+| `valve_to_reward` | 1439-1541 | MIXED | `first_supply_time − valve_start` of the last position | `NEW → valve_to_reward_latency(...)`. No canonical valve-timing metric exists |
+| `performance` | 1711-1779 | MIXED | rewarded/(rewarded+unrewarded) per odor sequence, session and rolling | `VARIANT of decision_accuracy` — collapses to `by_group(…, "sequence")` / `over_windows(…)` cleanly (finding 12) |
+| `cummulative_poke_time` | 1782-1886 | MIXED | `Σ poke_time_ms` across positions, per trial | `NEW → trial_poke_total(...)`. Related to `avg_sampling_time_completed_sequence` but per-trial, not a session mean |
+
+**Count for this file:** ~25 helpers stay (mostly to the shared prep/primitives modules),
+**7 carry metric math** — 6 `NEW`, 1 `VARIANT`, 0 exact `DEDUP`.
+
 <!-- AUDIT-APPEND-HERE -->
 
 ---
@@ -410,5 +496,11 @@ generic stats helper needs a home.
    only the shape of its input, so by the 0.2 test it is a `hypnose_helpers` candidate rather
    than a `metric_analysis` one. Put it in `hypnose_helpers.stats`, or keep it local as
    `metric_analysis/stats.py` until a second repo wants it?
+
+4. **The 10× outlier rule** (`pred_seq_utils:1052` and `:1249`) drops any value above ten
+   times its group mean before plotting. It changes the numbers, it is duplicated, and
+   `metric_analysis` has no equivalent. Should it become an explicit, named argument on the
+   moved metrics (`exclude_above_mean_multiple=10`), or is it a plotting-only display filter
+   that should stay behind?
 
 *(further questions appended as the remaining files are audited)*
