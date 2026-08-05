@@ -201,18 +201,18 @@ def run_all_metrics(results, save_txt=True, save_json=True):
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
         print("\n--- Decision Accuracy ---")
-        metrics['decision_accuracy'] = decision_accuracy(results)
+        metrics['decision_accuracy'] = decision_accuracy_session(results)
         print("\n--- Decision Accuracy by Odor ---")
         accuracy_by_odor = decision_accuracy_by_odor(results)
         metrics['decision_accuracy_by_odor'] = accuracy_by_odor.to_dict() if len(accuracy_by_odor) > 0 else {}
         print("\n--- Global Choice Accuracy ---")
-        metrics['global_choice_accuracy'] = global_choice_accuracy(results)
+        metrics['global_choice_accuracy'] = global_choice_accuracy_session(results)
         print("\n--- Premature Response Rate ---")
-        metrics['premature_response_rate'] = premature_response_rate(results)
+        metrics['premature_response_rate'] = premature_response_rate_session(results)
         print("\n--- Response-Contingent False Alarm Rate ---")
-        metrics['response_contingent_FA_rate'] = response_contingent_FA_rate(results)
+        metrics['response_contingent_FA_rate'] = response_contingent_FA_rate_session(results)
         print("\n--- Global False Alarm Rate ---")
-        metrics['global_FA_rate'] = global_FA_rate(results)
+        metrics['global_FA_rate'] = global_FA_rate_session(results)
         print("\n--- FA Odor Bias ---")
         fa_odor = FA_odor_bias(results)
         metrics['FA_odor_bias'] = fa_odor.to_dict() if hasattr(fa_odor, 'to_dict') else fa_odor
@@ -220,18 +220,18 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         fa_pos = FA_position_bias(results)
         metrics['FA_position_bias'] = fa_pos.to_dict() if hasattr(fa_pos, 'to_dict') else fa_pos
         print("\n--- Sequence Completion Rate ---")
-        metrics['sequence_completion_rate'] = sequence_completion_rate(results)
+        metrics['sequence_completion_rate'] = sequence_completion_rate_session(results)
         print("\n--- Odor Abortion Rate ---")
         odor_ab = odorx_abortion_rate(results)
         metrics['odorx_abortion_rate'] = odor_ab.to_dict() if hasattr(odor_ab, 'to_dict') else odor_ab
         print("\n--- Hidden Rule Performance ---")
-        metrics['hidden_rule_performance'] = hidden_rule_performance(results)
+        metrics['hidden_rule_performance'] = hidden_rule_performance_session(results)
         print("\n--- Hidden Rule Detection Rate ---")
-        metrics['hidden_rule_detection_rate'] = hidden_rule_detection_rate(results)
+        metrics['hidden_rule_detection_rate'] = hidden_rule_detection_rate_session(results)
         print("\n--- Hidden Rule Performance/Detection by Odor ---")
         metrics['hidden_rule_by_odor'] = hidden_rule_counts_by_odor(results)
         print("\n--- Choice Timeout Rate ---")
-        metrics['choice_timeout_rate'] = choice_timeout_rate(results)
+        metrics['choice_timeout_rate'] = choice_timeout_rate_session(results)
         print("\n--- Average Sampling Time per Odor (Completed) ---")
         avg_samp_odor = avg_sampling_time_odor_x(results)
         metrics['avg_sampling_time_odor_x'] = avg_samp_odor.to_dict() if hasattr(avg_samp_odor, 'to_dict') else avg_samp_odor
@@ -249,7 +249,7 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         print("\n--- FA Average Response Times ---")
         metrics['FA_avg_response_times'] = FA_avg_response_times(results)
         print("\n--- Response Rate ---")
-        metrics['response_rate'] = response_rate(results)
+        metrics['response_rate'] = response_rate_session(results)
         print("\n--- Manual vs Auto Stop Preference ---")
         metrics['manual_vs_auto_stop_preference'] = manual_vs_auto_stop_preference(results)
         print("\n--- Non-Initiated FA Rate ---")
@@ -704,40 +704,107 @@ def batch_run_all_metrics_with_merge(
 
 # ================== Behavioral Metrics Functions =================================================================================================================================
 
-def decision_accuracy(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "response_time_category" not in df.columns:
+# ================== Metric cores: f(frame) -> value ==============================
+#
+# restructure_2 Phase 4a, decision D0. Every metric gets a pure core taking a
+# *trial frame* plus a thin `_session(results)` wrapper that prints and keeps
+# `run_all_metrics` (and therefore the saved JSON) unchanged.
+#
+# Rate metrics additionally expose their numerator and denominator
+# *contributions* as per-trial Series, because **a rate is not a per-trial
+# quantity**. Storing one value per trial and taking a rolling mean gives
+# `rewarded / window_size` -- a denominator silently containing timeouts and
+# aborts. That is finding 12 of the audit: it is exactly why
+# `pred_seq.performance` and `plot_decision_accuracy_rolling_average` disagree
+# today. Reducing `num.sum() / den.sum()` over any slice is correct at every
+# granularity, and two cumulative sums make a rolling window O(1).
+
+
+def _aborted_mask(trials):
+    """The `df["is_aborted"] == True` mask every metric builds, once."""
+    if "is_aborted" in trials.columns:
+        return trials["is_aborted"] == True  # noqa: E712
+    return pd.Series(False, index=trials.index)
+
+
+def _flag(trials, column, value):
+    """`trials[column] == value` as a boolean Series; all-False when absent."""
+    if column in trials.columns:
+        return trials[column] == value
+    return pd.Series(False, index=trials.index)
+
+
+def _truthy(trials, column):
+    if column in trials.columns:
+        return trials[column].apply(_is_truthy).astype(bool)
+    return pd.Series(False, index=trials.index)
+
+
+def _reduce_rate(num, den):
+    """(numerator, denominator) contributions -> (n, denom, rate)."""
+    n = int(np.asarray(num, dtype=float).sum())
+    d = int(np.asarray(den, dtype=float).sum())
+    return n, d, (n / d if d > 0 else np.nan)
+
+
+def _initiated(trials):
+    """Denominator "an initiated trial": a non-null global_trial_id, else all rows."""
+    if "global_trial_id" in trials.columns:
+        return trials["global_trial_id"].notna().astype(int)
+    return pd.Series(1, index=trials.index)
+
+
+def decision_accuracy_contributions(trials):
+    rtc = trials["response_time_category"]
+    return ((rtc == "rewarded").astype(int),
+            rtc.isin(["rewarded", "unrewarded"]).astype(int))
+
+
+def decision_accuracy(trials):
+    """rewarded / (rewarded + unrewarded)."""
+    if trials.empty or "response_time_category" not in trials.columns:
+        return 0, 0, np.nan
+    return _reduce_rate(*decision_accuracy_contributions(trials))
+
+
+def decision_accuracy_session(results):
+    trials = results.get("trial_data", pd.DataFrame())
+    if trials.empty or "response_time_category" not in trials.columns:
         print("Decision Accuracy: no trial_data with response_time_category")
         return 0, 0, np.nan
-
-    rew_mask = df["response_time_category"] == "rewarded"
-    unr_mask = df["response_time_category"] == "unrewarded"
-    n_rew = int(rew_mask.sum())
-    n_unr = int(unr_mask.sum())
-    denom = n_rew + n_unr
-    acc = n_rew / denom if denom > 0 else np.nan
+    n_rew, denom, acc = decision_accuracy(trials)
     print(f"Decision Accuracy: {n_rew}/{denom} = {acc:.3f}")
     return n_rew, denom, acc
 
 
-def global_choice_accuracy(results):
+def global_choice_accuracy_contributions(trials):
+    rtc = trials["response_time_category"]
+    # Counts are summed, not or-ed: a trial flagged both ways contributes twice,
+    # as it does today.
+    return ((rtc == "rewarded").astype(int),
+            rtc.isin(["rewarded", "unrewarded"]).astype(int)
+            + _flag(trials, "fa_label", "FA_time_in").astype(int))
+
+
+def global_choice_accuracy(trials):
+    """rewarded / (rewarded + unrewarded + FA_time_in)."""
+    if trials.empty or "response_time_category" not in trials.columns:
+        return 0, 0, np.nan
+    return _reduce_rate(*global_choice_accuracy_contributions(trials))
+
+
+def global_choice_accuracy_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns:
         print("Global Choice Accuracy: no trial_data with response_time_category")
         return 0, 0, np.nan
-
-    n_correct = int((df["response_time_category"] == "rewarded").sum())
+    n_correct, n_total, accuracy = global_choice_accuracy(df)
     n_incorrect = int((df["response_time_category"] == "unrewarded").sum())
-    n_fa_time_in = int((df.get("fa_label") == "FA_time_in").sum()) if "fa_label" in df.columns else 0
-
-    n_total = n_correct + n_incorrect + n_fa_time_in
-    accuracy = n_correct / n_total if n_total > 0 else np.nan
-
+    n_fa_time_in = int(_flag(df, "fa_label", "FA_time_in").sum())
     print(f"Global Choice Accuracy: {n_correct}/{n_total} = {accuracy:.3f}")
     print(f"  - Correct choices: {n_correct}")
     print(f"  - Incorrect choices: {n_incorrect}")
     print(f"  - False alarms (FA Time In): {n_fa_time_in}")
-
     return n_correct, n_total, accuracy
 
 def decision_accuracy_by_odor(results):
@@ -789,56 +856,70 @@ def decision_accuracy_by_odor(results):
 
     return pd.DataFrame(rows).set_index('odor').sort_index()
 
-def premature_response_rate(results):
+def premature_response_rate_contributions(trials):
+    ab = _aborted_mask(trials)
+    return ((ab & _flag(trials, "fa_label", "FA_time_in")).astype(int),
+            ab.astype(int))
+
+
+def premature_response_rate(trials):
+    """FA_time_in among aborted / n aborted."""
+    if trials.empty:
+        return 0, 0, np.nan
+    return _reduce_rate(*premature_response_rate_contributions(trials))
+
+
+def premature_response_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty:
         print("Premature Response Rate: no trial_data")
         return 0, 0, np.nan
-
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    aborted = df[aborted_mask]
-    if aborted.empty:
+    n_fa, n_total, rate = premature_response_rate(df)
+    if n_total == 0:
         print("Premature Response Rate: no aborted trials")
         return 0, 0, np.nan
-
-    n_fa = int((aborted.get("fa_label") == "FA_time_in").sum()) if "fa_label" in aborted.columns else 0
-    n_total = len(aborted)
-    rate = n_fa / n_total if n_total > 0 else np.nan
     print(f"Premature Response Rate: {n_fa}/{n_total} = {rate:.3f}")
     return n_fa, n_total, rate
 
-def response_contingent_FA_rate(results):
+def response_contingent_FA_rate_contributions(trials):
+    num = (_aborted_mask(trials) & _flag(trials, "fa_label", "FA_time_in")).astype(int)
+    rtc = trials["response_time_category"]
+    return num, num + rtc.isin(["rewarded", "unrewarded"]).astype(int)
+
+
+def response_contingent_FA_rate(trials):
+    """FA_time_in / (FA_time_in + rewarded + unrewarded)."""
+    if trials.empty or "response_time_category" not in trials.columns:
+        return 0, 0, np.nan
+    return _reduce_rate(*response_contingent_FA_rate_contributions(trials))
+
+
+def response_contingent_FA_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns:
         print("Response-Contingent False Alarm Rate: missing trial_data/response_time_category")
         return 0, 0, np.nan
-
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    aborted = df[aborted_mask]
-    n_fa = int((aborted.get("fa_label") == "FA_time_in").sum()) if "fa_label" in aborted.columns else 0
-
-    n_rew = int((df["response_time_category"] == "rewarded").sum())
-    n_unr = int((df["response_time_category"] == "unrewarded").sum())
-
-    denom = n_fa + n_rew + n_unr
-    rate = n_fa / denom if denom > 0 else np.nan
+    n_fa, denom, rate = response_contingent_FA_rate(df)
     print(f"Response-Contingent False Alarm Rate: {n_fa}/{denom} = {rate:.3f}")
     return n_fa, denom, rate
 
-def global_FA_rate(results):
+def global_FA_rate_contributions(trials):
+    return (_flag(trials, "fa_label", "FA_time_in").astype(int), _initiated(trials))
+
+
+def global_FA_rate(trials):
+    """FA_time_in / n initiated."""
+    if trials.empty:
+        return 0, 0, np.nan
+    return _reduce_rate(*global_FA_rate_contributions(trials))
+
+
+def global_FA_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty:
         print("Global False Alarm Rate: no trial_data")
         return 0, 0, np.nan
-
-    n_fa = int((df.get("fa_label") == "FA_time_in").sum()) if "fa_label" in df.columns else 0
-
-    if "global_trial_id" in df.columns:
-        n_ini = int(df["global_trial_id"].notna().sum())
-    else:
-        n_ini = len(df)
-
-    rate = n_fa / n_ini if n_ini > 0 else np.nan
+    n_fa, n_ini, rate = global_FA_rate(df)
     print(f"Global False Alarm Rate: {n_fa}/{n_ini} = {rate:.3f}")
     return n_fa, n_ini, rate
 
@@ -905,17 +986,23 @@ def FA_position_bias(results):
         print(f"Position {pos_report}: {n_fa_pos}/{n_ab_pos} FA, Bias: {bias[pos_report]:.3f}")
     return pd.Series(bias).sort_index()
 
-def sequence_completion_rate(results):
+def sequence_completion_rate_contributions(trials):
+    return ((~_aborted_mask(trials)).astype(int), _initiated(trials))
+
+
+def sequence_completion_rate(trials):
+    """completed / initiated."""
+    if trials.empty:
+        return 0, 0, np.nan
+    return _reduce_rate(*sequence_completion_rate_contributions(trials))
+
+
+def sequence_completion_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty:
         print("Sequence Completion Rate: no trial_data")
         return 0, 0, np.nan
-
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    n_completed = int((~aborted_mask).sum())
-
-    denom = int(df["global_trial_id"].notna().sum()) if "global_trial_id" in df.columns else len(df)
-    rate = n_completed / denom if denom > 0 else np.nan
+    n_completed, denom, rate = sequence_completion_rate(df)
     print(f"Sequence Completion Rate: {n_completed}/{denom} = {rate:.3f}")
     return n_completed, denom, rate
 
@@ -951,39 +1038,46 @@ def odorx_abortion_rate(results):
         print(f"{od}: {n_ab}/{n_pres} abortions, Rate: {rates[od]:.3f}")
     return pd.Series(rates).sort_index()
 
-def hidden_rule_performance(results):
+def hidden_rule_performance_contributions(trials):
+    return (((_truthy(trials, "hidden_rule_success")
+              & _flag(trials, "response_time_category", "rewarded")).astype(int)),
+            _truthy(trials, "hit_hidden_rule").astype(int))
+
+
+def hidden_rule_performance(trials):
+    """(HR success & rewarded) / hit_hidden_rule."""
+    if trials.empty:
+        return 0, 0, np.nan
+    return _reduce_rate(*hidden_rule_performance_contributions(trials))
+
+
+def hidden_rule_performance_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty:
         print("Hidden Rule Performance: no trial_data")
         return 0, 0, np.nan
-
-    success_mask = df["hidden_rule_success"].apply(_is_truthy) if "hidden_rule_success" in df.columns else pd.Series(False, index=df.index)
-    reward_mask = df["response_time_category"] == "rewarded" if "response_time_category" in df.columns else pd.Series(False, index=df.index)
-    num_mask = success_mask & reward_mask
-    n_hr_rewarded = int(num_mask.sum())
-
-    denom_mask = df["hit_hidden_rule"].apply(_is_truthy) if "hit_hidden_rule" in df.columns else pd.Series(False, index=df.index)
-    denom = int(denom_mask.sum())
-
-    rate = n_hr_rewarded / denom if denom > 0 else np.nan
+    n_hr_rewarded, denom, rate = hidden_rule_performance(df)
     print(f"Hidden Rule Performance: {n_hr_rewarded}/{denom} = {rate:.3f}")
     return n_hr_rewarded, denom, rate
 
-def hidden_rule_detection_rate(results):
+def hidden_rule_detection_rate_contributions(trials):
+    return ((((~_aborted_mask(trials)) & _truthy(trials, "hidden_rule_success")).astype(int)),
+            _truthy(trials, "hit_hidden_rule").astype(int))
+
+
+def hidden_rule_detection_rate(trials):
+    """(not aborted & HR success) / hit_hidden_rule."""
+    if trials.empty:
+        return 0, 0, np.nan
+    return _reduce_rate(*hidden_rule_detection_rate_contributions(trials))
+
+
+def hidden_rule_detection_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty:
         print("Hidden Rule Detection Rate: no trial_data")
         return 0, 0, np.nan
-
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    success_mask = df["hidden_rule_success"].apply(_is_truthy) if "hidden_rule_success" in df.columns else pd.Series(False, index=df.index)
-    num_mask = (~aborted_mask) & success_mask
-    n_hr_completed = int(num_mask.sum())
-
-    denom_mask = df["hit_hidden_rule"].apply(_is_truthy) if "hit_hidden_rule" in df.columns else pd.Series(False, index=df.index)
-    denom = int(denom_mask.sum())
-
-    rate = n_hr_completed / denom if denom > 0 else np.nan
+    n_hr_completed, denom, rate = hidden_rule_detection_rate(df)
     print(f"Hidden Rule Detection Rate: {n_hr_completed}/{denom} = {rate:.3f}")
     return n_hr_completed, denom, rate
 
@@ -1240,18 +1334,25 @@ def hidden_rule_counts_by_odor(results):
         "by_odor": by_odor,
     }
 
-def choice_timeout_rate(results):
+def choice_timeout_rate_contributions(trials):
+    completed = ~_aborted_mask(trials)
+    return ((completed & _flag(trials, "response_time_category", "timeout_delayed")).astype(int),
+            completed.astype(int))
+
+
+def choice_timeout_rate(trials):
+    """timeout_delayed / completed."""
+    if trials.empty or "response_time_category" not in trials.columns:
+        return 0, 0, np.nan
+    return _reduce_rate(*choice_timeout_rate_contributions(trials))
+
+
+def choice_timeout_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns:
         print("Choice Timeout Rate: no trial_data/response_time_category")
         return 0, 0, np.nan
-
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    completed = df[~aborted_mask]
-
-    n_tmo = int((completed["response_time_category"] == "timeout_delayed").sum())
-    denom = len(completed)
-    rate = n_tmo / denom if denom > 0 else np.nan
+    n_tmo, denom, rate = choice_timeout_rate(df)
     print(f"Choice Timeout Rate: {n_tmo}/{denom} = {rate:.3f}")
     return n_tmo, denom, rate
 
@@ -1412,19 +1513,25 @@ def FA_avg_response_times(results):
         out[pretty] = float(avg) if not np.isnan(avg) else np.nan
     return out
 
-def response_rate(results):
+def response_rate_contributions(trials):
+    rtc = trials["response_time_category"]
+    num = rtc.isin(["rewarded", "unrewarded"]).astype(int)
+    return num, num + (rtc == "timeout_delayed").astype(int)
+
+
+def response_rate(trials):
+    """(rewarded + unrewarded) / (rewarded + unrewarded + timeout)."""
+    if trials.empty or "response_time_category" not in trials.columns:
+        return 0, 0, np.nan
+    return _reduce_rate(*response_rate_contributions(trials))
+
+
+def response_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns:
         print("Response Rate: no trial_data/response_time_category")
         return 0, 0, np.nan
-
-    n_rew = int((df["response_time_category"] == "rewarded").sum())
-    n_unr = int((df["response_time_category"] == "unrewarded").sum())
-    n_tmo = int((df["response_time_category"] == "timeout_delayed").sum())
-
-    denom = n_rew + n_unr + n_tmo
-    num = n_rew + n_unr
-    rate = num / denom if denom > 0 else np.nan
+    num, denom, rate = response_rate(df)
     print(f"Response Rate: {num}/{denom} = {rate:.3f}")
     return num, denom, rate
 
