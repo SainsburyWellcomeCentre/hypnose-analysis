@@ -44,7 +44,7 @@ and, where there is metric math, one **action**:
 | action | meaning |
 |---|---|
 | `DEDUP → f` | same definition as canonical `f`. Delete the recompute, call `f`. |
-| `VARIANT of f` | **same formula, different granularity or different inputs.** A canonical version exists but is *not* a drop-in substitute. Needs a parameterised canonical, and the divergence must be preserved. |
+| `VARIANT of f` | **same formula, different granularity or different inputs.** A canonical version exists but is *not* a drop-in substitute. **Every VARIANT row is individually resolved in "VARIANT resolutions" — read that before touching one; all nine collapse into resolver calls, a rescale, or an exact dedup, and none becomes a new metric.** |
 | `NEW → …` | genuine metric with no canonical version anywhere. Must be **added** to `metric_analysis`, or it is lost. |
 | `DISPLAY-AGG` | mean / SEM / cumsum **across subjects or sessions of an already-canonical value**, purely to draw a summary line or error bar. |
 
@@ -231,11 +231,35 @@ bugs rather than to a genuine choice of definition.
 string-split fallback. The fix belongs in `metric_analysis`: return numeric columns (the
 formatting is a `summary.py` concern in 4b), then the plotter just reads them.
 
-**4. Sampling-time numbers in `visualization/` are not comparable to the canonical ones.**
-Two independent divergences, both silent:
+**4. Sampling-time sources look divergent but are not — CORRECTED 2026-08-05.** Two
+differences are visible in the code:
 - canonical `avg_sampling_time_odor_x` reads **`position_poke_times`**;
   `plot_poke_duration_by_odor._extract_odor_poke_ms:5549` reads **`presentations`**.
 - every viz extractor filters **`poke_ms > 0`**; no canonical metric does.
+
+This finding originally asserted that the two therefore produce different numbers. **Measured
+across all 9 fixture sessions, they do not:**
+
+```
+4711 positions compared
+  present only in position_poke_times : 0
+  present only in presentations       : 0
+  present in both, poke_time_ms DIFFERS: 0
+  poke_time_ms <= 0 (what the >0 filter would drop): 0
+```
+
+The two blobs carry the same positions with the same `poke_time_ms`, and no position has a
+non-positive poke time, so the filter drops nothing. Both differences are cosmetic **on
+current data**, which makes these rows exact `DEDUP`s rather than `VARIANT`s (see "VARIANT
+resolutions").
+
+**But the filter is dormant, not harmless.** It matches nothing *because* 0 ms positions are
+currently dropped by the writer entirely — Q5 pattern 2. Once Phase 7b writes them,
+`poke_time_ms == 0` entries appear and the `>0` filter becomes live, silently excluding
+exactly the positions that fix adds. It is a crude precursor of `only_true_pokes`
+(a 0 ms position gets `poke_source: "none"`), so it should be **superseded by
+`only_true_pokes`, not preserved as an independent display filter.** Removing it in 4a is
+value-neutral today; leaving it in place is a trap set for after 7b.
 
 **5. Four near-identical poke-time extractors.** `extract_poke_times` (1756, nested),
 `_extract_completed_position_poke_times` (4770), `extract_abort_poke_times` (1793, nested),
@@ -752,6 +776,43 @@ Consequences, all deliberate:
 **This is the only part of 4a that changes saved metric values.** It takes a deliberate
 `--generate` in the same commit, with the metric-key diff confirming only those keys left —
 and confirmation before running it.
+
+---
+
+## VARIANT resolutions — one row at a time *(settled 2026-08-05)*
+
+The `VARIANT` label covers two things that resolve **completely differently**, and the
+taxonomy above conflates them: "same formula, different *granularity*" collapses into a
+resolver call, while "same formula, different *inputs*" is a new metric wearing a VARIANT
+label. Left unresolved, the implementing chat would make this judgement nine times unguided —
+which is exactly where a silent output change gets in. So each row is resolved here.
+
+**Result: every VARIANT collapses. No VARIANT becomes a new named metric.** The checklist
+stays at 24, and `metric_analysis` ends 4a with ~32 functions rather than ~41.
+
+| # | site | divergence from canonical | resolution | new function? |
+|---|---|---|---|---|
+| 1 | `plot_fa_ratio_a_over_sessions:2829` | `A/(A+B)` vs canonical `(A−B)/(A+B)` | **exact rescale**: `A/(A+B) == (r+1)/2`. Derive, never recount | no |
+| 2 | `get_fa_ratio_a_stats:5948` | same rescale, plus FA filter `startswith("FA_")` vs a single `fa_type` | **parameterise**: canonical takes a set-valued `fa_type`; then rescale as #1 | no |
+| 3 | `plot_fa_ratio_by_hr_position:6203,6222,6240` | `(A−B)/(A+B)` sliced by HR odor / HR position (×3) | **`by_group`** over canonical FA port counting, once it accepts a pre-sliced frame | no |
+| 4 | `plot_fa_ratio_by_abort_odor:6601,6638` | same, sliced by abort odor and HR/non-HR (×2) | **`by_group`**, as #3 | no |
+| 5 | `pred_seq_utils.performance:1737` | `decision_accuracy` per odor sequence, session and rolling | **`by_group(…, "sequence")` + `over_windows(…)`** — timeouts already dropped, so the denominator matches canonical exactly (finding 12) | no |
+| 6 | `plot_decision_accuracy._decision_acc:5209` | `decision_accuracy` restricted to a trial mask | unmasked call is an **exact `DEDUP`**; the HR / non-HR split is **`by_group`** on an HR mask | no |
+| 7 | `plot_position_completion_rate:4357` | definition B ("reached" via session-wide `max(num_odors)`) | **resolved by Q5** — B is deleted; the plotter calls `sequence_depth` | no |
+| 8 | `plot_sampling_times_analysis` (by-odor, completed) | reads `presentations` not `position_poke_times`; filters `poke_ms > 0` | **exact `DEDUP`** — both differences measured to be no-ops (finding 4). Drop the `>0` filter rather than relocating it | no |
+| 9 | `plot_poke_duration_by_odor:5549` | same two differences, plus per-day granularity | **exact `DEDUP`** + **`by_group(…, "date")`** (finding 4) | no |
+
+### Two things the implementing chat must not do
+
+**Do not recount where a rescale exists.** #1 and #2 are algebraically exact
+(`(A−B)/(A+B) = r` ⇒ `A/(A+B) = (r+1)/2`). Recounting from `fa_port` reintroduces one of the
+eight duplicate implementations that finding 1 exists to remove.
+
+**Do not relocate the `>0` filter into the display layer.** Judgement call 4 says filtering
+is a display concern, which would suggest moving it — but finding 4 shows it is dormant only
+because 0 ms positions are currently dropped by the writer. Preserving it would arm a trap
+that fires after Phase 7b writes those positions. **Delete it**; `only_true_pokes` is its
+proper successor.
 
 ---
 
