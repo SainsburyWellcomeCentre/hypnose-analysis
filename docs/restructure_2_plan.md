@@ -27,19 +27,26 @@ terminal entry points in `scripts/`; no back-compat shims, all imports canonical
 | neuropixel analysis | `hypnose_ephys` | ephys (planned) |
 | **hypnose-helpers** | `hypnose_helpers` | shared, modality-agnostic utilities (to create) |
 
-**Current scale** (2026-07-31): 49 py files, 30,676 lines.
+**Current scale** — re-measured **2026-08-04**, after Phase 2 (the 2026-07-31 figures the
+rest of this document quotes are superseded by these): 54 py files, 31,140 lines.
 
-| file | lines |
-|---|---|
-| `visualization/` **total** | **16,044** |
-| ├ `visualization_utils.py` | 7,283 |
-| ├ `movement_analysis_utils.py` | 4,497 |
-| ├ `pred_seq_utils.py` | 1,886 |
-| ├ `sing_rew.py` | 1,291 |
-| └ `valve_poke_plots.py` | 646 |
-| `trial_classification/classification_utils.py` | 3,703 |
-| `metric_analysis/metrics_utils.py` | 1,839 |
-| `io/save_results.py` | 491 |
+| file | lines | 2026-07-31 |
+|---|---|---|
+| `visualization/` **total** | **16,627** | 16,044 |
+| ├ `visualization_utils.py` | 7,264 | 7,283 |
+| ├ `movement_analysis_utils.py` | 4,460 | 4,497 |
+| ├ `pred_seq_utils.py` | 1,886 | 1,886 |
+| ├ `sing_rew.py` | 1,291 | 1,291 |
+| ├ `valve_poke_plots.py` | 646 | 646 |
+| ├ `modelling/switchpoint/plots.py` | 638 | (not counted) |
+| └ `movement_analysis/sing_rew_movement.py` | 433 | (not counted) |
+| `trial_classification/classification_utils.py` | 3,703 | 3,703 |
+| `metric_analysis/metrics_utils.py` | 1,817 | 1,839 |
+| `metric_analysis/sing_rew_metrics.py` | 440 | (not counted) |
+
+The `visualization/` total *rose* despite Phase 2 removing code: the original 16,044 omitted
+`modelling/switchpoint/plots.py` and `movement_analysis/sing_rew_movement.py`. **Phase 4a
+must audit those two as well** — they were invisible in the original count.
 
 ---
 
@@ -114,14 +121,14 @@ Update this table at the end of each phase, in the same commit as the work.
 | phase | status | commit | notes |
 |---|---|---|---|
 | Step 0 — re-baseline QC fixtures | **done** 2026-08-03 | `481110b` | 9 sessions (8 re-run + sub-053 20260520 kept for seqLen 2 & the singrew-name guard). Old sub-040 20251124 fixture was **stale, not drifted** — cb724d5's own code reproduces the new md5. regression / verify_scripts / check_imports all green |
-| 0.1 package name decision | not started | | |
-| 0.2 helpers boundary decision | not started | | |
+| 0.1 package name decision | **done** 2026-08-03 | `9aad717` | Decided `hypnose_behavior` (dist `hypnose-behavior-analysis`); realised in Phase 1 |
+| 0.2 helpers boundary decision | **done** 2026-08-03 | `9793cbc`..`b840ba1` | Decided by the "knows the data vs knows the layout" test; realised in 2a/2b/2c |
 | 0.3 collapse loaders/readers | **done** 2026-08-03 | `5d9c14a` | `readers.py` is now the single definition site for the 8 primitives (tolerant bodies); `loaders.py` re-exports them. Kept as two files: deleting `readers.py` would make `loaders → detect_settings → loaders` a cycle. Dead `create_unique_series` / `find_session_roots` deleted. regression GREEN |
 | 1 rename | **done** 2026-08-03 | `9aad717` | `hypnose` → `hypnose_behavior`, dist/repo → `hypnose-behavior-analysis`. 210 anchored replacements + `git mv`. No reinstall needed (editable install is a static-path `.pth` onto `src/`). `HYPNOSE_*` env vars, ceph data paths, Jupyter kernel names and this doc deliberately untouched. GitHub repo renamed, remote URL updated, local folder renamed to `hypnose-behavior-analysis`. That move invalidated the editable-install `.pth` in 6 conda envs; only `hypnose-analysis-test` was repointed — **`hypnose`, `hypnose-analysis`, `hypnose-somnotate`, `sleap`, `sleap-2` still need `pip install -e .`** |
 | 2a helpers extraction | **done** 2026-08-03 | `9793cbc`..`b840ba1` (+ helpers `1333955`..`d11d0dc`, somnotate `9e3c155`..`7de20a5`) | `hypnose-helpers` created (local only, no remote yet). Moved: `io/paths` → `DataLocations(config_dir=…)` (could NOT move whole — `__file__`-derived repo root), `io/save` → `viz/styles` + `viz/save` (`save_figure` takes `fig_dir`), `io/save_results` serialisation → `io/serialize`, somnotate `io/selectors` + `ensure_style`. rcParams no longer mutated at import. Behaviour repo −1226 lines. Regression GREEN at each step |
 | 2b canonical session discovery | **done** 2026-08-04 | `312854d`..`2fbd5f5` (+ helpers `8dadcf8`, somnotate `80afbda`) | `hypnose_helpers.io.layout` owns the walking; each repo binds its own roots. All 17 session lookups and ~30 subject globs repointed. **`session_index` ships but is deliberately unused by the plotters** — see "State at the end of 2b". regression / verify_scripts / check_imports all green |
 | 2c figure provenance | **done** 2026-08-04 | `7d117b8` (+ helpers `059c652`, somnotate `892e56c`) | `hypnose_helpers.provenance` + `viz/metadata`. Every `save_figure` PDF carries commit/version/caller/params; `read_figure_metadata` reads it back **without pypdf**. Phase 7a can call `provenance()` directly. regression / verify_scripts / check_imports all green |
-| 3 re-baseline QC | not started | | folded into Step 0 if done first |
+| 3 re-baseline QC | **done** — superseded by Step 0 | `481110b` | Step 0 did it first: 9 sessions re-baselined 2026-08-03. Nothing further to do; do NOT re-run `--generate` |
 | 4a strip metrics from visualization | not started | | |
 | 4b modularise metric_analysis | not started | | |
 | 5 visualization primitives | not started | | after 4a only |
