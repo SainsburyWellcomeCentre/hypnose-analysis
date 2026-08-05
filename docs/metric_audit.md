@@ -907,31 +907,54 @@ missed — `modelling/switchpoint/plots.py` is already exemplary, and
 - **D0 — the metric signature.** Settled 2026-08-05: yes, as part of 4a. See "D0 resolution".
 - **Q5 — "reached at position *p*".** Settled 2026-08-05, evidence-led. See "Q5 resolution".
 
-### Local judgement calls
+### Local judgement calls — settled 2026-08-05
 
-1. **`_hr_odor_associations` (visualization_utils:705)** — it infers `{HR odor → reward
-   identity}` by voting over HR-success trials, and today only picks plot colours. It is a
-   protocol fact, not a metric. Move it to `metric_analysis` (or `io`) as session metadata,
-   or leave it in `visualization/` since colour is its only consumer?
+1. **`_hr_odor_associations` (visualization_utils:705)** → **moves to `metric_analysis` as
+   session metadata.** It infers `{HR odor → reward identity}` by voting over HR-success
+   trials; that is a derived property of the session, not a plotting concern, even though
+   colour selection is its only consumer today.
 
-2. **`speed_analysis.parquet`** — `compute_speed_analysis` writes it into each session's
-   `saved_analysis_results/`. When the function moves to `metric_analysis`, does the artifact
-   keep its current path and filename? (Nothing else reads it outside `visualization/`, so
-   renaming is cheap now and expensive later.)
+2. **`speed_analysis.parquet`** → **no question to answer; withdrawn.** The output path is
+   built from the session directory at runtime (`results_dir = ses / "saved_analysis_results"`,
+   `:2154`; `analysis_path = results_dir / "speed_analysis.parquet"`, `:2426`), so moving
+   `compute_speed_analysis` into `metric_analysis` leaves the artifact exactly where it is.
+   Checked for the `__file__`-derived state that broke the Phase 2a `io/paths.py` move — there
+   is none. Clean source-only move.
 
-3. **Generic statistics** — `_kw_mwu_by_group` (Kruskal-Wallis + Mann-Whitney U + Holm) knows
-   only the shape of its input, so by the 0.2 test it is a `hypnose_helpers` candidate rather
-   than a `metric_analysis` one. Put it in `hypnose_helpers.stats`, or keep it local as
-   `metric_analysis/stats.py` until a second repo wants it?
+3. **`_kw_mwu_by_group`** → **`metric_analysis/stats/kw_mwu.py`**, one module per test family
+   rather than a single `stats.py` that accretes. Stays in this repo for now; it is generic
+   enough to graduate to `hypnose_helpers` by the 0.2 test, but that only earns its place once
+   a second repo (eeg, ephys) actually wants it — narrower is cheaper to move later than
+   broader is to unpick.
 
-4. **The 10× outlier rule** (`pred_seq_utils:1052` and `:1249`) drops any value above ten
-   times its group mean before plotting. It changes the numbers, it is duplicated, and
-   `metric_analysis` has no equivalent. Should it become an explicit, named argument on the
-   moved metrics (`exclude_above_mean_multiple=10`), or is it a plotting-only display filter
-   that should stay behind?
+4. **The 10× outlier rule** (`pred_seq_utils:1052`, `:1249`) → **stays in `visualization/` as
+   a display filter.** Establishes a general principle for the rest of 4a:
 
-5. **"Reached at position *p*" — SETTLED 2026-08-05.** See "Q5 resolution" below.
+   > **Metrics are computed raw. Filtering is a display concern.** Filtering at plot time is
+   > always possible; un-filtering a metric that was saved pre-filtered is not.
 
-6. **`_compute_real_time_offset`** (`valve_poke_plots:219`) duplicates `load_all_streams`'s
-   offset logic. Fold it into `io/loaders.py` during 4a while the file is open, or leave it
-   for Phase 5?
+   Two consequences to implement rather than discover:
+   - The plotted values will differ from the saved metric values **by design**. That has to be
+     stated where the filter is applied, or someone comparing a figure to `metrics_*.json`
+     will read it as a bug.
+   - The rule is currently written twice. It becomes **one shared display helper** in the
+     `visualization/` prep module, not two copies.
+
+5. **"Reached at position *p*"** → see "Q5 resolution".
+
+6. **`_compute_real_time_offset` (`valve_poke_plots:219`)** → **delete it; call the loaders'
+   offset.** It duplicates `io/loaders.load_all_streams:145-167` step for step — heartbeat
+   load, `'%Y-%m-%dT%H-%M-%S'` folder parse, UTC→UK conversion,
+   `real_time_ref - start_time` — differing only in a parent-directory fallback and a
+   returned heartbeat span. Today every timestamp on `plot_valve_and_poke_events` is shifted
+   by its own copy while the rest of the package uses the loader's, so drift between them
+   would be silent (the consumer is a figure, which the regression never sees).
+
+   Expose the offset computation from `io/loaders.py` and have the plot call it. **No
+   behaviour change intended** — the two implementations agree today, so this is a
+   deduplication, not a fix. If the extracted version turns out *not* to reproduce the
+   plot's current timestamps, that is a finding to report, not to paper over: it would mean
+   the two have already drifted. The parent-directory fallback and the heartbeat span must
+   be preserved (the plot uses the span to preselect overlapping sessions).
+
+**All six settled. Nothing blocks the 4a moves.**
