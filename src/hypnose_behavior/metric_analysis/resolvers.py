@@ -73,7 +73,8 @@ def over_windows(metric: Callable, trials: pd.DataFrame, window: int, *,
 
     Returns a frame with ``end_index`` (position of the window's last trial) and
     ``value``. ``min_periods`` defaults to ``window``, i.e. no partial windows --
-    matching `pred_seq_utils.performance`, and deliberately *not* the warm-up
+    matching `pred_seq_utils.performance` in both the partial-window rule *and*
+    the emitted positions for any ``step`` -- and deliberately *not* the warm-up
     back-fill that `plot_decision_accuracy_rolling_average` does (that is a
     different metric, not a different granularity; see limit 1 above).
 
@@ -91,10 +92,15 @@ def over_windows(metric: Callable, trials: pd.DataFrame, window: int, *,
     min_periods = window if min_periods is None else min_periods
 
     rows = []
-    for end in range(0, n, step):
+    # Anchor the first window at the first position satisfying `min_periods`, then
+    # step from there. Starting at 0 and discarding short windows instead would
+    # align emitted points to multiples of `step`, dropping and shifting them
+    # whenever `(min_periods - 1) % step != 0`: window=10, step=4 would emit
+    # positions 12, 16 where the rolling this replaces emits 9, 13, 17. Identical
+    # for the default step=1, which is what made it easy to miss.
+    for end in range(max(min_periods, 1) - 1, n, step):
         start = max(0, end + 1 - window)
-        size = end + 1 - start
-        if size < min_periods:
+        if end + 1 - start < min_periods:
             continue
         rows.append({"end_index": end,
                      "value": _value(metric(frame.iloc[start:end + 1], **kwargs))})

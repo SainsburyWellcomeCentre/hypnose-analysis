@@ -176,6 +176,12 @@ def sampled_positions(trial, *, only_true_pokes: bool = False) -> Optional[list[
             }
 
     if only_true_pokes:
+        if not entries:
+            # No positions recorded at all is an *empty* answer, not an
+            # unanswerable one. Only an absent `poke_source` yields None, so a
+            # caller testing `is None` to decide whether to emit the filtered
+            # variant does not also silently skip position-less trials.
+            return []
         if not any(isinstance(v, dict) and v.get("poke_source") is not None
                    for v in entries.values()):
             return None
