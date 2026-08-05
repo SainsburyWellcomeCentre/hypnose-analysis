@@ -28,6 +28,15 @@ from hypnose_behavior.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_rates,
     is_singrew_session,
 )
+# `parse_json_column` is defined in frames.py (it is frame construction, not a
+# metric) and re-exported here so existing importers keep working.
+from hypnose_behavior.metric_analysis.frames import (  # noqa: F401
+    parse_json_column,
+    presented_positions,
+    reached_counts as _reached_counts,
+    sampled_positions,
+    sequence_depth,
+)
 # ================== Loading, Wrapper, and Helper Functions ==================
 
 def load_session_results(subjid, date):
@@ -76,17 +85,6 @@ def load_session_results(subjid, date):
     results["results_dir"] = str(results_dir)
 
     return results
-
-
-def parse_json_column(val):
-    if isinstance(val, str):
-        try:
-            val_fixed = val.replace('""', '"')
-            return json.loads(val_fixed)
-        except Exception:
-            return {} if val.strip().startswith("{") else []
-    return val
-
 
 
 def run_all_metrics(results, save_txt=True, save_json=True):
@@ -1362,35 +1360,7 @@ def abortion_rate_positionX(results):
 
     abortions = aborted[position_col].dropna().value_counts().to_dict()
 
-    reached = {}
-
-    for _, row in aborted.iterrows():
-        last_pos_val = row.get(position_col)
-        if pd.notnull(last_pos_val):
-            try:
-                last_pos = int(last_pos_val)
-            except Exception:
-                continue
-            for pos in range(1, last_pos + 1):
-                reached[pos] = reached.get(pos, 0) + 1
-
-    for _, row in completed.iterrows():
-        ppt = parse_json_column(row.get("position_poke_times", {}))
-        max_pos = None
-        if isinstance(ppt, dict) and ppt:
-            try:
-                max_pos = max(int(k) for k in ppt.keys())
-            except Exception:
-                max_pos = None
-        if max_pos is None and position_col in row:
-            le = row.get(position_col)
-            try:
-                max_pos = int(le) if pd.notnull(le) else None
-            except Exception:
-                max_pos = None
-        if max_pos is not None:
-            for pos in range(1, int(max_pos) + 1):
-                reached[pos] = reached.get(pos, 0) + 1
+    reached = _reached_counts(df)
 
     all_positions = sorted(set(list(abortions.keys()) + list(reached.keys())))
     rates = {}
@@ -1660,36 +1630,7 @@ def fa_abortion_stats(results, return_df=False):
     df_odor = pd.DataFrame(odor_rows)
 
     # Compute reached counts per position (denominator for overall abortion rate)
-    reached = {}
-    # Aborted trials: all positions up to last aborted position count as reached
-    for _, row in aborted_all.iterrows():
-        last_pos_val = row.get(pos_col)
-        if pd.notnull(last_pos_val):
-            try:
-                last_pos = int(last_pos_val)
-            except Exception:
-                continue
-            for pos in range(1, last_pos + 1):
-                reached[pos] = reached.get(pos, 0) + 1
-
-    # Completed trials: use position_poke_times to infer reached positions; fallback to pos_col
-    for _, row in completed.iterrows():
-        ppt = parse_json_column(row.get("position_poke_times", {}))
-        max_pos = None
-        if isinstance(ppt, dict) and ppt:
-            try:
-                max_pos = max(int(k) for k in ppt.keys())
-            except Exception:
-                max_pos = None
-        if max_pos is None and pos_col in row:
-            le = row.get(pos_col)
-            try:
-                max_pos = int(le) if pd.notnull(le) else None
-            except Exception:
-                max_pos = None
-        if max_pos is not None:
-            for pos in range(1, int(max_pos) + 1):
-                reached[pos] = reached.get(pos, 0) + 1
+    reached = _reached_counts(df)
 
     # Per-position table (add overall abortion rate using reached counts)
     pos_rows = []
