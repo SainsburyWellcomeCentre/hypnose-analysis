@@ -219,8 +219,10 @@ per-position rates, and they do not agree on sessions with variable sequence len
 - **C — `plot_false_alarm_rate_by_position:4633`:** any trial contributes to exactly the
   positions listed in its `presentations` JSON.
 
-A and B coincide only when every completed trial has the same sequence length. This must
-be settled before any per-position rate is deduplicated.
+A and B coincide only when every completed trial has the same sequence length.
+**Resolved 2026-08-05 — see "Q5 resolution" below.** Measured on all 9 fixture sessions:
+none of the three is correct as written, and the disagreements trace to two data-writing
+bugs rather than to a genuine choice of definition.
 
 **3. `fa_abortion_stats` returns formatted strings, so its consumer parses them back.**
 `plot_abortion_and_fa_rates:2196-2325` recovers numbers with
@@ -640,6 +642,126 @@ metrics or part of the plots (finding 13).
 
 ---
 
+## Q5 resolution — "reached at position *p*" *(settled 2026-08-05, evidence-led)*
+
+### The decision
+
+**Two helpers, not one. "How far the sequence got" is never filtered; "was this position
+sampled" is filterable. Default is unfiltered everywhere.**
+
+| helper | returns | filterable | consumers |
+|---|---|---|---|
+| `sequence_depth(trial)` / `presented_positions(trial)` | contiguous `1..max(presented position)`, source = `presentations` | **no** | every per-position *denominator*: `abortion_rate_positionX`, `fa_abortion_stats`, position completion rate, FA-rate-by-position |
+| `sampled_positions(trial, only_true_pokes=False)` | the positions actually recorded; may be gappy | **yes** | every *sampling* metric: poke duration by position/odor, `avg_sampling_time_*` |
+
+`only_true_pokes=True` keeps only entries with `poke_source == "poke"`.
+
+**Backward compatibility (required).** `poke_source` does not exist yet and will never exist
+on already-saved sessions. When the field is **absent**, the `only_true_pokes` variants are
+**not populated** — the metric key is omitted rather than silently returning the unfiltered
+value. Treating "no marker" as "everything is a real poke" would make old and new sessions
+look comparable when they are not.
+
+### Why these two must be separate — structural, not a matter of volume
+
+A single `reached_positions(trial, only_true_pokes=True)` returning a filtered set produces
+**physically impossible sets**. Filtering a non-`poke` entry out of the middle of a trial
+credits it with reaching position 5 but not position 3 — which cannot happen, and makes any
+per-position denominator built from it non-monotonic. Illustration of the shape:
+
+```
+sub-048 gid=13   non-"poke" entry at position 3 of max 5   keys=[1,2,3,4,5]
+                 -> filtering leaves [1, 2, 4, 5]
+```
+
+A gap is meaningless for *reached* and perfectly natural for *sampled* ("no sample at
+position 3 on this trial"). This is the same distinction as `ses` vs `session_index` in
+Phase 2b — selection versus positioning — and it fails the same silent way if merged.
+
+The argument does not depend on how many such entries exist: it only requires that interior
+ones occur at all, which they demonstrably do. Both grace entries and 0 ms positions can sit
+mid-sequence.
+
+**On prevalence — do not use the audit scan as an estimate.** A scan keyed on
+`poke_first_in == poke_odor_start` and `poke_time_ms < PRE_ODOR_GRACE_MS` returns 112
+last-position and 144 interior entries across the fixtures, but that is an **upper bound
+that mostly counts genuine short pokes** — animals really do poke for under 20 ms. The real
+figure comes from a direct measurement (re-running with the grace period set to 0):
+**roughly 2-10 odors per session, varying by animal.** Not negligible, but nowhere near the
+scan's numbers. The scan establishes that interior cases exist; it does not measure them.
+
+### Why the default is unfiltered
+
+A poke ending ~10 ms before the valve opens, or an animal dwelling at the cue port, has
+plausibly still received the odor information. Discarding those by default is the stronger
+assumption, not the safer one. Keeping them by default and offering `only_true_pokes` as an
+opt-in leaves the judgement with the analyst.
+
+At ~2-10 odors per session the filter refines the sampling numbers rather than transforming
+them — worth having and worth being able to check, but not a headline correction.
+
+### Why contiguous fill, and why it must not become plain membership
+
+`presentations` is the source (the richest table), but the set is `1..max`, **not** bare
+membership. Until the Phase 6/7 fix lands, the fill is doing real work:
+
+> sub-057 gid=108 — `position_poke_times` keys `[2, 3]`, `num_odors=2`. Position 1 *was*
+> presented; its 0 ms poke was never written, and `num_odors` dropped it too. `1..max` gives
+> `{1,2,3}` — the truth. Plain membership gives `{2,3}` and loses a real position.
+
+So today the fill recovers dropped positions, and plain membership would silently
+under-count. Once 0 ms positions are written, `1..max` and membership coincide and the
+distinction disappears — but the fill is the safe form either way.
+
+### The three discrepancy patterns, with trial IDs
+
+Measured per trial on all 9 fixture sessions (parquet, pyarrow 23.0.1 — the earlier CSV-fallback
+run gave identical session totals, so the loader path does not affect any of this).
+**15 trials disagree, in 3 of 9 sessions.** Clean: sub-061, sub-056, sub-046, sub-053, sub-040 ×2.
+
+| pattern | session | `global_trial_id` | cause |
+|---|---|---|---|
+| 1 — grace entry on an aborted trial | sub-057 | 209, 214, 235, 327 | `presentations`/`position_poke_times` carry the grace position; `last_odor_position` does not |
+| | sub-059 | 48, 203 | |
+| | sub-048 | 122, 145, 162 | |
+| 2 — 0 ms poke never written | sub-057 | 108, 124, 197, 226, 277 | position missing from `position_poke_times`, `presentations` **and** `num_odors` |
+| 3 — null `last_odor_position` | sub-057 | 332 | aborted trial contributes nothing under the `last_odor_position` walk |
+
+### The mechanism (confirmed in the code, not inferred)
+
+`classification_utils.py`:
+
+- `PRE_ODOR_GRACE_MS = 25.0` — `:47`
+- `_grace_overlap_ms(last_poke_end, window_start, window_end)` — `:79`. Fires **only** when
+  `last_poke_end <= window_start`, i.e. the poke ended *before* the odor window opened.
+- `:1281-1293` — when no poke occurs during the odor window at all, a synthetic
+  `position_poke_times[position]` entry is written with `poke_time_ms = grace_ms`,
+  `poke_odor_start = poke_first_in = odor_start`. Those two timestamps are the *valve*
+  opening, assigned by construction — that is the tell, and it is not decisive on its own.
+- `:2986` — `last_odor_pos = presentations_valid[last_idx]["position"]`, taken from the
+  abort-detection logic's chosen last event, which the grace path never updates.
+
+Hence a position can appear in the poke/presentation record while `last_odor_position`
+correctly reports an earlier one. Worked example: sub-048 gid 122, `odor_sequence` D,F —
+D poked 57.6 ms, F "poked" 9.832 ms, `last_odor_position=1`. The F poke ended before the F
+valve opened; the entry is a grace artifact.
+
+### What 4a does, and what it defers
+
+**4a — no value change, regression stays GREEN:**
+
+Consolidate the three existing implementations into the two helpers above, keeping today's
+behaviour exactly, and point all four consumers at them. Definition **B is deleted in the
+process** — `plot_position_completion_rate` stops carrying its own `max(num_odors)` walk, so
+that defect is fixed for free rather than needing a separate patch. Because the plotters'
+denominators are not in the regression fingerprint, this changes figures but no metric values.
+
+**Deferred to Phase 6/7** — see the TODO in `restructure_2_plan.md` §7b: write the 0 ms
+positions, add `poke_source`. Only then is `only_true_pokes` computable. That change alters
+`trial_data`, so it takes a deliberate fixture regeneration at that point — not in 4a.
+
+---
+
 ## Tally
 
 | file | lines | functions carrying metric math | of which DEDUP / VARIANT / NEW |
@@ -710,11 +832,7 @@ redoing them.
    moved metrics (`exclude_above_mean_multiple=10`), or is it a plotting-only display filter
    that should stay behind?
 
-5. **Which "reached at position *p*"** (finding 2) becomes canonical — the per-trial
-   `position_poke_times` walk (A, current `metrics_utils`), the session-wide `max(num_odors)`
-   (B), or the `presentations` membership test (C)? Every per-position rate depends on it,
-   and A and B disagree whenever a session mixes sequence lengths. This is the one decision
-   in 4a that can change existing metric values, so it needs regenerated fixtures if A moves.
+5. **"Reached at position *p*" — SETTLED 2026-08-05.** See "Q5 resolution" below.
 
 6. **`_compute_real_time_offset`** (`valve_poke_plots:219`) duplicates `load_all_streams`'s
    offset logic. Fold it into `io/loaders.py` during 4a while the file is open, or leave it

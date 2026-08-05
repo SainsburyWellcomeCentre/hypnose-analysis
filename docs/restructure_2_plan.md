@@ -129,7 +129,7 @@ Update this table at the end of each phase, in the same commit as the work.
 | 2b canonical session discovery | **done** 2026-08-04 | `312854d`..`2fbd5f5` (+ helpers `8dadcf8`, somnotate `80afbda`) | `hypnose_helpers.io.layout` owns the walking; each repo binds its own roots. All 17 session lookups and ~30 subject globs repointed. **`session_index` ships but is deliberately unused by the plotters** — see "State at the end of 2b". regression / verify_scripts / check_imports all green |
 | 2c figure provenance | **done** 2026-08-04 | `7d117b8` (+ helpers `059c652`, somnotate `892e56c`) | `hypnose_helpers.provenance` + `viz/metadata`. Every `save_figure` PDF carries commit/version/caller/params; `read_figure_metadata` reads it back **without pypdf**. Phase 7a can call `provenance()` directly. regression / verify_scripts / check_imports all green |
 | 3 re-baseline QC | **done** — superseded by Step 0 | `481110b` | Step 0 did it first: 9 sessions re-baselined 2026-08-03. Nothing further to do; do NOT re-run `--generate` |
-| 4a strip metrics from visualization | **audit done** 2026-08-05; moves not started | `58387ce`..`a25ba1c` | Audit written to `docs/metric_audit.md` — all 7 files, ~220 functions. **32 sites of metric math in 4 files**, resolving to **24 metrics with no canonical version** (checklist in the audit is the "lose no metric" gate), 8 exact duplicates, 9 granularity variants. Biggest single item: `compute_speed_analysis` (591 lines, 7 movement metrics, no plotting) moves wholesale. `modelling/switchpoint/plots.py` needs nothing; `movement_analysis/sing_rew_movement.py` needs only dedup — both are files the original count missed. **Two decisions block the moves:** (1) the **metric signature** — `f(trials)` + `by_group`/`over_windows` resolvers instead of per-granularity variants; it also gates 4b's registry (see 4b), and answering it late means redoing the moves; (2) **Q5 "reached at position p"** — the only item that can change existing metric values, so it may need regenerated fixtures. Plus 6 local judgement calls at the end of the audit. Docs only: regression / check_imports green, no source touched |
+| 4a strip metrics from visualization | **audit done** 2026-08-05; moves not started | `58387ce`..`a25ba1c` | Audit written to `docs/metric_audit.md` — all 7 files, ~220 functions. **32 sites of metric math in 4 files**, resolving to **24 metrics with no canonical version** (checklist in the audit is the "lose no metric" gate), 8 exact duplicates, 9 granularity variants. Biggest single item: `compute_speed_analysis` (591 lines, 7 movement metrics, no plotting) moves wholesale. `modelling/switchpoint/plots.py` needs nothing; `movement_analysis/sing_rew_movement.py` needs only dedup — both are files the original count missed. **Q5 ("reached at position p") settled 2026-08-05**, evidence-led on all 9 fixture sessions: two helpers (`sequence_depth` never filtered, `sampled_positions(only_true_pokes=)` filterable), unfiltered by default, definition B deleted. 4a consolidates onto them with **no value change**; the `only_true_pokes` filter is unblocked by the §7b TODO (write 0 ms positions, add `poke_source`). **Still blocking: the metric signature** — `f(trials)` + `by_group`/`over_windows` resolvers instead of per-granularity variants; it also gates 4b's registry (see 4b), and answering it late means redoing the moves. Plus 5 local judgement calls at the end of the audit. Docs only: regression / check_imports green, no source touched |
 | 4b modularise metric_analysis | not started | | |
 | 5 visualization primitives | not started | | after 4a only |
 | 6 trial classification dedup | not started | | unit tests first |
@@ -854,6 +854,34 @@ implementation; both want commit + dirty flag + version.
 - **Flatten the JSON-blob columns** (`position_valve_times`, `position_poke_times`,
   `presentations`) into a tidy long-format side-table `position_data` — one row per
   `trial_id × position` with odor / valve_start / valve_end / poke_time_ms.
+
+- **TODO, from the Phase 4a audit (Q5) — record every presented position, and mark how it
+  was derived.** Two data-writing bugs currently make the position record incomplete and
+  ambiguous; both surface as per-position metrics that cannot be defined consistently
+  (`docs/metric_audit.md`, "Q5 resolution").
+
+  1. **Write the 0 ms / no-poke positions.** A position whose poke registers as ~0 ms is
+     currently omitted from `position_poke_times`, `presentations` *and* `num_odors`, even
+     though the odor was presented and the sequence advanced through it. Write the position
+     with `poke_time_ms = 0` and null `poke_odor_start` / `poke_odor_end`. Until this lands,
+     "reached" has to be reconstructed as contiguous `1..max`, which is why the audit
+     mandates that form.
+  2. **Add `poke_source`** to every position entry: `"poke"` for a genuine poke inside the
+     odor window, `"grace"` for one synthesised by the `PRE_ODOR_GRACE_MS` path
+     (`classification_utils:1281-1293`, where the poke ended *before* the valve opened),
+     `"none"` for a 0 ms / no-poke position. Today a grace entry is indistinguishable from a
+     real short poke except by the fragile tell `poke_first_in == poke_odor_start`, and
+     animals genuinely poke for under 20 ms — so the marker is the only reliable way to
+     separate them. Direct measurement (grace period set to 0) puts grace-derived entries at
+     ~2-10 odors per session.
+
+  This unblocks `only_true_pokes` on the sampling metrics. Consumers must treat an **absent**
+  `poke_source` as "unknown" and omit the filtered variant, never as "all real pokes" — older
+  sessions will never carry the field. Alters `trial_data` ⇒ deliberate fixture regeneration,
+  with the diff confirming only the intended columns moved.
+
+  *Coordinate with Phase 6:* the writing happens in `classify_trials`, so it lands naturally
+  with the trial-loop cleanup; `position_data` above is where `poke_source` becomes a column.
 
 These two are complementary, not alternatives: the dataclass governs the flat per-trial table,
 the side-table replaces the per-position blobs that don't belong in it. Queryable, type-safe,
