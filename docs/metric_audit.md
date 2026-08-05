@@ -67,6 +67,69 @@ exact divergence. Preserve it, or change it deliberately and say so.
 
 ---
 
+## Where each verdict lands *(decided 2026-08-05)*
+
+`visualization/` should end up containing **only plotting**. That is a stronger target than
+"no metric math", and it gives three of the six verdicts a destination of their own:
+
+| verdict | lands in |
+|---|---|
+| `PLOT` | the plot file |
+| `FETCH` | **`visualization/io/metric_loader.py`** (new) — session discovery, `metrics_*.json` loading and protocol lookup come out of the plot files entirely |
+| `PREP` | a **shared** module under `visualization/` whenever more than one file needs it; stays local only when genuinely single-use |
+| `DISPLAY-AGG` | **one shared helper per pattern**, in the Phase 5 primitives module — the cross-session mean±SEM is currently written out longhand at least six times in `visualization_utils.py` alone |
+| `DERIVE` | case by case; noted per row |
+| `METRIC` / `MIXED` math | `metric_analysis/` |
+
+The `FETCH` and `DISPLAY-AGG` moves are strictly Phase 5 work (they are not metric math),
+but they are recorded here because this audit is what the Phase 5 chat will read.
+
+## Should `metric_analysis` grow a general time-resolved helper?
+
+**Yes — as a signature change plus two small composable resolvers, not as a dispatcher.**
+
+The `VARIANT` class exists for one structural reason: every canonical metric is written as
+`f(results) -> one session-level number`, so nothing can reuse it at another granularity and
+each plotter re-derives the formula by hand. Give every metric a pure core that takes a
+**trial frame** instead of a `results` dict:
+
+```python
+def decision_accuracy(trials) -> float:          # pure: no I/O, no printing
+    ...
+def decision_accuracy_session(results):          # thin wrapper, keeps run_all_metrics working
+    return decision_accuracy(results["trial_data"])
+```
+
+and every granularity in this audit becomes free, with no new metric definitions:
+
+```python
+by_group(decision_accuracy, trials, "last_odor")            # per odor
+by_group(decision_accuracy, trials, "date")                 # per day
+over_windows(decision_accuracy, trials, window=30, step=1)  # rolling
+```
+
+That collapses most `VARIANT` rows below, and it is the same uniform signature 4b's metric
+registry needs anyway — so 4a should refactor *towards* it rather than adding parallel
+per-granularity functions.
+
+**Three limits, all real, all load-bearing:**
+
+1. **It cannot absorb a variant whose *denominator* changes with granularity.** The rolling
+   reward fraction divides by the window size, not by rewarded+unrewarded, so
+   `over_windows(decision_accuracy, …)` would draw a visibly different curve. It stays a
+   separately named metric. Same for the per-position rates, whose denominator is "reached"
+   (finding 2), not the group size.
+2. **The position/odor metrics need the tidy table first.** `avg_sampling_time_*` and
+   `abortion_rate_positionX` reach into JSON blobs, so they only become `by_group`-able once
+   `position_poke_times` / `presentations` are expanded into long format — finding 5, which
+   is also Phase 7b's `position_data` side-table. Sequence it: extractor → resolvers.
+3. **Do not build a name-dispatched `get_metric(name, granularity=…)`.** That is the same
+   failure mode the plan already rejects for `plot_metric(kind, ses)`: it accumulates kwargs
+   for every metric it supports and becomes a god-function. A uniform signature plus
+   `by_group` / `over_windows` gives the same reach with none of that.
+
+---
+
 ## Canonical catalog — what `metric_analysis` already provides
 
 `metric_analysis/metrics_utils.py` — 28 public metrics, all `f(results) -> …`, all
