@@ -128,9 +128,10 @@ per-granularity functions.
    for every metric it supports and becomes a god-function. A uniform signature plus
    `by_group` / `over_windows` gives the same reach with none of that.
 
-> **Not yet agreed.** The "yes" above is the auditor's recommendation, not a decision — it
-> changes the signature of every canonical metric and is a precondition for 4b's registry.
-> See "Decision needing sign-off" under Open questions before acting on it.
+> **Settled 2026-08-05 — yes, as part of 4a.** The shape below is right but not uniform:
+> the 28 canonical metrics fall into four tiers, and one of them needs a rule that is easy
+> to get wrong. See **"D0 resolution"** for the tiering, the numerator/denominator rule, and
+> what stays unchanged.
 
 ---
 
@@ -642,6 +643,118 @@ metrics or part of the plots (finding 13).
 
 ---
 
+## D0 resolution — the metric signature *(settled 2026-08-05)*
+
+**Decision: every metric takes a frame and returns a value, with a thin `f(results)` wrapper
+retained. Done as part of 4a, not deferred to 4b.**
+
+```python
+def decision_accuracy(trials) -> float:          # pure core: no I/O, no printing
+    ...
+def decision_accuracy_session(results):          # wrapper: run_all_metrics keeps working
+    return decision_accuracy(results["trial_data"])
+```
+
+**Unchanged by this, deliberately:** `run_all_metrics`, the metrics `*.json`, every saved
+value, and therefore the regression fingerprint. The change is additive — it exposes the
+core, it does not alter what the session-level call returns. 4a stays GREEN.
+
+**Why in 4a rather than 4b:** doing it after the moves means editing all 24 incoming metrics
+twice, and the second pass has no plot-level guard — the regression fingerprints `trial_data`
+and the metrics dict, never a figure. It is also the precondition for 4b's registry: a
+registry over uniform `f(frame) -> value` functions works; one over functions that each take
+a `results` dict and print to stdout does not.
+
+### The signature is not uniform — four tiers
+
+| tier | n | metrics | shape |
+|---|---|---|---|
+| **1 — trial-reducible** | 13 | `decision_accuracy`, `global_choice_accuracy`, `decision_accuracy_by_odor`, `premature_response_rate`, `response_contingent_FA_rate`, `global_FA_rate`, `sequence_completion_rate`, `hidden_rule_performance`, `hidden_rule_detection_rate`, `choice_timeout_rate`, `avg_response_time`, `FA_avg_response_times`, `response_rate` | `f(trials)`; every resolver works |
+| **2 — grouping key inside a JSON blob** | 8 | `odorx_abortion_rate`, `hidden_rule_counts_by_odor`, `avg_sampling_time_odor_x`, `avg_sampling_time_completed_sequence`, `avg_sampling_time_aborted_sequence`, `abortion_rate_positionX`, `manual_vs_auto_stop_preference`, `fa_abortion_stats` | `f(trials)` + `f(position_data)` for per-position/odor grouping |
+| **3 — normalised by a whole-frame quantity** | 3 | `FA_odor_bias`, `FA_position_bias`, `odor_initiation_bias` | `f(trials, *, reference=None)` |
+| **4 — reads tables other than `trial_data`** | 4 | `avg_sampling_time_initiation_abortion`, `non_initiated_FA_rate`, `non_initiation_odor_bias`, `fa_port_ratio_by_odor` | being removed — see below |
+
+### Tier 1 — store contributions, never a per-trial "value"
+
+**The rule that is easy to get wrong.** A rate metric is not a per-trial quantity. Store the
+**numerator and denominator contributions separately** and let any window or group reduce
+them:
+
+```python
+num = (rtc == "rewarded")                       # contributes to the numerator
+den = rtc.isin(["rewarded", "unrewarded"])      # contributes to the denominator
+value_over(sl) = num[sl].sum() / den[sl].sum()
+```
+
+Storing one number per trial and taking a rolling mean gives `rewarded / window_size` — a
+denominator silently containing timeouts and aborts. **That is finding 12**: it is exactly
+why `pred_seq.performance` and `plot_decision_accuracy_rolling_average` disagree today. Mean-type
+metrics store `(value, included)` and reduce to `sum/count`.
+
+Two cumulative sums make any window O(1), so this is also the efficient form.
+
+### Tier 2 — derive `position_data` at load time
+
+The value is computable per trial today; what is impossible is `by_group(..., "position")`,
+because one trial row holds many positions inside a dict and there is no column to group on.
+
+**`position_data` is built by the loader, not written by the classifier alone.**
+`load_session_results` emits the long table either by reading the flat one (new sessions) or
+by expanding the blobs (legacy sessions), so metrics only ever see one shape and carry **no
+backward-compatibility branch**. Skipping legacy sessions instead would disable every
+per-position metric on every session already analysed — which is all of them.
+
+This costs nothing extra: it is the same parsing finding 5 already flags as duplicated four
+times in `visualization/` plus three more inline in `metrics_utils`. Writing it once in `io`
+is work the audit already requires; making it the loader's job means the metrics never see a
+blob. Pairs directly with Phase 7b's `position_data` side-table.
+
+### Tier 3 — an optional `reference`, and the plotting option it buys
+
+`FA_odor_bias` is a ratio to the animal's own overall rate:
+`bias[odor] = (n_fa@odor / n_ab@odor) / (total_fa / total_ab)`. The divisor is computed over
+whatever frame it is handed, so on a rolling call the baseline silently becomes *that
+window's* rate. Both readings are legitimate, so make it explicit:
+
+```python
+def FA_odor_bias(trials, *, reference=None):
+    ref = reference if reference is not None else _global_rate(trials)
+```
+
+| call | result |
+|---|---|
+| session, no `reference` | computed from the session — **identical to today** |
+| rolling, no `reference` | each window normalises by itself (local baseline) |
+| rolling, `reference=session_rate` | fixed session baseline |
+
+**This gives the plotters a `baseline="session" | "window"` option for free.** The plotter
+computes the session reference once (a fetch), or passes nothing — it never touches the
+formula, so no metric math returns to `visualization/`.
+
+### Tier 4 — removed, not ported *(output change — needs fixture regeneration)*
+
+Decision 2026-08-05: **drop non-initiated trials from the metric set.** Integrating
+non-initiated trials into `trial_data` properly is its own piece of work and is out of scope
+for this restructure — noted, not scheduled.
+
+Consequences, all deliberate:
+
+- `metrics['non_initiated_FA_rate']` — removed
+- `metrics['fa_port_ratio_by_odor']['with_non_initiated']` — removed; `run_all_metrics`
+  currently stores both variants, and only `without_non_initiated` survives. **This makes
+  `fa_port_ratio_by_odor` a clean tier-1 metric on `trial_data`** — which matters, because it
+  is the canonical target for finding 1 (the FA port ratio is written 8 times).
+- `avg_sampling_time_initiation_abortion`, `non_initiation_odor_bias` — removed
+- `plot_abortion_and_fa_rates` loses its "Non-Initiated" position category;
+  `plot_fa_ratio_a_over_sessions` and `get_fa_ratio_a_stats` lose `include_noninitiated`
+- `load_session_results` can stop loading the three `non_initiated_*` tables
+
+**This is the only part of 4a that changes saved metric values.** It takes a deliberate
+`--generate` in the same commit, with the metric-key diff confirming only those keys left —
+and confirmation before running it.
+
+---
+
 ## Q5 resolution — "reached at position *p*" *(settled 2026-08-05, evidence-led)*
 
 ### The decision
@@ -789,25 +902,10 @@ missed — `modelling/switchpoint/plots.py` is already exemplary, and
 
 ## Open questions for Joschua
 
-### Decision needing sign-off — the metric signature *(blast radius: everything)*
+### Settled decisions
 
-**"Should metrics take a trial frame, with `by_group` / `over_windows` resolvers?" — argued
-"yes" in the section above, but that was the auditor's call, not a settled decision. It needs
-confirming before 4a moves any code**, because it is the one choice here that changes
-`metric_analysis`'s public shape rather than just adding to it:
-
-- It rewrites the signature of all 28 canonical metrics (`f(results)` → `f(trials)`, plus a
-  thin `f(results)` wrapper so `run_all_metrics` and the saved JSON are untouched).
-- It decides whether ~9 of the `VARIANT` rows below collapse into resolver calls or become
-  ~9 new named metrics — i.e. whether `metric_analysis` ends 4a with ~32 or ~41 functions.
-- It is a **precondition for 4b's registry.** The plan asks 4b to add "a small registry
-  (list, or a `@metric` decorator) so `run_all_metrics` discovers them". A registry over
-  functions with a uniform `f(trials) -> value` signature works; a registry over functions
-  that each take a whole `results` dict and print to stdout does not.
-
-If the answer is no, that is fine — but then every `VARIANT` row becomes a separate named
-metric and the checklist grows from 24 to ~33. Deciding it *after* the moves start means
-redoing them.
+- **D0 — the metric signature.** Settled 2026-08-05: yes, as part of 4a. See "D0 resolution".
+- **Q5 — "reached at position *p*".** Settled 2026-08-05, evidence-led. See "Q5 resolution".
 
 ### Local judgement calls
 

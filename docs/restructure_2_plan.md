@@ -129,7 +129,7 @@ Update this table at the end of each phase, in the same commit as the work.
 | 2b canonical session discovery | **done** 2026-08-04 | `312854d`..`2fbd5f5` (+ helpers `8dadcf8`, somnotate `80afbda`) | `hypnose_helpers.io.layout` owns the walking; each repo binds its own roots. All 17 session lookups and ~30 subject globs repointed. **`session_index` ships but is deliberately unused by the plotters** — see "State at the end of 2b". regression / verify_scripts / check_imports all green |
 | 2c figure provenance | **done** 2026-08-04 | `7d117b8` (+ helpers `059c652`, somnotate `892e56c`) | `hypnose_helpers.provenance` + `viz/metadata`. Every `save_figure` PDF carries commit/version/caller/params; `read_figure_metadata` reads it back **without pypdf**. Phase 7a can call `provenance()` directly. regression / verify_scripts / check_imports all green |
 | 3 re-baseline QC | **done** — superseded by Step 0 | `481110b` | Step 0 did it first: 9 sessions re-baselined 2026-08-03. Nothing further to do; do NOT re-run `--generate` |
-| 4a strip metrics from visualization | **audit done** 2026-08-05; moves not started | `58387ce`..`a25ba1c` | Audit written to `docs/metric_audit.md` — all 7 files, ~220 functions. **32 sites of metric math in 4 files**, resolving to **24 metrics with no canonical version** (checklist in the audit is the "lose no metric" gate), 8 exact duplicates, 9 granularity variants. Biggest single item: `compute_speed_analysis` (591 lines, 7 movement metrics, no plotting) moves wholesale. `modelling/switchpoint/plots.py` needs nothing; `movement_analysis/sing_rew_movement.py` needs only dedup — both are files the original count missed. **Q5 ("reached at position p") settled 2026-08-05**, evidence-led on all 9 fixture sessions: two helpers (`sequence_depth` never filtered, `sampled_positions(only_true_pokes=)` filterable), unfiltered by default, definition B deleted. 4a consolidates onto them with **no value change**; the `only_true_pokes` filter is unblocked by the §7b TODO (write 0 ms positions, add `poke_source`). **Still blocking: the metric signature** — `f(trials)` + `by_group`/`over_windows` resolvers instead of per-granularity variants; it also gates 4b's registry (see 4b), and answering it late means redoing the moves. Plus 5 local judgement calls at the end of the audit. Docs only: regression / check_imports green, no source touched |
+| 4a strip metrics from visualization | **audit done** 2026-08-05; moves not started | `58387ce`..`a25ba1c` | Audit written to `docs/metric_audit.md` — all 7 files, ~220 functions. **32 sites of metric math in 4 files**, resolving to **24 metrics with no canonical version** (checklist in the audit is the "lose no metric" gate), 8 exact duplicates, 9 granularity variants. Biggest single item: `compute_speed_analysis` (591 lines, 7 movement metrics, no plotting) moves wholesale. `modelling/switchpoint/plots.py` needs nothing; `movement_analysis/sing_rew_movement.py` needs only dedup — both are files the original count missed. **Both blocking decisions settled 2026-08-05** — see "D0 resolution" and "Q5 resolution" in the audit. **D0 (metric signature):** every metric gets a pure `f(frame) -> value` core + thin `f(results)` wrapper, in 4a; four tiers, not one shape; tier-1 metrics store numerator/denominator contributions separately (storing a single per-trial value reproduces finding 12); `position_data` is derived at **load** time so legacy sessions need no compat branch; tier-3 bias metrics take an optional `reference`, which gives plotters a `baseline="session"|"window"` option for free. **Q5 (reached@p):** two helpers — `sequence_depth` never filtered, `sampled_positions(only_true_pokes=)` filterable — unfiltered by default, definition B deleted; unblocked for filtering by the §7b TODO. **One deliberate output change:** non-initiated trials leave the metric set (`non_initiated_FA_rate`, `fa_port_ratio_by_odor.with_non_initiated`, `avg_sampling_time_initiation_abortion`, `non_initiation_odor_bias`), requiring `--generate` in that commit — confirm first. Everything else in 4a is value-neutral. Plus 5 local judgement calls at the end of the audit. Docs only: regression / check_imports green, no source touched |
 | 4b modularise metric_analysis | not started | | |
 | 5 visualization primitives | not started | | after 4a only |
 | 6 trial classification dedup | not started | | unit tests first |
@@ -668,15 +668,15 @@ Split so `metric_analysis/` mirrors `trial_classification/`:
   a small **registry** (list, or a `@metric` decorator) so `run_all_metrics` discovers them —
   then adding a metric is a one-file change.
 
-**The registry has a precondition, raised by the 4a audit.** All 28 canonical metrics are
-currently `f(results) -> one session-level number`, and they print to stdout. A registry over
-*that* shape does not work, and it is also why `visualization/` re-derives the same formulas
-at other granularities (the audit's `VARIANT` class — 9 sites). The audit recommends giving
-every metric a pure `f(trials) -> value` core plus a thin `f(results)` wrapper, with
-`by_group(...)` / `over_windows(...)` resolvers covering per-odor / per-day / rolling use.
-**This is a decision, not a detail — see "Decision needing sign-off" in
-`docs/metric_audit.md`.** Answering it "no" is fine but grows the metric count from ~24 new
-metrics to ~33; answering it after the 4a moves start means redoing them.
+**The registry's precondition is settled — 4a delivers it.** All 28 canonical metrics were
+`f(results) -> one session-level number` printing to stdout; a registry over that shape does
+not work, and it was also why `visualization/` re-derived the same formulas at other
+granularities (the audit's `VARIANT` class). **Decision 2026-08-05: every metric gets a pure
+`f(frame) -> value` core plus a thin `f(results)` wrapper, done in 4a** — see "D0 resolution"
+in `docs/metric_audit.md`. The registry can therefore assume that shape, with one
+qualification: the signature is **not uniform**, it has four tiers (trial-reducible;
+`position_data`-grouped; `reference`-normalised; and the non-initiated set, which is being
+removed). The registry needs to declare which frame each metric consumes.
 
 **Risk:** med for 4a (map every recompute to a canonical metric), low for 4b (pure moves →
 metric values unchanged, regression GREEN). **Done:** no metric math in `visualization/`;
