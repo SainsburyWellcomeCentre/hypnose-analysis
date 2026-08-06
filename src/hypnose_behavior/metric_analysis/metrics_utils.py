@@ -2082,6 +2082,43 @@ def _fa_filter_mask(frame, fa_types=None):
     return lower.isin({str(s).strip().lower() for s in fa_types})
 
 
+def fa_port_counts(frame):
+    """`(n_port_a, n_port_b)` over `fa_port` -- 1 is port A, 2 is port B.
+
+    The audit's finding 1: this two-line count was written **eight** times, in
+    `fa_port_ratio_by_odor` plus seven independent recomputes across
+    `visualization_utils.py`. They differed only in how the frame was sliced
+    beforehand and which ratio was taken afterwards, so the counter takes an
+    already-sliced frame and the slicing stays with the caller (or goes through
+    `by_group`).
+    """
+    if frame is None or len(frame) == 0 or "fa_port" not in frame.columns:
+        return 0, 0
+    port = frame["fa_port"]
+    return int((port == 1).sum()), int((port == 2).sum())
+
+
+def fa_port_ratio(n_a, n_b):
+    """Signed port bias `(A - B) / (A + B)`; NaN when neither port fired.
+
+    0 is no preference, positive is a bias towards port A.
+    """
+    total = n_a + n_b
+    return (n_a - n_b) / total if total > 0 else np.nan
+
+
+def fa_port_share_a(n_a, n_b):
+    """Port A's share of false alarms, on 0..1 rather than -1..1.
+
+    Derived from `fa_port_ratio` rather than recounted, per VARIANT resolutions 1
+    and 2: `A/(A+B) == (r+1)/2` exactly, and recounting from `fa_port` would
+    reintroduce one of the duplicate implementations finding 1 exists to remove.
+    (The rescale can land a ULP away from a direct `A/(A+B)`; these values are
+    plotted, never fingerprinted.)
+    """
+    return (fa_port_ratio(n_a, n_b) + 1.0) / 2.0
+
+
 def hidden_rule_mask(trials):
     """Boolean mask of hidden-rule trials -- the grouping key for the HR split.
 

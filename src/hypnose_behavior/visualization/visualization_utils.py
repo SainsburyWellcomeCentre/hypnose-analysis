@@ -15,6 +15,9 @@ from matplotlib.ticker import MaxNLocator
 from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
 from hypnose_behavior.metric_analysis.metrics_utils import (
+    fa_port_counts,
+    fa_port_ratio,
+    fa_port_share_a,
     load_session_results,
     run_all_metrics,
     parse_json_column,
@@ -2266,10 +2269,9 @@ def plot_abortion_and_fa_rates(
                 if not fa_all.empty and {"fa_port", "last_odor_name"}.issubset(fa_all.columns):
                     for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
                         fa_odor = fa_all[fa_all["last_odor_name"] == odor]
-                        n_a = (fa_odor["fa_port"] == 1).sum()
-                        n_b = (fa_odor["fa_port"] == 2).sum()
+                        n_a, n_b = fa_port_counts(fa_odor)
                         n_total = n_a + n_b
-                        ratio_a = (n_a - n_b) / n_total if n_total > 0 else np.nan
+                        ratio_a = fa_port_ratio(n_a, n_b)
                         fa_port_rows.append({
                             "date": int(date_str),
                             "odor": str(odor),
@@ -2826,11 +2828,10 @@ def plot_fa_ratio_a_over_sessions(
             try:
                 for odor in sorted(fa_all['last_odor_name'].dropna().unique()):
                     fa_odor = fa_all[fa_all['last_odor_name'] == odor]
-                    n_a = (fa_odor['fa_port'] == 1).sum()
-                    n_b = (fa_odor['fa_port'] == 2).sum()
+                    n_a, n_b = fa_port_counts(fa_odor)
                     n_total = n_a + n_b
-                    ratio_a = n_a / n_total if n_total > 0 else np.nan
-                    
+                    ratio_a = fa_port_share_a(n_a, n_b)
+
                     if odor not in fa_data:
                         fa_data[odor] = []
                     fa_data[odor].append({
@@ -5945,11 +5946,10 @@ def get_fa_ratio_a_stats(subjid, dates=None, odors=['C', 'F']):
                         continue
                     
                     fa_odor = fa_all[fa_all['last_odor_name'] == odor]
-                    n_a = (fa_odor['fa_port'] == 1).sum()
-                    n_b = (fa_odor['fa_port'] == 2).sum()
+                    n_a, n_b = fa_port_counts(fa_odor)
                     n_total = n_a + n_b
-                    ratio_a = n_a / n_total if n_total > 0 else np.nan
-                    
+                    ratio_a = fa_port_share_a(n_a, n_b)
+
                     rows.append({
                         "date": int(date_str),
                         "session_num": session_num,
@@ -6143,12 +6143,9 @@ def plot_fa_ratio_by_hr_position(
                 
                 # Helper functions
                 def count_ports(data):
-                    if data.empty:
-                        return 0, 0, 0
-                    port_a = (data["fa_port"] == 1).sum()
-                    port_b = (data["fa_port"] == 2).sum()
-                    total = port_a + port_b
-                    return int(port_a), int(port_b), int(total)
+                    """`fa_port_counts` plus the total, which the rows below carry."""
+                    port_a, port_b = fa_port_counts(data)
+                    return port_a, port_b, port_a + port_b
                 
                 def get_hr_position(hr_pos_str):
                     if pd.isna(hr_pos_str):
@@ -6200,7 +6197,7 @@ def plot_fa_ratio_by_hr_position(
                         (fa_for_this_hr["last_odor_position"] == fa_for_this_hr["hr_position"])
                     ].copy()
                     a1, b1, t1 = count_ports(fa_on_hr_odor)
-                    ratio1 = (a1 - b1) / t1 if t1 > 0 else np.nan
+                    ratio1 = fa_port_ratio(a1, b1)
                     rows.append({
                         "date": int(date_str),
                         "session_num": session_num,
@@ -6219,7 +6216,7 @@ def plot_fa_ratio_by_hr_position(
                         (fa_for_this_hr["last_odor_position"] == fa_for_this_hr["hr_position"] + 1)
                     ].copy()
                     a2, b2, t2 = count_ports(fa_one_after)
-                    ratio2 = (a2 - b2) / t2 if t2 > 0 else np.nan
+                    ratio2 = fa_port_ratio(a2, b2)
                     rows.append({
                         "date": int(date_str),
                         "session_num": session_num,
@@ -6237,7 +6234,7 @@ def plot_fa_ratio_by_hr_position(
                         (fa_for_this_hr["last_odor_position"] >= fa_for_this_hr["hr_position"])
                     ].copy()
                     a3, b3, t3 = count_ports(fa_total)
-                    ratio3 = (a3 - b3) / t3 if t3 > 0 else np.nan
+                    ratio3 = fa_port_ratio(a3, b3)
                     rows.append({
                         "date": int(date_str),
                         "session_num": session_num,
@@ -6595,10 +6592,9 @@ def plot_fa_ratio_by_abort_odor(
                                             odor_matches = odor_data
                                         
                                         if not odor_matches.empty:
-                                            port_a = (odor_matches["fa_port"] == 1).sum()
-                                            port_b = (odor_matches["fa_port"] == 2).sum()
+                                            port_a, port_b = fa_port_counts(odor_matches)
                                             total = port_a + port_b
-                                            ratio = (port_a - port_b) / total if total > 0 else np.nan
+                                            ratio = fa_port_ratio(port_a, port_b)
                                             
                                             rows.append({
                                                 "date": int(date_str),
@@ -6632,10 +6628,9 @@ def plot_fa_ratio_by_abort_odor(
                         for last_odor in ab_no_hr["last_odor_name"].unique():
                             odor_data = ab_no_hr[ab_no_hr["last_odor_name"] == last_odor]
                             
-                            port_a = (odor_data["fa_port"] == 1).sum()
-                            port_b = (odor_data["fa_port"] == 2).sum()
+                            port_a, port_b = fa_port_counts(odor_data)
                             total = port_a + port_b
-                            ratio = (port_a - port_b) / total if total > 0 else np.nan
+                            ratio = fa_port_ratio(port_a, port_b)
                             
                             rows.append({
                                 "date": int(date_str),
