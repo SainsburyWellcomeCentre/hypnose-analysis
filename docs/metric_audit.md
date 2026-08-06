@@ -1015,6 +1015,34 @@ Gate on **reachability from `run_all_metrics`**, not on how large the change loo
 Two things the fingerprint **never** sees, so they need eyeballing rather than a gate:
 figures, and `speed_analysis.parquet`.
 
+### 4b module grouping — CONFIRMED by Joschua 2026-08-05
+
+The plan gates 4b on this ("propose a grouping and get it confirmed before moving
+anything"). Confirmed as **6 new modules** under `metric_analysis/metrics/`, plus the two
+that already exist:
+
+| module | metrics |
+|---|---|
+| `accuracy.py` | `decision_accuracy` (+`_by_odor`), `global_choice_accuracy`, `response_rate`, `choice_timeout_rate` |
+| `false_alarm.py` | `premature_response_rate`, `response_contingent_FA_rate`, `global_FA_rate`, `FA_odor_bias`, `FA_position_bias`, `FA_avg_response_times`, `fa_abortion_stats`, `fa_port_ratio_by_odor` + NEW `fa_rate_by_odor`, `fa_rate_by_position`, **`fa_latency_from_pokeout`** |
+| `sequence.py` | `sequence_completion_rate`, `odorx_abortion_rate`, `abortion_rate_positionX`, `odor_initiation_bias` |
+| `hidden_rule.py` | `hidden_rule_performance`, `hidden_rule_detection_rate`, `hidden_rule_counts_by_odor` + NEW HR/non-HR accuracy, `hr_abort_poke_gap`, `rolling_hr_reward_fraction` |
+| `sampling.py` | `avg_sampling_time_{odor_x,completed_sequence,aborted_sequence}`, **`manual_vs_auto_stop_preference`** + NEW `poke_duration_by_position`, `trial_poke_span`, `trial_poke_total` |
+| `timing.py` | `avg_response_time` + NEW `reward_delivery_latency`, `valve_to_reward_latency`, `inter_trial_interval` |
+
+plus existing `movement.py` and `sing_rew_metrics.py`.
+
+Three points settled with the confirmation:
+
+- **`false_alarm`, singular** — not `false_alarms`.
+- **No `valve.py`.** `manual_vs_auto_stop_preference` is a sampling metric.
+- **`fa_latency_from_pokeout` lives with the FA family, not with the other latencies.**
+  It is grouped by what it measures, not by the fact that it returns a time.
+
+The registry declares which frame each metric consumes via a decorator argument
+(`@metric(frame="trials" | "position_data")`), **not** by file boundary — so grouping stays
+by behavioural construct rather than by D0 tier.
+
 ### Remaining
 
 1. `position_data` derived at load time (tier 2). Note the row sets differ per blob —
