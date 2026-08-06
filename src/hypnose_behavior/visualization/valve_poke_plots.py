@@ -20,6 +20,7 @@ import matplotlib.dates as mdates
 from IPython import get_ipython
 
 from hypnose_behavior.io.loaders import (
+    compute_real_time_offset,
     load, load_all_streams, load_experiment_events, load_odor_mapping, concat_digi_events,
     BEHAVIOR_SCHEMA_PATH, OLFACTOMETER_SCHEMA_PATH,
 )
@@ -228,21 +229,9 @@ def plot_valve_and_poke_events(
             hb = load(registers['heartbeat'][1], exp_dir / registers['heartbeat'][2])
             if not hb.empty:
                 hb = hb.reset_index()  # ensure 'Time' is a column
-            # Folder timestamp
-            m = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', exp_dir.name)
-            if not m:
-                m = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', exp_dir.parent.name)
-            if m:
-                real_time_str = m.group(0)
-                real_time_ref_utc = datetime.strptime(real_time_str, '%Y-%m-%dT%H-%M-%S')
-                real_time_ref_utc = real_time_ref_utc.replace(tzinfo=timezone.utc)
-                real_time_ref = real_time_ref_utc.astimezone(uk_tz)
-                if 'Time' in hb.columns and len(hb) > 0:
-                    hb['Time'] = pd.to_datetime(hb['Time'], errors='coerce')
-                    start_time_dt = hb['Time'].iloc[0].to_pydatetime() if isinstance(hb['Time'].iloc[0], pd.Timestamp) else hb['Time'].iloc[0]
-                    if start_time_dt.tzinfo is None:
-                        start_time_dt = start_time_dt.replace(tzinfo=uk_tz)
-                    offset = real_time_ref - start_time_dt
+                hb['Time'] = pd.to_datetime(hb['Time'], errors='coerce')
+            # The loader's own offset, not a second copy of it (audit finding 15).
+            offset = compute_real_time_offset(exp_dir, hb)
             # Heartbeat span (after offset)
             if 'Time' in hb.columns and not hb.empty:
                 times = pd.to_datetime(hb['Time'], errors='coerce') + offset

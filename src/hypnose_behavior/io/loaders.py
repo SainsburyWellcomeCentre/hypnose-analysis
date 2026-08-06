@@ -118,6 +118,42 @@ def exp_data(subjid, date, index=None):
     return load_experiment(subjid, date, index)
 
 
+def compute_real_time_offset(root, heartbeat):
+    """Offset from the harp hardware clock to UK wall-clock time.
+
+    The session folder name carries the recording's UTC start
+    (``YYYY-MM-DDTHH-MM-SS``) and the heartbeat register the hardware clock's;
+    the difference is what ``load_all_streams`` adds to every stream's index.
+
+    Written twice before Phase 4a: ``valve_poke_plots._compute_real_time_offset``
+    opened with *"compute the same real_time_offset used by load_all_streams"*
+    and then did exactly that. Drift between the two would have silently shifted
+    every timestamp on that debugging plot relative to every other figure in the
+    package -- the audit's finding 15. Returns ``Timedelta(0)`` when the folder
+    name carries no timestamp or the heartbeat is unusable.
+    """
+    if heartbeat is None or heartbeat.empty or 'Time' not in heartbeat.columns or len(heartbeat) == 0:
+        return pd.Timedelta(0)
+
+    match = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', root.name)
+    if not match:
+        match = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', root.parent.name)
+    if not match:
+        return pd.Timedelta(0)
+
+    real_time_ref_utc = datetime.strptime(match.group(0), '%Y-%m-%dT%H-%M-%S')
+    real_time_ref_utc = real_time_ref_utc.replace(tzinfo=timezone.utc)
+    uk_tz = zoneinfo.ZoneInfo("Europe/London")
+    real_time_ref = real_time_ref_utc.astimezone(uk_tz)
+
+    start_time_hardware = heartbeat['Time'].iloc[0]
+    start_time_dt = (start_time_hardware.to_pydatetime()
+                     if isinstance(start_time_hardware, pd.Timestamp) else start_time_hardware)
+    if start_time_dt.tzinfo is None:
+        start_time_dt = start_time_dt.replace(tzinfo=uk_tz)
+    return real_time_ref - start_time_dt
+
+
 def load_all_streams(root, apply_corrections = True, *args, verbose: bool = True, **kwargs):
     """
     Load all behavioral data streams with proper timestamp synchronization
@@ -145,29 +181,12 @@ def load_all_streams(root, apply_corrections = True, *args, verbose: bool = True
     real_time_offset = pd.Timedelta(0)
     if not heartbeat.empty and 'Time' in heartbeat.columns and len(heartbeat) > 0:
         try:
-            # Extract timestamp from root folder name
-            real_time_str = root.name
-            match = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', real_time_str)
-            if not match:
-                real_time_str = root.parent.name
-                match = re.search(r'\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}', real_time_str)
-            
-            if match:
-                real_time_str = match.group(0)
-                real_time_ref_utc = datetime.strptime(real_time_str, '%Y-%m-%dT%H-%M-%S')
-                real_time_ref_utc = real_time_ref_utc.replace(tzinfo=timezone.utc)
-                uk_tz = zoneinfo.ZoneInfo("Europe/London")
-                real_time_ref = real_time_ref_utc.astimezone(uk_tz)
-                
-                start_time_hardware = heartbeat['Time'].iloc[0]
-                start_time_dt = start_time_hardware.to_pydatetime()
-                if start_time_dt.tzinfo is None:
-                    start_time_dt = start_time_dt.replace(tzinfo=uk_tz)
-                real_time_offset = real_time_ref - start_time_dt
+            real_time_offset = compute_real_time_offset(root, heartbeat)
+            if real_time_offset != pd.Timedelta(0):
                 vprint(verbose, f"Calculated real-time offset: {real_time_offset}")
         except Exception as e:
             print(f"Error calculating real-time offset: {e}")
-    
+
     # Create timestamp interpolation mapping
     timestamp_to_time = pd.Series()
     if not heartbeat.empty and 'Time' in heartbeat.columns and 'TimestampSeconds' in heartbeat.columns:

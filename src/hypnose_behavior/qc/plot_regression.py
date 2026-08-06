@@ -1,0 +1,272 @@
+#!/usr/bin/env python
+"""Old-vs-new regression for what the plotters DRAW.
+
+``regression.py`` fingerprints ``trial_data`` + the metrics dict and never sees a
+figure, so every change inside ``visualization/`` is unguarded by it. This closes
+that gap: it runs each plotter under Agg against a reference git revision *and*
+the working tree, then compares every Line2D's xy data, every collection's
+offsets, every patch's geometry, the axis decoration, and stdout.
+
+Deliberately **not** a golden master. Figures are expected to change as the
+plotters evolve, so a stored fixture would be stale within a phase; the useful
+question is always "did *this* change move a curve", which is a two-tree diff.
+
+Usage
+-----
+  PY=~/miniconda3/envs/hypnose-analysis-test/bin/python
+  QC=~/repos/harris_lab/hypnose/hypnose-behavior-analysis/src/hypnose_behavior/qc
+
+  $PY -u $QC/plot_regression.py                 # working tree vs HEAD
+  $PY -u $QC/plot_regression.py --ref f72d201   # ... vs any revision
+  $PY -u $QC/plot_regression.py --only plot_decision_accuracy
+
+Exit code 0 == GREEN (nothing drawn differently); 1 == RED. Reads the real
+derivatives tree; writes only to a temp dir.
+
+Two things it has already caught, both invisible to ``regression.py``:
+a `pd.concat` over a variable deleted by a refactor (every session silently
+skipped behind a bare ``except``), and confirmation that Q5's denominator change
+moved exactly two plots and nothing else.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[2]
+
+# Subjects/dates from the QC coverage set: hidden-rule multi-run (040 20251124),
+# hidden-rule single run (040 20251229), and 048 20260306 for a second animal.
+CASES = [
+    ("plot_decision_accuracy_rolling_average", [40], {"dates": [20251124, 20251229]}),
+    ("plot_cumulative_rewards", [[40]], {"dates": [20251124, 20251229]}),
+    ("plot_response_times_completed_vs_fa", [40], {"dates": [20251124, 20251229]}),
+    ("plot_fa_ratio_a_over_sessions", [40], {"dates": [20251124, 20251229]}),
+    ("get_fa_ratio_a_stats", [40], {"dates": [20251124, 20251229]}),
+    ("plot_abortion_and_fa_rates", [40], {"dates": [20251124, 20251229]}),
+    ("plot_fa_ratio_by_hr_position", [40], {"dates": [20251124, 20251229]}),
+    ("plot_fa_ratio_by_abort_odor", [40], {"dates": [20251124, 20251229]}),
+    ("plot_position_completion_rate", [[40, 48]], {"dates": [20251124, 20251229, 20260306]}),
+    ("plot_false_alarm_rate_by_position", [[40, 48]], {"dates": [20251124, 20251229, 20260306]}),
+    ("hidden_rule_and_false_alarm", [[40]], {"dates": [20251124, 20251229]}),
+    ("plot_hr_reward_fraction_over_trials", [40], {"dates": [20251124, 20251229]}),
+    ("plot_hidden_rule_abort_poke_gap", [40], {"dates": [20251124, 20251229]}),
+    ("plot_sampling_times_analysis", [40], {"dates": [20251124, 20251229]}),
+    ("plot_poke_duration_by_position", [40], {"dates": [20251124, 20251229]}),
+    ("plot_poke_duration_by_odor", [[40]], {"date": [20251124, 20251229]}),
+    ("plot_decision_accuracy", [[40, 48]], {"dates": [20251124, 20251229, 20260306]}),
+    ("plot_behavior_metrics", [[40]], {
+        "dates": [20251124, 20251229],
+        "variables": ["decision_accuracy", "global_FA_rate", "sequence_completion_rate"]}),
+    ("plot_decision_accuracy_by_odor", [40], {"dates": [20251124, 20251229]}),
+]
+
+# Runs inside the child process, against whichever tree is on sys.path.
+_CHILD = r'''
+import contextlib, io, json, sys, traceback
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import hypnose_behavior.visualization.visualization_utils as V
+
+CASES = json.loads(sys.argv[2])
+ONLY = json.loads(sys.argv[3])
+
+
+def canon(o):
+    if isinstance(o, dict):
+        return {str(k): canon(v) for k, v in sorted(o.items(), key=lambda kv: str(kv[0]))}
+    if isinstance(o, (list, tuple)):
+        return [canon(v) for v in o]
+    if isinstance(o, np.ndarray):
+        return canon(o.tolist())
+    if isinstance(o, (np.floating, float)):
+        return repr(float(o))
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, (np.bool_, bool)):
+        return bool(o)
+    if isinstance(o, (int, str)) or o is None:
+        return o
+    return repr(o)
+
+
+def axes_sig(fig):
+    out = []
+    for ax in fig.get_axes():
+        out.append({
+            "title": ax.get_title(), "xlabel": ax.get_xlabel(), "ylabel": ax.get_ylabel(),
+            "xlim": canon(ax.get_xlim()), "ylim": canon(ax.get_ylim()),
+            "xticklabels": [t.get_text() for t in ax.get_xticklabels()],
+            "yticklabels": [t.get_text() for t in ax.get_yticklabels()],
+            "legend": ([t.get_text() for t in ax.get_legend().get_texts()]
+                       if ax.get_legend() else []),
+            "lines": [canon(np.asarray(l.get_xydata(), dtype=float)) for l in ax.get_lines()],
+            "collections": [canon(np.asarray(c.get_offsets(), dtype=float))
+                            for c in ax.collections if hasattr(c, "get_offsets")],
+            "patches": [canon([p.get_x(), p.get_y(), p.get_width(), p.get_height()])
+                        for p in ax.patches if hasattr(p, "get_x")],
+        })
+    return out
+
+
+def sig(res):
+    if res is None:
+        return None
+    if isinstance(res, plt.Figure):
+        return {"__fig__": axes_sig(res)}
+    if isinstance(res, pd.DataFrame):
+        return {"__frame__": canon(res.to_dict(orient="records"))}
+    if isinstance(res, (list, tuple)):
+        return [sig(r) for r in res]
+    if hasattr(res, "figure") and hasattr(res, "get_xlabel"):
+        return {"__axes__": None}
+    return canon(res)
+
+
+out = {}
+for name, args, kwargs in CASES:
+    if ONLY and name not in ONLY:
+        continue
+    fn = getattr(V, name, None)
+    if fn is None:
+        out[name] = {"error": "function not found in this tree"}
+        continue
+    for attempt_kwargs in ({"save": False, **kwargs}, kwargs):
+        buf = io.StringIO()
+        try:
+            # Several plotters jitter with the global RNG and never seed it.
+            np.random.seed(0)
+            with contextlib.redirect_stdout(buf):
+                res = fn(*args, **attempt_kwargs)
+            out[name] = {"result": sig(res), "stdout": buf.getvalue()}
+            break
+        except TypeError as e:
+            if "save" in str(e) and attempt_kwargs is not kwargs:
+                plt.close("all")
+                continue
+            out[name] = {"error": traceback.format_exc().strip().splitlines()[-1],
+                         "stdout": buf.getvalue()}
+            break
+        except Exception:
+            out[name] = {"error": traceback.format_exc().strip().splitlines()[-1],
+                         "stdout": buf.getvalue()}
+            break
+    plt.close("all")
+
+with open(sys.argv[1], "w") as fh:
+    json.dump(out, fh, indent=1, sort_keys=True)
+'''
+
+
+def _flatten(obj, prefix=""):
+    out = {}
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            out.update(_flatten(v, f"{prefix}.{k}" if prefix else str(k)))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            out.update(_flatten(v, f"{prefix}[{i}]"))
+    else:
+        out[prefix] = obj
+    return out
+
+
+def _run(tree: Path, out_path: Path, only: list[str]) -> None:
+    script = out_path.parent / "_plot_child.py"
+    script.write_text(_CHILD)
+    env = {**__import__("os").environ, "PYTHONPATH": str(tree / "src")}
+    subprocess.run([sys.executable, "-u", str(script), str(out_path),
+                    json.dumps(CASES), json.dumps(only)],
+                   env=env, check=True)
+
+
+def _materialise(ref: str, dest: Path) -> Path:
+    """Export `ref` from the repo, plus the git-ignored local data-location profile."""
+    dest.mkdir(parents=True, exist_ok=True)
+    archive = subprocess.run(["git", "-C", str(REPO), "archive", ref],
+                             check=True, capture_output=True).stdout
+    subprocess.run(["tar", "-x", "-C", str(dest)], input=archive, check=True)
+    local = REPO / "configs" / "data_locations.local.yml"
+    if local.exists():
+        # Without it the exported tree resolves its own (absent) config and
+        # silently falls through to a wrong derivatives root -- the 2a __file__ trap.
+        shutil.copy(local, dest / "configs" / local.name)
+    return dest
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--ref", default="HEAD", help="git revision to compare against (default HEAD)")
+    ap.add_argument("--only", nargs="*", default=[], help="limit to these plotter names")
+    args = ap.parse_args()
+
+    with tempfile.TemporaryDirectory(prefix="hyp_plotreg_") as tmp_str:
+        tmp = Path(tmp_str)
+        print(f"Materialising {args.ref} ...")
+        ref_tree = _materialise(args.ref, tmp / "ref")
+        old_path, new_path = tmp / "old.json", tmp / "new.json"
+        print(f"Running plotters against {args.ref} ...")
+        _run(ref_tree, old_path, args.only)
+        print("Running plotters against the working tree ...")
+        _run(REPO, new_path, args.only)
+        old = json.loads(old_path.read_text())
+        new = json.loads(new_path.read_text())
+
+    red = 0
+    print()
+    for name in sorted(set(old) | set(new)):
+        if name not in old or name not in new:
+            print(f"  [MISSING] {name}")
+            red += 1
+            continue
+        o, n = old[name], new[name]
+        if ("error" in o) != ("error" in n) or o.get("error") != n.get("error"):
+            print(f"  [RED]  {name} raise state changed")
+            print(f"           ref: {o.get('error', '(ran ok)')}")
+            print(f"           new: {n.get('error', '(ran ok)')}")
+            red += 1
+            continue
+        if "error" in o:
+            print(f"  [both raise, unchanged] {name}: {o['error'][:60]}")
+            continue
+
+        fo, fn_ = _flatten(o["result"]), _flatten(n["result"])
+        added = sorted(set(fn_) - set(fo))
+        removed = sorted(set(fo) - set(fn_))
+        changed = sorted(k for k in set(fo) & set(fn_) if fo[k] != fn_[k])
+        stdout_differs = o["stdout"] != n["stdout"]
+        if added or removed or changed or stdout_differs:
+            red += 1
+            print(f"  [RED]  {name}: "
+                  f"{len(added)} added, {len(removed)} removed, {len(changed)} changed"
+                  f"{', stdout differs' if stdout_differs else ''}")
+            for k in (removed[:10] + added[:10]):
+                src = fo if k in fo else fn_
+                print(f"           {'-' if k in fo else '+'} {k} = {src[k]!r}")
+            for k in changed[:10]:
+                print(f"           ~ {k}: {fo[k]!r} -> {fn_[k]!r}")
+            if len(added) + len(removed) + len(changed) > 30:
+                print(f"           ... {len(added) + len(removed) + len(changed)} entries total")
+        else:
+            print(f"  [green] {name}")
+
+    print()
+    if red:
+        print(f"PLOT REGRESSION RED: {red} plotter(s) draw something different.")
+        return 1
+    print(f"PLOT REGRESSION GREEN: {len(old)} plotters draw identically to {args.ref}.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
