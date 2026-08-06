@@ -1104,6 +1104,14 @@ behind by the step 6 edits -- `fa_list` no longer existed, and `get_fa_ratio_a_s
 empty frame for every session. And it confirmed the Q5 denominator change moved exactly two
 plotters, only their y-values, with no artist, axis or label change anywhere else.
 
+**Extended 2026-08-06 (checklist 6).** The child used to look every case up in
+`visualization_utils` alone, so *moving* a function read as "function not found in this
+tree" -- untestable, exactly when a move most needs a gate. It now resolves each name
+across an ordered `MODULES` list (the four `visualization/` modules plus `metrics_utils`),
+so a pure move is invisible to the diff while a change in what it draws is not. That is
+also what lets the `pred_seq_utils` / `sing_rew` / `movement_analysis_utils` items be gated
+at all.
+
 **Phase 5 should lean on it heavily** -- it is the only thing standing between a plotting
 refactor and a silently wrong figure. Note it seeds the global RNG before each call, because
 several plotters jitter points and never seed it.
@@ -1131,10 +1139,24 @@ that can see these changes at all.
 | 3 ✅ | `plot_poke_duration_by_position` | `poke_duration_by_position` | call swap; deletes the other 2 |
 | 4 ✅ | `plot_poke_duration_by_odor` | `poke_duration_by_odor` + `by_group(…, "date")` | VARIANT 9 |
 | 5 ✅ | `plot_decision_accuracy._decision_acc` | `decision_accuracy` + `by_group(…, hidden_rule_mask(td))` | VARIANT 6 |
-| 6 | **`get_fa_ratio_a_stats`** | **moves wholesale into `metric_analysis`** | it is `METRIC` — no plotting in it at all. Only its FA-port counting was shared; the function itself is still in `visualization/` |
-| 7 | `_load_subject_trial_timeline` | `inter_trial_interval` | **restructure** |
-| 8 | `plot_hidden_rule_abort_poke_gap` | `hr_abort_poke_gap` | **restructure** |
-| 9 | `plot_hr_reward_fraction_over_trials` | `rolling_hr_reward_fraction` | **restructure** |
+| 6 ✅ | **`get_fa_ratio_a_stats`** | **moves wholesale into `metric_analysis`** | it is `METRIC` — no plotting in it at all. Only its FA-port counting was shared; the function itself is still in `visualization/` |
+| 7 ✅ | `_load_subject_trial_timeline` | `inter_trial_interval` | **restructure** |
+| 8 ✅ | `plot_hidden_rule_abort_poke_gap` | `hr_abort_poke_gap` | **restructure** |
+| 9 ✅ | `plot_hr_reward_fraction_over_trials` | `rolling_hr_reward_fraction` | **restructure** |
+
+**On 7-9, as implemented.** Only checklist 9 actually pools: its window is meant to run
+across session boundaries, so the sessions' `trial_data` is concatenated and
+`rolling_hr_reward_fraction` is called once on the pooled frame (it grew a `with_flags=`
+argument, because the plotter reports the per-trial HR flag alongside the percentage and
+re-deriving it there is the duplication being removed). Checklist 7 and 8 are the opposite:
+the ITI is deliberately within-session, and `hr_abort_poke_gap` keys on `global_trial_id`,
+which repeats across sessions — both stay per session.
+
+`plot_iti_over_time` / `plot_latency_over_time` were added to `plot_regression.py`; nothing
+else sees checklist 7. Both *raised* under the gate before that (`_style_log_yaxis` reads
+`rcParams["ytick.labelsize"]` as a float and matplotlib's default is the string `"medium"`),
+so the child now applies the repo style, as the notebooks do. A "both raise, unchanged" case
+is not a green one — it is an ungated one.
 
 **On 7-9 — the one place a naive swap is wrong.** These three build per-session dict rows and
 then pool *across* sessions before computing, while the metrics take one frame. Concatenate the

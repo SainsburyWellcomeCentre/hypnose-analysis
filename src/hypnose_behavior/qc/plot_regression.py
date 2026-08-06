@@ -41,6 +41,18 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
 
+# Modules searched for each case's function, in order. A function is looked up by
+# name across all of them, so **moving** one between modules -- which Phase 4a does
+# repeatedly -- stays invisible to the diff, while any change to what it draws does
+# not. Without this a pure move reads as "function not found in this tree".
+MODULES = [
+    "hypnose_behavior.visualization.visualization_utils",
+    "hypnose_behavior.visualization.pred_seq_utils",
+    "hypnose_behavior.visualization.sing_rew",
+    "hypnose_behavior.visualization.movement_analysis_utils",
+    "hypnose_behavior.metric_analysis.metrics_utils",
+]
+
 # Subjects/dates from the QC coverage set: hidden-rule multi-run (040 20251124),
 # hidden-rule single run (040 20251229), and 048 20260306 for a second animal.
 CASES = [
@@ -65,20 +77,43 @@ CASES = [
         "dates": [20251124, 20251229],
         "variables": ["decision_accuracy", "global_FA_rate", "sequence_completion_rate"]}),
     ("plot_decision_accuracy_by_odor", [40], {"dates": [20251124, 20251229]}),
+    # The two consumers of `_load_subject_trial_timeline` -- the only thing that
+    # sees checklist 7 (`inter_trial_interval`).
+    ("plot_iti_over_time", [[40]], {"dates": [20251124, 20251229]}),
+    ("plot_latency_over_time", [[40]], {"dates": [20251124, 20251229]}),
 ]
 
 # Runs inside the child process, against whichever tree is on sys.path.
 _CHILD = r'''
-import contextlib, io, json, sys, traceback
+import contextlib, importlib, io, json, sys, traceback
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import hypnose_behavior.visualization.visualization_utils as V
+# The notebooks apply the repo style before plotting, and some plotters assume it:
+# `_style_log_yaxis` reads `rcParams["ytick.labelsize"]` as a float, which is the
+# string "medium" under matplotlib's defaults. Without this the latency/ITI cases
+# raise identically in both trees, i.e. are silently ungated rather than green.
+from hypnose_helpers.viz.styles import use_style
+use_style("nature")
 
 CASES = json.loads(sys.argv[2])
 ONLY = json.loads(sys.argv[3])
+MODULES = json.loads(sys.argv[4])
+
+
+def _resolve(name):
+    """First module in MODULES that defines `name`, or None."""
+    for mod_name in MODULES:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:
+            continue
+        fn = getattr(mod, name, None)
+        if fn is not None:
+            return fn
+    return None
 
 
 def canon(o):
@@ -136,7 +171,7 @@ out = {}
 for name, args, kwargs in CASES:
     if ONLY and name not in ONLY:
         continue
-    fn = getattr(V, name, None)
+    fn = _resolve(name)
     if fn is None:
         out[name] = {"error": "function not found in this tree"}
         continue
@@ -185,7 +220,7 @@ def _run(tree: Path, out_path: Path, only: list[str]) -> None:
     script.write_text(_CHILD)
     env = {**__import__("os").environ, "PYTHONPATH": str(tree / "src")}
     subprocess.run([sys.executable, "-u", str(script), str(out_path),
-                    json.dumps(CASES), json.dumps(only)],
+                    json.dumps(CASES), json.dumps(only), json.dumps(MODULES)],
                    env=env, check=True)
 
 

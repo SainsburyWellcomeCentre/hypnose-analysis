@@ -20,9 +20,10 @@ import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 from matplotlib import cm
 from typing import Iterable, Optional, Union
-from hypnose_behavior.utils.helpers import _filter_session_dirs
+from hypnose_behavior.utils.helpers import _filter_session_dirs, _iter_subject_dirs
 from hypnose_behavior.io.paths import get_derivatives_root
 from hypnose_behavior.io.layout import derivatives, normalize_subjid
+from hypnose_behavior.io.loaders import _load_trial_views
 from hypnose_behavior.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_metrics,
     compute_sing_rew_rates,
@@ -1994,6 +1995,81 @@ def fa_port_share_a(n_a, n_b):
     return (fa_port_ratio(n_a, n_b) + 1.0) / 2.0
 
 
+def get_fa_ratio_a_stats(subjid, dates=None, odors=['C', 'F']):
+    """Per-odor `A/(A+B)` false-alarm port share, one row per session per odor.
+
+    Checklist 6 of Phase 4a, and the odd one out: it lived in
+    `visualization/visualization_utils.py` but **contains no plotting at all**, so
+    it moves here wholesale rather than being repointed. Its FA filter is every
+    `FA_*` label, wider than `plot_fa_ratio_a_over_sessions`' single `fa_type`.
+
+    The share is rescaled from `fa_port_ratio`, never recounted (VARIANT
+    resolution 2).
+
+    Returns
+    -------
+    DataFrame with columns date, session_num, odor, fa_ratio_a, n_fa_a, n_fa_b,
+    n_total -- empty if the subject has no FA data for `odors`.
+    """
+    derivatives_dir = get_derivatives_root()
+
+    rows = []
+
+    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
+        ses_dirs = _filter_session_dirs(subj_dir, dates)
+
+        for session_num, ses in enumerate(ses_dirs, start=1):
+            date_str = ses.name.split("_date-")[-1]
+            results_dir = ses / "saved_analysis_results"
+
+            if not results_dir.exists():
+                continue
+
+            ab_det = _load_trial_views(results_dir)["aborted_fa"]
+            if not ab_det.empty:
+                needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
+                ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
+
+            if ab_det.empty or 'fa_label' not in ab_det.columns:
+                continue
+
+            # Same FA filter as plot_fa_ratio_a_over_sessions, widened to every FA_*.
+            fa_all = ab_det[ab_det['fa_label'].astype(str).str.startswith('FA_', na=False)]
+            if (fa_all.empty or 'fa_port' not in fa_all.columns
+                    or 'last_odor_name' not in fa_all.columns):
+                continue
+
+            # Count over every odor present, then keep the requested ones.
+            for odor in sorted(fa_all['last_odor_name'].dropna().unique()):
+                if str(odor) not in [str(o) for o in odors]:
+                    continue
+
+                n_a, n_b = fa_port_counts(fa_all[fa_all['last_odor_name'] == odor])
+                rows.append({
+                    "date": int(date_str),
+                    "session_num": session_num,
+                    "odor": str(odor),
+                    "fa_ratio_a": fa_port_share_a(n_a, n_b),
+                    "n_fa_a": n_a,
+                    "n_fa_b": n_b,
+                    "n_total": n_a + n_b,
+                })
+
+    if not rows:
+        print(f"No FA data found for subject {subjid} with odors {odors}")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows)
+
+    print(f"\n{'='*70}")
+    print(f"FA Ratio A/(A+B) Summary - Subject {str(subjid).zfill(3)}")
+    print(f"{'='*70}")
+    print(df.to_string(index=False))
+    print(f"{'='*70}\n")
+
+    return df
+
+
 def hidden_rule_mask(trials):
     """Boolean mask of hidden-rule trials -- the grouping key for the HR split.
 
@@ -2116,17 +2192,26 @@ def rolling_reward_fraction(trials, window, *, step=1, include_avg=False, hr_onl
     return out
 
 
-def rolling_hr_reward_fraction(trials, window):
+def rolling_hr_reward_fraction(trials, window, *, with_flags=False):
     """Rolling percentage of rewarded trials that were hidden-rule rewarded.
 
     Checklist 9. Related to `hidden_rule_performance` but not a granularity of
     it: the denominator is rewarded trials, not hidden-rule hits. Indexed by the
     rows of `trials` it kept, in `sequence_start` order.
+
+    **Pass the pooled frame, not one session.** The window is meant to run across
+    session boundaries; rolling per session and concatenating restarts it at each
+    boundary, which is a different quantity and raises no error.
+
+    `with_flags=True` also returns the per-trial hidden-rule indicator the
+    percentage is rolled over, on the same index -- the plotter reports both, and
+    re-deriving the flag on its side is the duplication this metric removes.
     """
     rewarded = trials[(~_aborted_mask(trials))
                       & _flag(trials, "response_time_category", "rewarded")]
     if rewarded.empty:
-        return pd.Series(dtype=float)
+        empty = pd.Series(dtype=float)
+        return (pd.Series(dtype=bool), empty) if with_flags else empty
     for col in ("hidden_rule_success", "hit_hidden_rule"):
         if col in rewarded.columns:
             hr = rewarded[col].fillna(False).astype(bool)
@@ -2135,7 +2220,8 @@ def rolling_hr_reward_fraction(trials, window):
         hr = pd.Series(False, index=rewarded.index)
     if "sequence_start" in rewarded.columns:
         hr = hr.loc[rewarded["sequence_start"].sort_values().index]
-    return hr.astype(int).rolling(window, min_periods=1).mean() * 100.0
+    pct = hr.astype(int).rolling(window, min_periods=1).mean() * 100.0
+    return (hr, pct) if with_flags else pct
 
 
 def poke_durations(position_data, *, aborted=False):

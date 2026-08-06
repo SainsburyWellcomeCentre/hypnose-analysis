@@ -23,6 +23,9 @@ from hypnose_behavior.metric_analysis.metrics_utils import (
     fa_rate_by_position,
     fa_port_counts,
     hidden_rule_mask,
+    hr_abort_poke_gap,
+    inter_trial_interval,
+    rolling_hr_reward_fraction,
     rolling_reward_fraction,
     fa_port_ratio,
     fa_port_share_a,
@@ -3242,11 +3245,9 @@ def _load_subject_trial_timeline(subjid, subj_dates):
         for col in ("sequence_start", "sequence_end"):
             if col in df.columns:
                 df[col] = _coerce_tz_naive(df[col])
-        # Within-session ITI: start[i+1] - end[i] (last trial -> NaN); never across sessions.
-        if "sequence_end" in df.columns and "sequence_start" in df.columns:
-            df["iti_seconds"] = (df["sequence_start"].shift(-1) - df["sequence_end"]).dt.total_seconds()
-        else:
-            df["iti_seconds"] = np.nan
+        # Computed per session, never over the concatenation: shifting across a
+        # session boundary would measure the gap between recordings.
+        df["iti_seconds"] = inter_trial_interval(df)
         rtc = df.get("response_time_category")
         df["is_rewarded"] = (rtc == "rewarded") if rtc is not None else False
         runs = []
@@ -5526,102 +5527,6 @@ def plot_poke_duration_by_odor(
 # ================================= Debugging / Testing ================================= #
 
 
-def get_fa_ratio_a_stats(subjid, dates=None, odors=['C', 'F']):
-    """
-    Get FA ratio A/(A+B) statistics for specified odors across sessions.
-    
-    Parameters:
-    -----------
-    subjid : int
-        Subject ID
-    dates : list, tuple, or None
-        Specific dates to include, e.g., [20250811, 20250812] or (20250811, 20251010) for range
-    odors : list, optional
-        List of odors to include (default: ['C', 'F'])
-    
-    Returns:
-    --------
-    DataFrame with columns: date, odor, fa_ratio_a, n_fa_a, n_fa_b, n_total
-    """
-    base_path = get_rawdata_root()
-    server_root = get_server_root()
-    derivatives_dir = get_derivatives_root()
-    
-    rows = []
-    
-    for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
-        ses_dirs = _filter_session_dirs(subj_dir, dates)
-        
-        for session_num, ses in enumerate(ses_dirs, start=1):
-            date_str = ses.name.split("_date-")[-1]
-            results_dir = ses / "saved_analysis_results"
-            
-            if not results_dir.exists():
-                continue
-            
-            views = _load_trial_views(results_dir)
-            ab_det = views["aborted_fa"]
-            if not ab_det.empty:
-                needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
-                ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
-
-            if ab_det.empty:
-                continue
-
-            # Same FA filter as plot_fa_ratio_a_over_sessions, widened to every FA_*.
-            try:
-                if 'fa_label' not in ab_det.columns:
-                    continue
-                fa_all = ab_det[ab_det['fa_label'].astype(str).str.startswith('FA_', na=False)]
-                if fa_all.empty:
-                    continue
-            except Exception as e:
-                continue
-            
-            if fa_all.empty or 'fa_port' not in fa_all.columns or 'last_odor_name' not in fa_all.columns:
-                continue
-            
-            # Calculate FA port ratio for ALL odors (not just the requested ones)
-            # Then filter afterward for flexibility
-            try:
-                for odor in sorted(fa_all['last_odor_name'].dropna().unique()):
-                    # Only include requested odors
-                    if str(odor) not in [str(o) for o in odors]:
-                        continue
-                    
-                    fa_odor = fa_all[fa_all['last_odor_name'] == odor]
-                    n_a, n_b = fa_port_counts(fa_odor)
-                    n_total = n_a + n_b
-                    ratio_a = fa_port_share_a(n_a, n_b)
-
-                    rows.append({
-                        "date": int(date_str),
-                        "session_num": session_num,
-                        "odor": str(odor),
-                        "fa_ratio_a": ratio_a,
-                        "n_fa_a": n_a,
-                        "n_fa_b": n_b,
-                        "n_total": n_total
-                    })
-            except Exception as e:
-                continue
-    
-    if not rows:
-        print(f"No FA data found for subject {subjid} with odors {odors}")
-        return pd.DataFrame()
-    
-    df = pd.DataFrame(rows)
-    
-    # Print summary
-    print(f"\n{'='*70}")
-    print(f"FA Ratio A/(A+B) Summary - Subject {str(subjid).zfill(3)}")
-    print(f"{'='*70}")
-    print(df.to_string(index=False))
-    print(f"{'='*70}\n")
-    
-    return df
-
-
 def plot_fa_ratio_by_hr_position(
     subjid,
     dates=None,
@@ -6537,46 +6442,6 @@ def plot_hidden_rule_abort_poke_gap(
     If `save=True`, each generated figure is written via save_figure().
     """
 
-    def _parse_hr_pos(val):
-        if val is None or (isinstance(val, float) and np.isnan(val)):
-            return None
-        if isinstance(val, (int, float)):
-            return int(val)
-        if isinstance(val, (list, tuple)) and len(val) > 0:
-            try:
-                return int(val[0])
-            except Exception:
-                return None
-        if isinstance(val, str):
-            try:
-                parsed = json.loads(val)
-                if isinstance(parsed, (list, tuple)) and parsed:
-                    return int(parsed[0])
-                if isinstance(parsed, (int, float)):
-                    return int(parsed)
-            except Exception:
-                pass
-        return None
-
-    def _parse_position_dict(val):
-        if isinstance(val, dict):
-            return val
-        if val is None or (isinstance(val, float) and np.isnan(val)):
-            return {}
-        if isinstance(val, str):
-            try:
-                parsed = json.loads(val)
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
-        return {}
-
-    def _to_dt(ts):
-        if ts is None:
-            return pd.NaT
-        return pd.to_datetime(ts, errors="coerce")
-
     derivatives_dir = get_derivatives_root()
 
     if fa_types is None:
@@ -6613,44 +6478,16 @@ def plot_hidden_rule_abort_poke_gap(
             td["is_aborted"] = td.get("is_aborted", False).fillna(False)
             td["hit_hidden_rule"] = td.get("hit_hidden_rule", False).fillna(False)
 
-            hr_trials = td[(td["is_aborted"] == True) & (td["hit_hidden_rule"] == True)]
-            if hr_trials.empty:
+            # One session at a time: the metric keys on `global_trial_id`, which
+            # repeats across sessions.
+            gaps = hr_abort_poke_gap(td, build_position_data(td))
+            if gaps.empty:
                 continue
+            trial_cols = [c for c in ("global_trial_id", "sequence_start", "fa_label")
+                          if c in td.columns]
+            gaps = gaps.merge(td[trial_cols], on="global_trial_id", how="left")
 
-            for _, row in hr_trials.iterrows():
-                hr_pos = _parse_hr_pos(row.get("hidden_rule_hit_positions"))
-                if hr_pos is None:
-                    continue
-
-                pos_dict = _parse_position_dict(row.get("position_poke_times"))
-                if not pos_dict:
-                    continue
-
-                hr_end = pd.NaT
-                hr_start = pd.NaT
-                last_end = pd.NaT
-
-                # Sort by numeric position to find the last poke end
-                for key, entry in sorted(pos_dict.items(), key=lambda kv: int(kv[0]) if str(kv[0]).isdigit() else kv[0]):
-                    try:
-                        pos_num = int(key)
-                    except Exception:
-                        continue
-                    if not isinstance(entry, dict):
-                        continue
-                    end_ts = _to_dt(entry.get("poke_odor_end"))
-                    if pd.notna(end_ts):
-                        last_end = end_ts if pd.isna(last_end) else max(last_end, end_ts)
-                        if pos_num == hr_pos:
-                            hr_end = end_ts
-                            hr_start = _to_dt(entry.get("poke_odor_start"))
-
-                if pd.isna(hr_end) or pd.isna(last_end):
-                    continue
-
-                delta_sec = (last_end - hr_end).total_seconds()
-                delta_start_end = (last_end - hr_start).total_seconds() if pd.notna(hr_start) else np.nan
-
+            for _, row in gaps.iterrows():
                 if fa_set is None:
                     category = "All"
                 else:
@@ -6662,9 +6499,9 @@ def plot_hidden_rule_abort_poke_gap(
                     "subjid": sid,
                     "date": date_val,
                     "sequence_start": row.get("sequence_start"),
-                    "hidden_rule_position": hr_pos,
-                    "delta_seconds": delta_sec,
-                    "delta_start_end_seconds": delta_start_end,
+                    "hidden_rule_position": row["hidden_rule_position"],
+                    "delta_seconds": row["delta_seconds"],
+                    "delta_start_end_seconds": row["delta_start_end_seconds"],
                     "category": category,
                 })
 
@@ -6808,7 +6645,7 @@ def plot_hr_reward_fraction_over_trials(
     window_size = max(int(window_size), 1)
     derivatives_dir = get_derivatives_root()
 
-    rows = []
+    frames = []
     for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
         ses_dirs = _filter_session_dirs(subj_dir, dates)
         for ses in ses_dirs:
@@ -6830,42 +6667,24 @@ def plot_hr_reward_fraction_over_trials(
             td["is_aborted"] = td.get("is_aborted", False).fillna(False)
             td["response_time_category"] = td.get("response_time_category", "").astype(str)
             td["sequence_start"] = pd.to_datetime(td.get("sequence_start"), errors="coerce")
+            td["date"] = date_val
+            frames.append(td)
 
-            rewarded = td[(td["is_aborted"] == False) & (td["response_time_category"] == "rewarded")]
-            if rewarded.empty:
-                continue
+    # Pool the sessions *before* rolling. Rolling per session and concatenating
+    # restarts the window at every session boundary -- a different quantity, and
+    # one that raises no error.
+    pooled = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+    hr_flags, pct = rolling_hr_reward_fraction(pooled, window_size, with_flags=True)
 
-            if "hidden_rule_success" in rewarded.columns:
-                hr_flag = rewarded["hidden_rule_success"].fillna(False)
-            elif "hit_hidden_rule" in rewarded.columns:
-                hr_flag = rewarded["hit_hidden_rule"].fillna(False)
-            else:
-                hr_flag = pd.Series(False, index=rewarded.index)
-
-            rewarded = rewarded.assign(
-                date=date_val,
-                hr_rewarded=hr_flag.astype(bool),
-            )
-
-            rewarded = rewarded.sort_values("sequence_start")
-            rows.extend(
-                {
-                    "date": date_val,
-                    "sequence_start": seq_start,
-                    "hr_rewarded": bool(hrv),
-                }
-                for seq_start, hrv in zip(rewarded["sequence_start"], rewarded["hr_rewarded"])
-            )
-
-    if not rows:
+    if pct.empty:
         print("No rewarded trials found for requested selection.")
         return None, None, pd.DataFrame()
 
-    df = pd.DataFrame(rows)
-    df = df.sort_values(["sequence_start", "date"]).reset_index(drop=True)
+    df = pooled.loc[pct.index, ["date", "sequence_start"]].reset_index(drop=True)
+    df["hr_rewarded"] = hr_flags.to_numpy()
     df["trial_idx"] = np.arange(1, len(df) + 1)
     df["hr_rewarded_flag"] = df["hr_rewarded"].astype(int)
-    df["hr_rewarded_pct"] = df["hr_rewarded_flag"].rolling(window_size, min_periods=1).mean() * 100.0
+    df["hr_rewarded_pct"] = pct.to_numpy()
 
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
