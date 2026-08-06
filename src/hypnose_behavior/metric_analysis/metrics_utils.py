@@ -736,11 +736,21 @@ def _truthy(trials, column):
     return pd.Series(False, index=trials.index)
 
 
-def _reduce_rate(num, den):
-    """(numerator, denominator) contributions -> (n, denom, rate)."""
+def reduce_rate(num, den):
+    """(numerator, denominator) contributions -> (n, denom, rate).
+
+    Public because a plotter that has already collected a metric's per-trial
+    contributions -- `sing_rew.FR_ratio` does, to draw both a session ratio and a
+    rolling one -- must reduce them the same way the metric does, rather than
+    reaching for its own `np.mean`.
+    """
     n = int(np.asarray(num, dtype=float).sum())
     d = int(np.asarray(den, dtype=float).sum())
     return n, d, (n / d if d > 0 else np.nan)
+
+
+# The private spelling every metric in this module already uses.
+_reduce_rate = reduce_rate
 
 
 def _initiated(trials):

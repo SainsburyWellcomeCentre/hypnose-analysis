@@ -6305,10 +6305,13 @@ def plot_fa_ratio_by_abort_odor(
             
             if not df_cat.empty:
                 # Show aggregate across all dates
+                # Counts pool across dates (a DISPLAY-AGG); the ratio over them is
+                # still the canonical one -- `total` is `port_a + port_b` by
+                # construction above, so this is `fa_port_ratio` exactly.
                 port_a_total = df_cat["port_a"].sum()
                 port_b_total = df_cat["port_b"].sum()
                 total_trials = df_cat["total"].sum()
-                ratio_agg = (port_a_total - port_b_total) / total_trials if total_trials > 0 else np.nan
+                ratio_agg = fa_port_ratio(port_a_total, port_b_total)
                 
                 ratio_str = f"{ratio_agg:+.3f}" if not pd.isna(ratio_agg) else "N/A"
                 print(f"  {category:<12} - Ratio: {ratio_str}  Port A: {int(port_a_total)}, Port B: {int(port_b_total)}, Total: {int(total_trials)}")

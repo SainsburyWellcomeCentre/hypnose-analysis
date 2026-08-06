@@ -26,6 +26,7 @@ from hypnose_behavior.io.save import save_figure
 from hypnose_behavior.metric_analysis.frames import build_position_data
 from hypnose_behavior.metric_analysis.metrics_utils import (
     false_response_ratio_contributions,
+    reduce_rate,
     reward_delivery_latency,
 )
 from hypnose_behavior.metric_analysis.sing_rew_metrics import (
@@ -268,8 +269,11 @@ def FR_ratio(
             ratios = []
             for entries in series:
                 if entries:
+                    # The metric's own reduction of its contributions, not a
+                    # second definition of "false responses over completed".
                     vals = [v for _, v in entries]
-                    ratios.append((float(np.mean(vals)), len(vals)))
+                    _, n_completed, rate = reduce_rate(vals, np.ones(len(vals)))
+                    ratios.append((float(rate), n_completed))
                 else:
                     ratios.append(None)
             series_by_subject[label] = ratios
