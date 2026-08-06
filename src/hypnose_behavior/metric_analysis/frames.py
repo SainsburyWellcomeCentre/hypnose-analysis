@@ -23,12 +23,15 @@ place where today's behaviour and the eventual definition differ, and why.
 """
 
 import json
+import re
 from typing import Optional
 
 import pandas as pd
 
 __all__ = [
     "parse_json_column",
+    "odor_letter",
+    "odor_sequence_tokens",
     "presented_positions",
     "sequence_depth",
     "sampled_positions",
@@ -50,6 +53,47 @@ def parse_json_column(val):
         except Exception:
             return {} if val.strip().startswith("{") else []
     return val
+
+
+def odor_letter(value) -> str:
+    """Normalise a stored odor token to a bare upper-case letter.
+
+    ``'OdorC'`` / ``'"OdorC"'`` / ``'["OdorC'`` / ``'odor c'`` / ``'C'`` -> ``'C'``.
+    ``odor_sequence`` is sometimes stored as a JSON-encoded string such as
+    ``'["OdorE", "OdorG"]'``, hence the bracket/quote stripping before the
+    ``Odor`` prefix check.
+
+    Written out four times in ``visualization/`` before Phase 4a
+    (``visualization_utils`` twice, ``pred_seq_utils._canonical_odor``,
+    ``sing_rew_movement._odor_letter``). It knows what the data *is*, so it
+    belongs here rather than in ``hypnose_helpers``.
+    """
+    s = str(value).strip().strip('[]"\'').strip()
+    if s.lower().startswith("odor"):
+        s = s[4:].strip()
+    return s.upper()
+
+
+def odor_sequence_tokens(seq) -> list:
+    """Split a trial's ``odor_sequence`` cell into raw odor tokens.
+
+    The column is a JSON string on some sessions, a delimited string on others,
+    and a list/ndarray when it round-trips through parquet.
+    """
+    if seq is None:
+        return []
+    if isinstance(seq, float) and pd.isna(seq):
+        return []
+    if isinstance(seq, str):
+        if not seq.strip():
+            return []
+        if any(c in seq for c in ",; |"):
+            return [t for t in re.split(r"[\s,;|]+", seq) if t]
+        return [seq]
+    try:
+        return list(seq)
+    except TypeError:
+        return []
 
 
 def _is_aborted(trial) -> bool:

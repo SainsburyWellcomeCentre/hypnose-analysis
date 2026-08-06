@@ -32,6 +32,8 @@ from hypnose_behavior.metric_analysis.sing_rew_metrics import (
 # metric) and re-exported here so existing importers keep working.
 from hypnose_behavior.metric_analysis.frames import (  # noqa: F401
     build_position_data,
+    odor_letter,
+    odor_sequence_tokens,
     parse_json_column,
     presented_positions,
     reached_counts as _reached_counts,
@@ -2037,4 +2039,339 @@ def fa_port_ratio_by_odor(results, include_non_initiated=True, fa_type="FA_time_
         'counts': counts,
         'total_fa_by_odor': total_fa_by_odor
     }
+
+
+# ================== NEW metrics -- no canonical version before Phase 4a =========
+#
+# restructure_2 Phase 4a. Each of these was computed inside a plotter in
+# `visualization/` and existed nowhere in `metric_analysis` -- the audit's `NEW`
+# class, i.e. the "lose no metric" checklist. The arithmetic reproduces the
+# plotters'; what stays behind in `visualization/` is axis construction,
+# cross-subject aggregation and styling, which are properties of a figure rather
+# than of the data.
+#
+# None of these is reached by `run_all_metrics`, so none enters `metrics_*.json`
+# or the regression fingerprint. Whether to save them is a 4b question (the
+# registry decides), not a 4a one.
+
+
+def _tz_naive(series):
+    """Datetime Series with any timezone dropped, so subtraction is safe."""
+    s = pd.to_datetime(series, errors="coerce")
+    try:
+        if s.dt.tz is not None:
+            s = s.dt.tz_localize(None)
+    except (AttributeError, TypeError):
+        pass
+    return s
+
+
+def _fa_filter_mask(frame, fa_types=None):
+    """The `fa_label` mask the FA-rate metrics share.
+
+    `fa_types=None` means "any labelled false alarm", spelled as the plotters
+    spell it: not the literal `nFA`, and not null. A set selects subtypes and is
+    matched case-insensitively.
+    """
+    if "fa_label" not in frame.columns:
+        return pd.Series(False, index=frame.index)
+    labels = frame["fa_label"]
+    lower = labels.astype(str).str.lower()
+    if fa_types is None:
+        return lower.ne("nfa") & labels.notna()
+    return lower.isin({str(s).strip().lower() for s in fa_types})
+
+
+def hidden_rule_mask(trials):
+    """Boolean mask of hidden-rule trials -- the grouping key for the HR split.
+
+    `by_group(decision_accuracy, trials, hidden_rule_mask(trials))` is the
+    audit's checklist 7 (decision accuracy, HR vs non-HR): a granularity of
+    `decision_accuracy`, not a metric of its own. It is deliberately **not**
+    `hidden_rule_performance`, which has a different numerator *and* denominator.
+    """
+    return _truthy(trials, "hidden_rule_success")
+
+
+def fa_rate_by_odor(trials, *, fa_types=None, odors=None):
+    """FA aborts at an odor / (its passes in completed sequences + those aborts).
+
+    Checklist 1. The denominator matches no canonical metric: not `FA_odor_bias`
+    (aborts@odor) and not `odorx_abortion_rate` (presentations@odor). It counts
+    how often the odor was sampled and passed, plus the times it was false-alarmed
+    on -- so the rate answers "when this odor came up, how often did it draw a
+    false alarm".
+
+    `odors` fixes the index (and its order); by default every odor seen is
+    reported. An odor with a zero denominator is omitted, not reported as 0.
+    """
+    if trials.empty:
+        return pd.Series(dtype=float)
+    aborted = _aborted_mask(trials)
+    completed = trials[~aborted]
+    ab = trials[aborted]
+    ab_fa = ab[_fa_filter_mask(ab, fa_types)]
+
+    completed_counts: dict = {}
+    if "odor_sequence" in completed.columns:
+        for seq in completed["odor_sequence"]:
+            for tok in odor_sequence_tokens(seq):
+                if tok is None or (isinstance(tok, float) and np.isnan(tok)):
+                    continue
+                letter = odor_letter(tok)
+                completed_counts[letter] = completed_counts.get(letter, 0) + 1
+
+    fa_counts: dict = {}
+    if "last_odor_name" in ab_fa.columns:
+        for last in ab_fa["last_odor_name"]:
+            if last is None or (isinstance(last, float) and np.isnan(last)):
+                continue
+            letter = odor_letter(last)
+            fa_counts[letter] = fa_counts.get(letter, 0) + 1
+
+    keys = ([odor_letter(o) for o in odors] if odors is not None
+            else sorted(set(completed_counts) | set(fa_counts)))
+    rates = {}
+    for od in keys:
+        denom = completed_counts.get(od, 0) + fa_counts.get(od, 0)
+        if denom > 0:
+            rates[od] = fa_counts.get(od, 0) / denom
+    return pd.Series(rates, dtype=float)
+
+
+def fa_rate_by_position(trials, *, fa_types=None):
+    """FA aborts at position *p* / trials that reached *p*.
+
+    Checklist 5. The denominator is `frames.reached_counts`, the package's single
+    definition of "reached" (audit Q5). The plotter used to count the positions
+    listed in each trial's `presentations` blob -- Q5's "definition C", now
+    deleted -- so the drawn denominators change here even though no saved metric
+    value does.
+    """
+    if trials.empty:
+        return pd.Series(dtype=float)
+    reached = _reached_counts(trials)
+    aborted = trials[_aborted_mask(trials)]
+    fa = aborted[_fa_filter_mask(aborted, fa_types)]
+    fa_counts: dict = {}
+    if "last_odor_position" in fa.columns:
+        pos = pd.to_numeric(fa["last_odor_position"], errors="coerce").dropna().astype(int)
+        fa_counts = {int(p): int(n) for p, n in pos.value_counts().items()}
+    rates = {p: fa_counts.get(p, 0) / n for p, n in reached.items() if n > 0}
+    return pd.Series(rates, dtype=float).sort_index()
+
+
+def rolling_reward_fraction(trials, window, *, step=1, include_avg=False, hr_only=False):
+    """Rolling fraction of trials rewarded, divided by the **window**.
+
+    Checklist 2, and deliberately not `over_windows(decision_accuracy, ...)`.
+    The denominator is the window size, so timeouts -- and, unless the caller has
+    already dropped them, aborts -- sit inside it. That is the audit's finding 12:
+    the curve differs visibly from a rolling `decision_accuracy`, which is why
+    this is a separately named metric rather than a granularity of an existing
+    one.
+
+    `include_avg` back-fills the warm-up, completing a not-yet-full window with
+    the frame's overall rate so the series starts at the first trial instead of
+    at trial `window`. `hr_only` narrows the numerator to hidden-rule rewards.
+
+    Returns one value per row of `trials`, NaN where no window ends there.
+    """
+    n = len(trials)
+    out = np.full(n, np.nan)
+    if n == 0:
+        return out
+
+    numerator = _flag(trials, "response_time_category", "rewarded")
+    if hr_only:
+        hr = trials.get("hidden_rule_success")
+        hr = (hr.fillna(False).astype(bool) if isinstance(hr, pd.Series)
+              else pd.Series(False, index=trials.index))
+        numerator = numerator & hr
+    rewards = numerator.astype(int).to_numpy(dtype=float)
+    overall = float(np.mean(rewards))
+
+    if include_avg:
+        for i in range(0, n, step):
+            if i < window:
+                avail = rewards[: i + 1]
+                out[i] = (float(np.sum(avail)) + (window - len(avail)) * overall) / float(window)
+            else:
+                out[i] = float(np.mean(rewards[i - window + 1: i + 1]))
+    else:
+        for end in range(window, n + 1, step):
+            out[end - 1] = float(np.mean(rewards[end - window: end]))
+    return out
+
+
+def rolling_hr_reward_fraction(trials, window):
+    """Rolling percentage of rewarded trials that were hidden-rule rewarded.
+
+    Checklist 9. Related to `hidden_rule_performance` but not a granularity of
+    it: the denominator is rewarded trials, not hidden-rule hits. Indexed by the
+    rows of `trials` it kept, in `sequence_start` order.
+    """
+    rewarded = trials[(~_aborted_mask(trials))
+                      & _flag(trials, "response_time_category", "rewarded")]
+    if rewarded.empty:
+        return pd.Series(dtype=float)
+    for col in ("hidden_rule_success", "hit_hidden_rule"):
+        if col in rewarded.columns:
+            hr = rewarded[col].fillna(False).astype(bool)
+            break
+    else:
+        hr = pd.Series(False, index=rewarded.index)
+    if "sequence_start" in rewarded.columns:
+        hr = hr.loc[rewarded["sequence_start"].sort_values().index]
+    return hr.astype(int).rolling(window, min_periods=1).mean() * 100.0
+
+
+def poke_durations(position_data, *, aborted=False):
+    """Per-position poke durations for one outcome class, as a tidy frame.
+
+    Completed trials come from `position_poke_times`; aborted trials from
+    `presentations` with the abort event excluded -- the same sources, and the
+    same exclusion, the canonical `avg_sampling_time_*` metrics use.
+
+    **No `poke_time_ms > 0` filter.** The four extractors in `visualization/`
+    each carried one; measured across all 9 fixture sessions it drops nothing,
+    because a ~0 ms position is currently omitted by the writer entirely. Once
+    Phase 7b writes those positions the filter would start excluding exactly the
+    rows that fix adds, so it is removed rather than relocated --
+    `sampled_positions(only_true_pokes=True)` is its proper successor.
+    """
+    empty = pd.DataFrame(columns=["position", "odor_name", "poke_time_ms"])
+    if aborted:
+        rows = _position_rows(position_data, "in_presentations", aborted=True)
+        if rows is None or rows.empty:
+            return empty
+        idx = rows["index_in_trial"]
+        rows = rows[idx.notna() & (idx != rows["last_event_index"])]
+    else:
+        rows = _position_rows(position_data, "in_poke_times", aborted=False)
+        if rows is None or rows.empty:
+            return empty
+    rows = rows[rows["poke_time_ms"].notna()]
+    if rows.empty:
+        return empty
+    return rows.loc[:, ["position", "odor_name", "poke_time_ms"]].reset_index(drop=True)
+
+
+def _mean_sd_by(frame, key):
+    if frame.empty:
+        return pd.DataFrame(columns=["mean", "sd", "n"])
+    grouped = frame.dropna(subset=[key]).groupby(key)["poke_time_ms"]
+    # ddof=0: the plotters draw `np.std(values)`, i.e. the population SD.
+    return pd.DataFrame({"mean": grouped.mean(), "sd": grouped.std(ddof=0),
+                         "n": grouped.size()})
+
+
+def poke_duration_by_position(position_data, *, aborted=False):
+    """Mean and population SD of `poke_time_ms` per position. Checklist 3."""
+    return _mean_sd_by(poke_durations(position_data, aborted=aborted), "position")
+
+
+def poke_duration_by_odor(position_data, *, aborted=False):
+    """Mean and population SD of `poke_time_ms` per odor.
+
+    Checklist 4 in its `aborted=True` form: the canonical
+    `avg_sampling_time_aborted_sequence` pools every aborted trial into one
+    scalar, and no per-odor version existed. With `aborted=False` it is the
+    per-odor completed-trial mean, i.e. `avg_sampling_time_odor_x` with an SD
+    and a count alongside.
+    """
+    return _mean_sd_by(poke_durations(position_data, aborted=aborted), "odor_name")
+
+
+def inter_trial_interval(trials):
+    """Seconds from one trial ending to the next starting. Checklist 6.
+
+    `sequence_start.shift(-1) - sequence_end`, so the last row is NaN. Pass a
+    single session's trials: shifting across a session boundary would measure the
+    gap between recordings, which is not an inter-trial interval.
+    """
+    if (trials.empty or "sequence_start" not in trials.columns
+            or "sequence_end" not in trials.columns):
+        return pd.Series(np.nan, index=trials.index, dtype=float)
+    start = _tz_naive(trials["sequence_start"])
+    end = _tz_naive(trials["sequence_end"])
+    return (start.shift(-1) - end).dt.total_seconds()
+
+
+def _first_hr_position(val):
+    """First entry of `hidden_rule_hit_positions`, however it is stored."""
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return None
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, (list, tuple, np.ndarray)) and len(val) > 0:
+        try:
+            return int(val[0])
+        except Exception:
+            return None
+    if isinstance(val, str):
+        parsed = parse_json_column(val)
+        try:
+            if isinstance(parsed, (list, tuple)) and parsed:
+                return int(parsed[0])
+            if isinstance(parsed, (int, float)):
+                return int(parsed)
+        except Exception:
+            return None
+    return None
+
+
+def hr_abort_poke_gap(trials, position_data):
+    """Latency from the hidden-rule poke to the last poke of an aborted trial.
+
+    Checklist 8: `last poke_odor_end - hidden-rule poke_odor_end`, on trials that
+    aborted having hit the hidden rule, plus the start-to-end variant. No
+    canonical metric measures any latency *between positions*.
+
+    One row per qualifying trial; trials without a hidden-rule position or
+    without usable poke timestamps are dropped rather than reported as NaN.
+    """
+    cols = ["global_trial_id", "hidden_rule_position",
+            "delta_seconds", "delta_start_end_seconds"]
+    if trials.empty or position_data is None or len(position_data) == 0:
+        return pd.DataFrame(columns=cols)
+    if "global_trial_id" not in position_data.columns:
+        return pd.DataFrame(columns=cols)
+
+    hr_trials = trials[_aborted_mask(trials) & _truthy(trials, "hit_hidden_rule")]
+    if hr_trials.empty:
+        return pd.DataFrame(columns=cols)
+
+    poke = _position_rows(position_data, "in_poke_times")
+    if poke is None or poke.empty:
+        return pd.DataFrame(columns=cols)
+    poke = poke.assign(_end=_tz_naive(poke["poke_odor_end"]),
+                       _start=_tz_naive(poke["poke_odor_start"]))
+    by_trial = {gid: sub for gid, sub in poke.groupby("global_trial_id")}
+
+    rows = []
+    for _, trial in hr_trials.iterrows():
+        hr_pos = _first_hr_position(trial.get("hidden_rule_hit_positions"))
+        if hr_pos is None:
+            continue
+        sub = by_trial.get(trial.get("global_trial_id"))
+        if sub is None or sub.empty:
+            continue
+        ends = sub["_end"].dropna()
+        if ends.empty:
+            continue
+        at_hr = sub[sub["position"] == hr_pos]
+        hr_end = at_hr["_end"].dropna()
+        if hr_end.empty:
+            continue
+        hr_start = at_hr["_start"].dropna()
+        last_end = ends.max()
+        rows.append({
+            "global_trial_id": trial.get("global_trial_id"),
+            "hidden_rule_position": hr_pos,
+            "delta_seconds": (last_end - hr_end.iloc[-1]).total_seconds(),
+            "delta_start_end_seconds": ((last_end - hr_start.iloc[-1]).total_seconds()
+                                        if not hr_start.empty else np.nan),
+        })
+    return pd.DataFrame(rows, columns=cols)
 
