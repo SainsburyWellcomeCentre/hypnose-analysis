@@ -580,19 +580,13 @@ def _isnan(v):
 def _metric_value(rates, key):
     """Resolve a metric value from a `compute_sing_rew_rates` result.
 
-    Handles top-level rate keys, raw counts (under ``counts``), and the derived
-    ``ambiguous_rate`` = n_amb / n_tot (not stored). Missing -> NaN.
+    Handles top-level rate keys and raw counts (under ``counts``). Missing -> NaN.
+    ``ambiguous_rate`` and ``correct_rejection_rate`` used to be derived here
+    rather than looked up; Phase 4a moved both into `compute_sing_rew_rates`, so
+    they now take the ordinary top-level path below.
     """
     if rates is None:
         return float("nan")
-    if key == "ambiguous_rate":
-        counts = rates.get("counts", {})
-        n_tot = counts.get("n_tot", 0)
-        return (counts["n_amb"] / n_tot) if n_tot else float("nan")
-    if key == "correct_rejection_rate":
-        counts = rates.get("counts", {})
-        n_nogo = counts.get("n_nogo", 0)
-        return (counts["correct_rejection"] / n_nogo) if n_nogo else float("nan")
     if key in rates and key != "counts":
         return rates[key]
     counts = rates.get("counts", {})

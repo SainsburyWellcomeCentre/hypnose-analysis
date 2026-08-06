@@ -74,7 +74,7 @@
     "total_supply_count": "143f76bbc806917b749cb041a2514ef2",
     "trial_id": "c69f7f3a0318db12d2f8e05ae27da853"
   },
-  "metrics": "2dc303ee62e784f36edf4154bbfed2fe",
+  "metrics": "e90892b73ae3085c323d2983d7605703",
   "metrics_keys": {
     "decision_accuracy": "b1ec3a043b83147644b5fa8a29ae6f2c",
     "decision_accuracy_by_odor": "c7db293e5858e29d5b4f62527b670838",
@@ -105,6 +105,6 @@
     "fa_abortion_stats": "93210a292d619451e6e1a406ed77b089",
     "fa_port_ratio_by_odor": "5d3cb09b58257fbf6e384ae1695ffca5",
     "sing_rew_categories": "1ceadcff9a25924496d1a37be7cab998",
-    "sing_rew_metrics": "875506f8672be03815daf725a3371a3c"
+    "sing_rew_metrics": "2548495ac191673aa395d95ce3ba6f32"
   }
 }
