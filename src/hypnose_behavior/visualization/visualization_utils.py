@@ -15,7 +15,11 @@ from matplotlib.ticker import MaxNLocator
 from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
 from hypnose_behavior.metric_analysis.metrics_utils import (
+    FA_avg_response_times,
+    avg_response_time,
+    decision_accuracy,
     fa_port_counts,
+    rolling_reward_fraction,
     fa_port_ratio,
     fa_port_share_a,
     load_session_results,
@@ -1561,32 +1565,19 @@ def plot_decision_accuracy_rolling_average(
                 numerator_mask = rewarded_mask
 
             df["is_rewarded"] = numerator_mask.astype(int)
-            df["decision_accuracy"] = np.nan
-
-            rewards = df["is_rewarded"].to_numpy(dtype=float)
             n_trials = len(df)
-            overall_rate = float(np.mean(rewards)) if n_trials > 0 else 0.0
+
+            # The windowing rule is `rolling_reward_fraction`, whose denominator
+            # is the window rather than rewarded+unrewarded -- deliberately not
+            # `over_windows(decision_accuracy, ...)`, which would draw a
+            # different curve (audit finding 12).
+            df["decision_accuracy"] = rolling_reward_fraction(
+                df, window_n, step=step_n, include_avg=include_avg, hr_only=hr_only)
 
             if include_avg:
-                eval_indices = range(0, n_trials, step_n)
-                for i in eval_indices:
-                    if i < window_n:
-                        available_data = rewards[: i + 1]
-                        missing = window_n - len(available_data)
-                        rate = (float(np.sum(available_data)) + missing * overall_rate) / float(window_n)
-                    else:
-                        available_data = rewards[i - window_n + 1 : i + 1]
-                        rate = float(np.mean(available_data))
-                    df.iloc[i, df.columns.get_loc("decision_accuracy")] = rate
-
                 # In include_avg mode, keep one x-unit per trial.
                 x_local = np.arange(1, n_trials + 1)
             else:
-                for end in range(window_n, n_trials + 1, step_n):
-                    start = end - window_n
-                    rate = float(np.mean(rewards[start:end]))
-                    df.iloc[end - 1, df.columns.get_loc("decision_accuracy")] = rate
-
                 # Shift x so first valid full window of each session is at x=1.
                 # Example window=30: point at trial 30 is displayed at session x=1.
                 x_local = np.arange(1, n_trials + 1) - (window_n - 1)
@@ -2616,17 +2607,12 @@ def plot_response_times_completed_vs_fa(
             # Prefer trial_data-derived means; fall back to metrics JSON if missing
             views = _load_trial_views(results_dir)
 
-            # Completed mean response time
-            completed_rt = None
-            comp_df = views.get("completed", pd.DataFrame())
-            if not comp_df.empty:
-                # Match metrics: only rewarded + unrewarded, exclude timeout_delayed
-                if "response_time_category" in comp_df.columns:
-                    comp_df = comp_df[comp_df["response_time_category"].isin(["rewarded", "unrewarded"])]
-                if "response_time_ms" in comp_df.columns and not comp_df.empty:
-                    vals = comp_df["response_time_ms"].dropna().astype(float)
-                    if not vals.empty:
-                        completed_rt = vals.mean()
+            # Completed mean response time -- the canonical metric, not a
+            # recompute; its "Rewarded + Unrewarded" entry is this exact mean.
+            completed_rt = avg_response_time(views.get("trial_data", pd.DataFrame())).get(
+                "Average Response Time (Rewarded + Unrewarded)")
+            if completed_rt is not None and np.isnan(completed_rt):
+                completed_rt = None
             if completed_rt is None:
                 metrics = _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
                 if metrics:
@@ -2639,15 +2625,10 @@ def plot_response_times_completed_vs_fa(
                     "response_time_ms": float(completed_rt)
                 })
 
-            # FA Time In mean latency from trial_data
-            fa_rt = None
-            fa_df = views.get("aborted_fa", pd.DataFrame())
-            if not fa_df.empty and "fa_label" in fa_df.columns:
-                fa_filt = fa_df[fa_df["fa_label"].astype(str).str.lower() == "fa_time_in"].copy()
-                if "fa_latency_ms" in fa_filt.columns:
-                    vals = fa_filt["fa_latency_ms"].dropna().astype(float)
-                    if not vals.empty:
-                        fa_rt = vals.mean()
+            # FA Time In mean latency -- canonical `FA_avg_response_times`.
+            fa_rt = FA_avg_response_times(views.get("trial_data", pd.DataFrame())).get("FA Time In")
+            if fa_rt is not None and np.isnan(fa_rt):
+                fa_rt = None
             if fa_rt is None:
                 metrics = locals().get("metrics") if "metrics" in locals() else _ensure_metrics_json(sid, date_str, results_dir, compute_if_missing=False)
                 if metrics:
@@ -2970,15 +2951,12 @@ def plot_cumulative_rewards(
             
             views = _load_trial_views(results_dir)
 
-            # Per-session decision accuracy = rewarded / (rewarded + unrewarded).
+            # The threshold gate is the canonical decision_accuracy, not a
+            # recompute of it.
             if show_da_thresh:
-                td_da = views.get("trial_data", pd.DataFrame())
-                if not td_da.empty and "response_time_category" in td_da.columns:
-                    rtc = td_da["response_time_category"].astype(str)
-                    r = int((rtc == "rewarded").sum())
-                    u = int((rtc == "unrewarded").sum())
-                    if (r + u) > 0:
-                        session_da[date_str] = r / (r + u)
+                _, denom, acc = decision_accuracy(views.get("trial_data", pd.DataFrame()))
+                if denom > 0:
+                    session_da[date_str] = acc
 
             rewarded_trials = views.get("rewarded", pd.DataFrame())
             if rewarded_trials.empty:
