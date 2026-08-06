@@ -987,6 +987,20 @@ Tick items off here as they land, so a later chat sees what remains. Commits are
 | 6 | **step 6 -- non-initiated out of the metric set** | `05a4b1b` | **Output change 2 of 2.** Diff was exactly the 3 removed keys plus `fa_port_ratio_by_odor` on all 9, `trial_data` green throughout, nothing added. `fa_port_ratio_by_odor` flattened (no `with_`/`without_` wrapper) and its counts are real ints, not `np.int64` serialising as strings. |
 | 15 | **`_compute_real_time_offset`** -> `io/loaders` | `601eeeb` | `compute_real_time_offset`; `valve_poke_plots` calls the loader's rather than its own copy. |
 | — | **`qc/plot_regression.py`** (new gate, not a 4a item) | `601eeeb`, `9ebb031` | See "The gate the audit said did not exist" below. |
+| 1-5 | **first five `visualization_utils` repoints** | (this commit) | `hidden_rule_and_false_alarm` → `fa_rate_by_odor`; `plot_sampling_times_analysis` and `plot_poke_duration_by_{position,odor}` → `poke_durations` / `poke_duration_by_*`, deleting **all four** of finding 5's extractors and the dormant `poke_ms > 0` filter with them; `plot_decision_accuracy` → `by_group(decision_accuracy, td, hidden_rule_mask(td))`. VARIANTs 6, 8 and 9 confirmed to be exact DEDUPs by the plot gate: 18 of 19 plotters byte-identical, the 19th only by the ULP decision recorded below. |
+
+### The one reduction the poke-duration metrics had to pick *(settled with Joschua 2026-08-06)*
+
+`plot_sampling_times_analysis` reduced the *same* quantity two ways: panels 1-4 (pooled
+mean ± SD) called `np.mean` / `np.std`, panels 5-6 (per-session series) called
+`groupby(...).mean()`. One canonical `_mean_sd_by` cannot reproduce both — the two summation
+orders disagree in the last ULP.
+
+**Resolved to `np.mean` / `np.std`**, so panels 1-4 stay byte-identical and panels 5-6 move by
+≤1 ULP on 12 drawn values (`992.3929999999999 -> 992.3930000000001` is the largest). `np.mean`
+sums pairwise, so this is also the more accurate of the two. Figure-only: nothing in the
+fingerprint reads `_mean_sd_by`. This is the same "summation style is part of the metric"
+trap as `avg_sampling_time_*` — do not tidy `_mean_sd_by` back onto the pandas reductions.
 
 ### One deviation from the audit, deliberate — read before touching per-position metrics
 
@@ -1112,11 +1126,11 @@ that can see these changes at all.
 
 | # | function | becomes | kind |
 |---|---|---|---|
-| 1 | `hidden_rule_and_false_alarm` | `fa_rate_by_odor` | call swap |
-| 2 | `plot_sampling_times_analysis` | `poke_durations` + `poke_duration_by_{position,odor}` | call swap; deletes 2 of finding 5's 4 extractors |
-| 3 | `plot_poke_duration_by_position` | `poke_duration_by_position` | call swap; deletes the other 2 |
-| 4 | `plot_poke_duration_by_odor` | `poke_duration_by_odor` + `by_group(…, "date")` | VARIANT 9 |
-| 5 | `plot_decision_accuracy._decision_acc` | `decision_accuracy` + `by_group(…, hidden_rule_mask(td))` | VARIANT 6 |
+| 1 ✅ | `hidden_rule_and_false_alarm` | `fa_rate_by_odor` | call swap |
+| 2 ✅ | `plot_sampling_times_analysis` | `poke_durations` + `poke_duration_by_{position,odor}` | call swap; deletes 2 of finding 5's 4 extractors |
+| 3 ✅ | `plot_poke_duration_by_position` | `poke_duration_by_position` | call swap; deletes the other 2 |
+| 4 ✅ | `plot_poke_duration_by_odor` | `poke_duration_by_odor` + `by_group(…, "date")` | VARIANT 9 |
+| 5 ✅ | `plot_decision_accuracy._decision_acc` | `decision_accuracy` + `by_group(…, hidden_rule_mask(td))` | VARIANT 6 |
 | 6 | **`get_fa_ratio_a_stats`** | **moves wholesale into `metric_analysis`** | it is `METRIC` — no plotting in it at all. Only its FA-port counting was shared; the function itself is still in `visualization/` |
 | 7 | `_load_subject_trial_timeline` | `inter_trial_interval` | **restructure** |
 | 8 | `plot_hidden_rule_abort_poke_gap` | `hr_abort_poke_gap` | **restructure** |

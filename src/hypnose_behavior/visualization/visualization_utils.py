@@ -19,15 +19,22 @@ from hypnose_behavior.metric_analysis.metrics_utils import (
     abortion_rate_positionX,
     avg_response_time,
     decision_accuracy,
+    fa_rate_by_odor,
     fa_rate_by_position,
     fa_port_counts,
+    hidden_rule_mask,
     rolling_reward_fraction,
     fa_port_ratio,
     fa_port_share_a,
     load_session_results,
     run_all_metrics,
+    poke_duration_by_odor,
+    poke_duration_by_position,
+    poke_durations,
     parse_json_column,
 )
+from hypnose_behavior.metric_analysis.frames import build_position_data, odor_letter
+from hypnose_behavior.metric_analysis.resolvers import by_group
 from datetime import timedelta, datetime
 from hypnose_behavior.trial_classification.classification_utils import load_all_streams, load_experiment
 from hypnose_behavior.utils.helpers import (
@@ -880,21 +887,8 @@ def hidden_rule_and_false_alarm(
 
     derivatives_dir = get_derivatives_root()
 
-    def _odor_letter(value) -> str:
-        """Normalize stored odor tokens to a bare letter ('OdorC' / '"OdorC"' / '["OdorC' /
-        'odor c' / 'C' → 'C'). odor_sequence is sometimes stored as a JSON-encoded
-        string like '["OdorE", "OdorG", ...]', so we strip surrounding [, ], ', "
-        characters before the 'Odor' prefix check.
-        """
-        s = str(value).strip().strip('[]"\'').strip()
-        low = s.lower()
-        if low.startswith("odor"):
-            s = s[4:].strip()
-        return s.upper()
-
-    odors_list = [_odor_letter(o) for o in odors]
+    odors_list = [odor_letter(o) for o in odors]
     odors_set = set(odors_list)
-    fa_set = None if fa_label is None else {str(s).strip().lower() for s in fa_label}
 
     if subjids is None:
         subject_iter = [(sid, sd, dates) for sid, sd in _iter_subject_dirs(derivatives_dir, None)]
@@ -941,75 +935,11 @@ def hidden_rule_and_false_alarm(
                     if letter not in ("A", "B"):
                         observed_hr_letters.add(letter)
 
-            # Trial data for false-alarm counts
-            views = _load_trial_views(results_dir)
-            td = views["trial_data"]
-            completed_counts = {o: 0 for o in odors_list}
-            fa_counts = {o: 0 for o in odors_list}
-
-            if not td.empty:
-                completed = views["completed"]
-                aborted = views["aborted"]
-
-                # Aborted-FA filter
-                if "fa_label" in aborted.columns:
-                    fa_labels_lc = aborted["fa_label"].astype(str).str.lower()
-                    if fa_set is None:
-                        ab_mask = fa_labels_lc.ne("nfa") & aborted["fa_label"].notna()
-                    else:
-                        ab_mask = fa_labels_lc.isin(fa_set)
-                    ab_fa = aborted[ab_mask]
-                else:
-                    ab_fa = aborted.iloc[0:0]
-
-                # Count odor occurrences in non-aborted trials' odor_sequence.
-                # Stored values look like "OdorC"/"OdorF"; _odor_letter normalises to "C"/"F".
-                # parquet-backed list columns load back as numpy arrays — handle them too.
-                if "odor_sequence" in completed.columns:
-                    for seq in completed["odor_sequence"]:
-                        if seq is None:
-                            continue
-                        if isinstance(seq, float) and np.isnan(seq):
-                            continue
-                        if isinstance(seq, str):
-                            if not seq.strip():
-                                continue
-                            tokens = (
-                                re.split(r"[\s,;|]+", seq)
-                                if any(c in seq for c in ",; |")
-                                else [seq]
-                            )
-                        else:
-                            try:
-                                tokens = list(seq)  # list / tuple / numpy.ndarray / any iterable
-                            except TypeError:
-                                continue
-                        for tok in tokens:
-                            if tok is None:
-                                continue
-                            if isinstance(tok, float) and np.isnan(tok):
-                                continue
-                            letter = _odor_letter(tok)
-                            if letter in completed_counts:
-                                completed_counts[letter] += 1
-
-                # Count last_odor_name occurrences in fa-filtered aborts
-                if "last_odor_name" in ab_fa.columns:
-                    for last in ab_fa["last_odor_name"]:
-                        if last is None:
-                            continue
-                        if isinstance(last, float) and np.isnan(last):
-                            continue
-                        letter = _odor_letter(last)
-                        if letter in fa_counts:
-                            fa_counts[letter] += 1
-
-            # Per-odor false alarm rate (skip odors with zero denominator)
-            for o in odors_list:
-                denom = completed_counts[o] + fa_counts[o]
-                if denom == 0:
-                    continue
-                rate = fa_counts[o] / denom
+            # Per-odor false alarm rate; odors with a zero denominator are omitted
+            # by the metric rather than drawn as 0.
+            td = _load_trial_views(results_dir)["trial_data"]
+            rates = fa_rate_by_odor(td, fa_types=fa_label, odors=odors_list)
+            for o, rate in rates.items():
                 rows.append({
                     "subjid": int(sid),
                     "session_num": session_num,
@@ -1726,14 +1656,21 @@ def plot_sampling_times_analysis(
 ):
     """
     Plot sampling times (poke durations) by position and by odor for completed and aborted trials.
-    OPTIMIZED: Vectorized JSON parsing instead of row-by-row loops.
+
+    Every number drawn here comes from `metric_analysis`: `poke_durations` for the
+    scattered raw values, `poke_duration_by_{position,odor}` for the mean ± SD
+    markers and for the per-session series in the bottom row. The two blob
+    extractors this used to carry were finding 5 of the metric audit.
     """
     base_path = get_rawdata_root()
     server_root = get_server_root()
     derivatives_dir = get_derivatives_root()
-    
-    rows = []
-    
+
+    parts = []            # tidy poke durations, for the scatter panels
+    pooled_positions = []  # position_data pooled over sessions, for the mean ± SD
+    session_by_pos = []   # completed-trial session means, for panels 5 and 6
+    session_by_odor = []
+
     for sid, subj_dir in _iter_subject_dirs(derivatives_dir, [subjid]):
         ses_dirs = _filter_session_dirs(subj_dir, dates)
         for session_num, ses in enumerate(ses_dirs, start=1):
@@ -1741,104 +1678,39 @@ def plot_sampling_times_analysis(
             results_dir = ses / "saved_analysis_results"
             if not results_dir.exists():
                 continue
-            
-            views = _load_trial_views(results_dir)
-            comp = views["completed"]
-            aborted = views["aborted"]
-            
-            # ============ COMPLETED TRIALS - VECTORIZED ============
-            if not comp.empty and "position_poke_times" in comp.columns:
-                # Vectorize: parse ALL JSON at once
-                def extract_poke_times(json_str):
-                    """Extract list of (position, poke_ms, odor) tuples from JSON"""
-                    try:
-                        data = parse_json_column(json_str)
-                        if not isinstance(data, dict):
-                            return []
-                        
-                        results = []
-                        for pos_str, info in data.items():
-                            if isinstance(info, dict):
-                                poke_ms = info.get("poke_time_ms")
-                                odor = info.get("odor_name")
-                                if poke_ms is not None and isinstance(poke_ms, (int, float)) and poke_ms > 0:
-                                    try:
-                                        results.append((int(pos_str), float(poke_ms), str(odor) if odor else None))
-                                    except (ValueError, TypeError):
-                                        pass
-                        return results
-                    except Exception:
-                        return []
-                
-                # Apply to all rows at once and flatten
-                all_poke_times = comp["position_poke_times"].apply(extract_poke_times)
-                for poke_list in all_poke_times:
-                    for position, poke_ms, odor in poke_list:
-                        rows.append({
-                            "trial_type": "completed",
-                            "position": position,
-                            "odor": odor,
-                            "poke_time_ms": poke_ms,
-                            "session_num": session_num,
-                            "date": int(date_str) if str(date_str).isdigit() else date_str,
-                        })
-            
-            # ============ ABORTED TRIALS - VECTORIZED ============
-            if not aborted.empty and "presentations" in aborted.columns:
-                # Vectorize: parse ALL JSON at once
-                def extract_abort_poke_times(presentations_str, last_event_idx):
-                    """Extract list of (position, poke_ms, odor) tuples excluding abort event"""
-                    try:
-                        pres_list = parse_json_column(presentations_str)
-                        if not isinstance(pres_list, list):
-                            return []
-                        
-                        results = []
-                        for pres in pres_list:
-                            if isinstance(pres, dict):
-                                idx = pres.get("index_in_trial")
-                                if idx == last_event_idx:
-                                    continue
-                                
-                                poke_ms = pres.get("poke_time_ms")
-                                pos = pres.get("position")
-                                odor = pres.get("odor_name")
-                                
-                                if poke_ms is not None and isinstance(poke_ms, (int, float)) and poke_ms > 0:
-                                    try:
-                                        results.append((int(pos) if pos is not None else None, 
-                                                      float(poke_ms), 
-                                                      str(odor) if odor else None))
-                                    except (ValueError, TypeError):
-                                        pass
-                        return results
-                    except Exception:
-                        return []
-                
-                # Vectorized apply
-                all_abort_times = aborted.apply(
-                    lambda row: extract_abort_poke_times(row["presentations"], row.get("last_event_index")),
-                    axis=1
-                )
-                
-                for poke_list in all_abort_times:
-                    for position, poke_ms, odor in poke_list:
-                        rows.append({
-                            "trial_type": "aborted",
-                            "position": position,
-                            "odor": odor,
-                            "poke_time_ms": poke_ms,
-                            "session_num": session_num,
-                            "date": int(date_str) if str(date_str).isdigit() else date_str,
-                        })
-    
-    if not rows:
+
+            td = _load_trial_views(results_dir)["trial_data"]
+            position_data = build_position_data(td)
+            if position_data.empty:
+                continue
+            pooled_positions.append(position_data)
+            date_val = int(date_str) if str(date_str).isdigit() else date_str
+
+            for trial_type, aborted in (("completed", False), ("aborted", True)):
+                pokes = poke_durations(position_data, aborted=aborted)
+                if pokes.empty:
+                    continue
+                parts.append(pokes.rename(columns={"odor_name": "odor"}).assign(
+                    trial_type=trial_type, session_num=session_num, date=date_val))
+
+            by_pos = poke_duration_by_position(position_data)
+            if not by_pos.empty:
+                session_by_pos.append(by_pos.assign(session_num=session_num).reset_index())
+            by_odor = poke_duration_by_odor(position_data)
+            if not by_odor.empty:
+                session_by_odor.append(by_odor.assign(session_num=session_num).reset_index())
+
+    if not parts:
         print("No data found")
         return None, None
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(rows)
-    
+
+    df = pd.concat(parts, ignore_index=True)
+    pooled = pd.concat(pooled_positions, ignore_index=True)
+    comp_by_pos = poke_duration_by_position(pooled, aborted=False)
+    abort_by_pos = poke_duration_by_position(pooled, aborted=True)
+    comp_by_odor = poke_duration_by_odor(pooled, aborted=False)
+    abort_by_odor = poke_duration_by_odor(pooled, aborted=True)
+
     # Create figure
     fig, axes = plt.subplots(3, 2, figsize=figsize)
     
@@ -1848,20 +1720,17 @@ def plot_sampling_times_analysis(
     
     if not df_comp_pos.empty:
         positions = sorted(df_comp_pos["position"].unique())
-        
-        means = []
-        stds = []
-        
+
         for pos in positions:
             values = df_comp_pos[df_comp_pos["position"] == pos]["poke_time_ms"].values
-            
+
             # Scatter with jitter
             x_jitter = np.random.normal(pos, 0.04, size=len(values))
             ax.scatter(x_jitter, values, alpha=0.4, s=20, color='steelblue')
-            
-            means.append(np.mean(values))
-            stds.append(np.std(values))
-        
+
+        means = [comp_by_pos.loc[pos, "mean"] for pos in positions]
+        stds = [comp_by_pos.loc[pos, "sd"] for pos in positions]
+
         # Mean points with error bars (no line)
         ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
                   edgecolors='black', linewidth=1.5, label='Mean ± SD')
@@ -1880,20 +1749,17 @@ def plot_sampling_times_analysis(
     
     if not df_abort_pos.empty:
         positions = sorted(df_abort_pos["position"].unique())
-        
-        means = []
-        stds = []
-        
+
         for pos in positions:
             values = df_abort_pos[df_abort_pos["position"] == pos]["poke_time_ms"].values
-            
+
             # Scatter with jitter
             x_jitter = np.random.normal(pos, 0.04, size=len(values))
             ax.scatter(x_jitter, values, alpha=0.4, s=20, color='coral')
-            
-            means.append(np.mean(values))
-            stds.append(np.std(values))
-        
+
+        means = [abort_by_pos.loc[pos, "mean"] for pos in positions]
+        stds = [abort_by_pos.loc[pos, "sd"] for pos in positions]
+
         # Mean points with error bars (no line)
         ax.scatter(positions, means, color='darkred', s=100, zorder=5, marker='D', 
                   edgecolors='black', linewidth=1.5, label='Mean ± SD')
@@ -1913,21 +1779,18 @@ def plot_sampling_times_analysis(
     if not df_comp_odor.empty:
         odors = sorted(df_comp_odor["odor"].unique())
         odor_to_x = {odor: i for i, odor in enumerate(odors)}
-        
-        means = []
-        stds = []
-        
+
         for odor in odors:
             values = df_comp_odor[df_comp_odor["odor"] == odor]["poke_time_ms"].values
             x_pos = odor_to_x[odor]
-            
+
             # Scatter with jitter
             x_jitter = np.random.normal(x_pos, 0.04, size=len(values))
             ax.scatter(x_jitter, values, alpha=0.4, s=20, color='steelblue')
-            
-            means.append(np.mean(values))
-            stds.append(np.std(values))
-        
+
+        means = [comp_by_odor.loc[odor, "mean"] for odor in odors]
+        stds = [comp_by_odor.loc[odor, "sd"] for odor in odors]
+
         # Mean points with error bars (no line)
         ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
                   edgecolors='black', linewidth=1.5, label='Mean ± SD')
@@ -1948,21 +1811,18 @@ def plot_sampling_times_analysis(
     if not df_abort_odor.empty:
         odors = sorted(df_abort_odor["odor"].unique())
         odor_to_x = {odor: i for i, odor in enumerate(odors)}
-        
-        means = []
-        stds = []
-        
+
         for odor in odors:
             values = df_abort_odor[df_abort_odor["odor"] == odor]["poke_time_ms"].values
             x_pos = odor_to_x[odor]
-            
+
             # Scatter with jitter
             x_jitter = np.random.normal(x_pos, 0.04, size=len(values))
             ax.scatter(x_jitter, values, alpha=0.4, s=20, color='coral')
-            
-            means.append(np.mean(values))
-            stds.append(np.std(values))
-        
+
+        means = [abort_by_odor.loc[odor, "mean"] for odor in odors]
+        stds = [abort_by_odor.loc[odor, "sd"] for odor in odors]
+
         # Mean points with error bars (no line)
         ax.scatter(range(len(odors)), means, color='darkred', s=100, zorder=5, marker='D', 
                   edgecolors='black', linewidth=1.5, label='Mean ± SD')
@@ -1978,10 +1838,9 @@ def plot_sampling_times_analysis(
     
     # ============ PLOT 5: Average Poke Time per Position over Sessions ============
     ax = axes[2, 0]
-    df_pos_series = df[(df["trial_type"] == "completed") & (df["position"].notna()) & (df["session_num"].notna())].copy()
 
-    if not df_pos_series.empty:
-        grouped = df_pos_series.groupby(["session_num", "position"]).poke_time_ms.mean().reset_index()
+    if session_by_pos:
+        grouped = pd.concat(session_by_pos, ignore_index=True)
         positions = sorted(grouped["position"].unique())
 
         # Dark-to-light blue gradient for positions
@@ -1996,7 +1855,7 @@ def plot_sampling_times_analysis(
         for i, pos in enumerate(positions):
             pos_data = grouped[grouped["position"] == pos].sort_values("session_num")
             color = pos_palette[i % len(pos_palette)]
-            ax.plot(pos_data["session_num"], pos_data["poke_time_ms"],
+            ax.plot(pos_data["session_num"], pos_data["mean"],
                     label=f"Pos {pos}",
                     color=color,
                     linewidth=2.0,
@@ -2014,10 +1873,9 @@ def plot_sampling_times_analysis(
 
     # ============ PLOT 6: Average Poke Time per Odor over Sessions ============
     ax = axes[2, 1]
-    df_odor_series = df[(df["trial_type"] == "completed") & (df["odor"].notna()) & (df["session_num"].notna())].copy()
 
-    if not df_odor_series.empty:
-        grouped = df_odor_series.groupby(["session_num", "odor"]).poke_time_ms.mean().reset_index()
+    if session_by_odor:
+        grouped = pd.concat(session_by_odor, ignore_index=True).rename(columns={"odor_name": "odor"})
         odors = sorted(grouped["odor"].unique())
 
         def _odor_color(odor_label: str):
@@ -2036,7 +1894,7 @@ def plot_sampling_times_analysis(
 
         for odor in odors:
             odor_data = grouped[grouped["odor"] == odor].sort_values("session_num")
-            ax.plot(odor_data["session_num"], odor_data["poke_time_ms"],
+            ax.plot(odor_data["session_num"], odor_data["mean"],
                     label=str(odor),
                     color=_odor_color(odor),
                     linewidth=2.2,
@@ -4653,51 +4511,6 @@ def plot_false_alarm_rate_by_position(
     return fig, ax
 
 
-def _extract_completed_position_poke_times(json_str):
-    """Return list of (position, poke_ms) tuples from a completed trial's
-    ``position_poke_times`` JSON (dict of ``{position: {poke_time_ms, ...}}``)."""
-    try:
-        data = parse_json_column(json_str)
-        if not isinstance(data, dict):
-            return []
-        results = []
-        for pos_str, info in data.items():
-            if isinstance(info, dict):
-                poke_ms = info.get("poke_time_ms")
-                if isinstance(poke_ms, (int, float)) and poke_ms > 0:
-                    try:
-                        results.append((int(pos_str), float(poke_ms)))
-                    except (ValueError, TypeError):
-                        pass
-        return results
-    except Exception:
-        return []
-
-
-def _extract_aborted_position_poke_times(presentations_str, last_event_idx):
-    """Return list of (position, poke_ms) tuples from an aborted trial's
-    ``presentations`` JSON, excluding the abort event (``last_event_idx``)."""
-    try:
-        pres_list = parse_json_column(presentations_str)
-        if not isinstance(pres_list, list):
-            return []
-        results = []
-        for pres in pres_list:
-            if isinstance(pres, dict):
-                if pres.get("index_in_trial") == last_event_idx:
-                    continue
-                poke_ms = pres.get("poke_time_ms")
-                pos = pres.get("position")
-                if pos is not None and isinstance(poke_ms, (int, float)) and poke_ms > 0:
-                    try:
-                        results.append((int(pos), float(poke_ms)))
-                    except (ValueError, TypeError):
-                        pass
-        return results
-    except Exception:
-        return []
-
-
 def plot_poke_duration_by_position(
     subjids,
     dates=None,
@@ -4803,37 +4616,18 @@ def plot_poke_duration_by_position(
             results_dir = ses_dir / "saved_analysis_results"
             if not results_dir.exists():
                 continue
-            views = _load_trial_views(results_dir)
-            comp = views["completed"]
-            aborted = views["aborted"]
-
-            comp_pairs = []
-            if not comp.empty and "position_poke_times" in comp.columns:
-                for lst in comp["position_poke_times"].apply(_extract_completed_position_poke_times):
-                    comp_pairs.extend(lst)
-
-            abort_pairs = []
-            if not aborted.empty and "presentations" in aborted.columns:
-                extracted = aborted.apply(
-                    lambda r: _extract_aborted_position_poke_times(
-                        r["presentations"], r.get("last_event_index")
-                    ),
-                    axis=1,
-                )
-                for lst in extracted:
-                    abort_pairs.extend(lst)
+            position_data = build_position_data(
+                _load_trial_views(results_dir)["trial_data"])
 
             # Collapse each session to one mean per position per trial type.
-            for trial_type, pairs in (("completed", comp_pairs), ("aborted", abort_pairs)):
-                if not pairs:
-                    continue
-                dfp = pd.DataFrame(pairs, columns=["position", "poke_ms"])
-                for pos, grp in dfp.groupby("position"):
+            for trial_type, aborted in (("completed", False), ("aborted", True)):
+                stats = poke_duration_by_position(position_data, aborted=aborted)
+                for pos, mean_ms in stats["mean"].items():
                     rows.append({
                         "subjid": sid,
                         "trial_type": trial_type,
                         "position": int(pos),
-                        "mean_poke_ms": float(grp["poke_ms"].mean()),
+                        "mean_poke_ms": float(mean_ms),
                     })
 
     if not rows:
@@ -5086,19 +4880,16 @@ def plot_decision_accuracy(
 
     derivatives_dir = get_derivatives_root()
 
-    def _hr_mask(td):
-        """Boolean mask of hidden-rule trials (hidden_rule_success truthy)."""
-        if "hidden_rule_success" not in td.columns:
-            return pd.Series(False, index=td.index)
-        return td["hidden_rule_success"].astype(str).str.lower().isin(["true", "1", "1.0"])
+    def _decision_acc_split(td):
+        """``(non_hr_accuracy, hr_accuracy)`` for one session.
 
-    def _decision_acc(td, mask):
-        """rewarded / (rewarded + unrewarded) among the masked trials (as in the
-        decision_accuracy metric)."""
-        rtc = td["response_time_category"].astype(str)
-        r = int(((rtc == "rewarded") & mask).sum())
-        u = int(((rtc == "unrewarded") & mask).sum())
-        return (r / (r + u)) if (r + u) > 0 else np.nan
+        VARIANT 6 of the metric audit: the HR / non-HR split is a *granularity*
+        of `decision_accuracy`, not a metric of its own, so it is `by_group` over
+        the canonical HR mask. A side with no trials at all is absent from the
+        grouping and comes back as NaN, which is what the callers below test for.
+        """
+        acc = by_group(decision_accuracy, td, hidden_rule_mask(td)).reindex([False, True])
+        return acc.iloc[0], acc.iloc[1]
 
     # Per-animal, day-aligned accuracy for non-HR ("main") and HR trials (day 1 =
     # first session with an A/B decision). HR splitting only matters if any
@@ -5132,9 +4923,7 @@ def plot_decision_accuracy(
             td = _load_trial_views(results_dir)["trial_data"]
             if td.empty or "response_time_category" not in td.columns:
                 continue
-            hr = _hr_mask(td)
-            non_hr_acc = _decision_acc(td, ~hr)
-            hr_acc = _decision_acc(td, hr)
+            non_hr_acc, hr_acc = _decision_acc_split(td)
             # A session counts as a "day" only if it has an A/B decision.
             if np.isnan(non_hr_acc) and np.isnan(hr_acc):
                 continue
@@ -5394,16 +5183,7 @@ def plot_poke_duration_by_odor(
             return date[str_key]
         return None
 
-    def _odor_letter(value) -> str:
-        """Normalize stored odor tokens ('OdorC' / '"OdorC"' / 'odor c' / 'C') to a
-        bare upper-case letter, same convention as hidden_rule_and_false_alarm."""
-        s = str(value).strip().strip('[]"\'').strip()
-        low = s.lower()
-        if low.startswith("odor"):
-            s = s[4:].strip()
-        return s.upper()
-
-    odors_list = [_odor_letter(o) for o in odors]
+    odors_list = [odor_letter(o) for o in odors]
     odors_set = set(odors_list)
     ab_grouped = show_mean and "A" in odors_set and "B" in odors_set
 
@@ -5422,32 +5202,28 @@ def plot_poke_duration_by_odor(
                 if runs and isinstance(runs[0], dict):
                     stage = runs[0].get("stage", {}) if isinstance(runs[0].get("stage", {}), dict) else {}
                     hr_odors = stage.get("hidden_rule_odors", []) or []
-            return [_odor_letter(o) for o in hr_odors if o]
+            return [odor_letter(o) for o in hr_odors if o]
         except Exception:
             return []
 
     def _extract_odor_poke_ms(td):
-        """Return {odor_letter: [poke_ms, ...]} for requested odors, from
-        completed trials' ``presentations`` only (aborted trials excluded)."""
+        """``{odor_letter: [poke_ms, ...]}`` for the requested odors, completed trials.
+
+        VARIANT 9 of the metric audit: this used to walk ``presentations`` with a
+        ``poke_ms > 0`` filter — the fourth copy of finding 5's extractor. Both
+        divergences were measured to be no-ops, so it now reads the canonical
+        source. Pooling these raw samples into the A+B / Hidden Rule / Other
+        series below is a display grouping, and stays here.
+        """
         out: dict = {}
-        if td.empty or "presentations" not in td.columns:
-            return out
-        completed = td.loc[~td["is_aborted"], "presentations"]
-        for pres_json in completed:
-            pres_list = parse_json_column(pres_json)
-            if not isinstance(pres_list, list):
+        pokes = poke_durations(build_position_data(td), aborted=False)
+        for odor, poke_ms in zip(pokes["odor_name"], pokes["poke_time_ms"]):
+            if odor is None:
                 continue
-            for pres in pres_list:
-                if not isinstance(pres, dict):
-                    continue
-                poke_ms = pres.get("poke_time_ms")
-                odor = pres.get("odor_name")
-                if odor is None or not isinstance(poke_ms, (int, float)) or poke_ms <= 0:
-                    continue
-                letter = _odor_letter(odor)
-                if letter not in odors_set:
-                    continue
-                out.setdefault(letter, []).append(float(poke_ms))
+            letter = odor_letter(odor)
+            if letter not in odors_set:
+                continue
+            out.setdefault(letter, []).append(float(poke_ms))
         return out
 
     derivatives_dir = get_derivatives_root()

@@ -2170,12 +2170,24 @@ def poke_durations(position_data, *, aborted=False):
 
 
 def _mean_sd_by(frame, key):
+    """Mean, population SD and count of `poke_time_ms` per `key`.
+
+    `np.mean` / `np.std` on each group's array, deliberately **not** the pandas
+    reductions. Both are the population SD, but the two sum in a different order
+    and disagree in the last ULP -- measured, that moved 28 drawn values in
+    `plot_sampling_times_analysis` alone. This is the same "summation style is
+    part of the metric" trap the audit records for `avg_sampling_time_*`.
+    """
     if frame.empty:
         return pd.DataFrame(columns=["mean", "sd", "n"])
-    grouped = frame.dropna(subset=[key]).groupby(key)["poke_time_ms"]
-    # ddof=0: the plotters draw `np.std(values)`, i.e. the population SD.
-    return pd.DataFrame({"mean": grouped.mean(), "sd": grouped.std(ddof=0),
-                         "n": grouped.size()})
+    grouped = frame.dropna(subset=[key]).groupby(key, sort=True)["poke_time_ms"]
+    stats = {}
+    for name, values in grouped:
+        arr = values.to_numpy(dtype=float)
+        stats[name] = (float(np.mean(arr)), float(np.std(arr)), int(arr.size))
+    out = pd.DataFrame.from_dict(stats, orient="index", columns=["mean", "sd", "n"])
+    out.index.name = key
+    return out
 
 
 def poke_duration_by_position(position_data, *, aborted=False):
