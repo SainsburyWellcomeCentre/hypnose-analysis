@@ -229,27 +229,27 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         print("\n--- Sequence Completion Rate ---")
         metrics['sequence_completion_rate'] = sequence_completion_rate_session(results)
         print("\n--- Odor Abortion Rate ---")
-        odor_ab = odorx_abortion_rate(results)
+        odor_ab = odorx_abortion_rate_session(results)
         metrics['odorx_abortion_rate'] = odor_ab.to_dict() if hasattr(odor_ab, 'to_dict') else odor_ab
         print("\n--- Hidden Rule Performance ---")
         metrics['hidden_rule_performance'] = hidden_rule_performance_session(results)
         print("\n--- Hidden Rule Detection Rate ---")
         metrics['hidden_rule_detection_rate'] = hidden_rule_detection_rate_session(results)
         print("\n--- Hidden Rule Performance/Detection by Odor ---")
-        metrics['hidden_rule_by_odor'] = hidden_rule_counts_by_odor(results)
+        metrics['hidden_rule_by_odor'] = hidden_rule_counts_by_odor_session(results)
         print("\n--- Choice Timeout Rate ---")
         metrics['choice_timeout_rate'] = choice_timeout_rate_session(results)
         print("\n--- Average Sampling Time per Odor (Completed) ---")
-        avg_samp_odor = avg_sampling_time_odor_x(results)
+        avg_samp_odor = avg_sampling_time_odor_x_session(results)
         metrics['avg_sampling_time_odor_x'] = avg_samp_odor.to_dict() if hasattr(avg_samp_odor, 'to_dict') else avg_samp_odor
         print("\n--- Average Sampling Time (Completed Sequences) ---")
-        metrics['avg_sampling_time_completed_sequence'] = avg_sampling_time_completed_sequence(results)
+        metrics['avg_sampling_time_completed_sequence'] = avg_sampling_time_completed_sequence_session(results)
         print("\n--- Average Sampling Time (Aborted Sequences) ---")
-        metrics['avg_sampling_time_aborted_sequence'] = avg_sampling_time_aborted_sequence(results)
+        metrics['avg_sampling_time_aborted_sequence'] = avg_sampling_time_aborted_sequence_session(results)
         print("\n--- Average Sampling Time (Initiation Abortions) ---")
         metrics['avg_sampling_time_initiation_abortion'] = avg_sampling_time_initiation_abortion(results)
         print("\n--- Abortion Rate by Position ---")
-        abrt_pos = abortion_rate_positionX(results)
+        abrt_pos = abortion_rate_positionX_session(results)
         metrics['abortion_rate_positionX'] = abrt_pos.to_dict() if hasattr(abrt_pos, 'to_dict') else abrt_pos
         print("\n--- Average Response Time ---")
         metrics['avg_response_time'] = avg_response_time_session(results)
@@ -258,7 +258,7 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         print("\n--- Response Rate ---")
         metrics['response_rate'] = response_rate_session(results)
         print("\n--- Manual vs Auto Stop Preference ---")
-        metrics['manual_vs_auto_stop_preference'] = manual_vs_auto_stop_preference(results)
+        metrics['manual_vs_auto_stop_preference'] = manual_vs_auto_stop_preference_session(results)
         print("\n--- Non-Initiated FA Rate ---")
         metrics['non_initiated_FA_rate'] = non_initiated_FA_rate(results)
         print("\n--- Non-Initiation Odor Bias ---")
@@ -268,7 +268,7 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         odor_init = odor_initiation_bias_session(results)
         metrics['odor_initiation_bias'] = odor_init.to_dict() if hasattr(odor_init, 'to_dict') else odor_init
         print("\n--- FA Abortion Stats ---")
-        fa_ab_stats = fa_abortion_stats(results, return_df=True)
+        fa_ab_stats = fa_abortion_stats_session(results, return_df=True)
         if fa_ab_stats is not None:
             metrics['fa_abortion_stats'] = {
                 'by_odor': fa_ab_stats[0].to_dict(orient='records') if hasattr(fa_ab_stats[0], 'to_dict') else None,
@@ -1043,37 +1043,105 @@ def sequence_completion_rate_session(results):
     print(f"Sequence Completion Rate: {n_completed}/{denom} = {rate:.3f}")
     return n_completed, denom, rate
 
-def odorx_abortion_rate(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "presentations" not in df.columns:
-        return pd.Series(dtype=float)
+# ================== Metric cores: tier 2, grouped inside a position blob =========
+#
+# restructure_2 Phase 4a, decision D0 tier 2. These eight metrics group by odor
+# or by position -- keys that used to live inside a per-trial JSON blob, so each
+# one parsed a blob inline. They now read `position_data`, the long
+# `trial x position` frame `load_session_results` derives (see
+# `metric_analysis/frames.build_position_data`).
+#
+# **Each filters on the provenance flag for the blob it read before.** The three
+# blobs do NOT carry the same positions: `position_valve_times` records valve
+# activations whose poke registered as ~0 ms, which `position_poke_times` and
+# `presentations` both drop. On the fixture set that is 34 rows on sub-053, 19 on
+# sub-057, 17 on sub-059, 7 on sub-048, 4 on sub-040 20251124 and 1 each on
+# sub-046 and sub-056. Reading `position_data` unfiltered would silently widen
+# every sampling metric.
+#
+# Summation style is reproduced deliberately, not incidentally: the two pooled
+# `avg_sampling_time_*` metrics accumulate `total += x` left to right, while
+# `avg_sampling_time_odor_x` calls `np.mean` on a per-odor list, which is
+# pairwise. The two disagree in the last ULP over a few hundred values -- enough
+# to move the metrics md5, and invisible in any printed output.
 
-    odor_col = "last_odor_name" if "last_odor_name" in df.columns else "last_odor"
-    if odor_col not in df.columns:
-        return pd.Series(dtype=float)
 
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    aborted = df[aborted_mask]
+def _position_rows(position_data, blob, *, aborted=None):
+    """Rows of `position_data` that came from `blob`, optionally by outcome.
 
+    Returns None when the frame is absent or unusable, which every caller treats
+    as "no positions" -- the same answer today's inline blob walk gives.
+    """
+    if position_data is None or len(position_data) == 0:
+        return None
+    if blob not in position_data.columns:
+        return None
+    rows = position_data[position_data[blob].astype(bool)]
+    if aborted is not None:
+        rows = rows[rows["is_aborted"].astype(bool) == aborted]
+    return rows
+
+
+def _sequential_mean(values):
+    """Mean by left-to-right accumulation.
+
+    Matches the `total = 0.0; total += x` loops this replaces. `np.mean` and
+    `Series.mean` sum pairwise and differ in the last ULP over a few hundred
+    values, which moves the metrics fingerprint.
+    """
+    total = 0.0
+    n = 0
+    for v in values:
+        total += v
+        n += 1
+    return total / n if n > 0 else np.nan
+
+
+def presentation_counts_by_odor(position_data):
+    """`{odor_name: n presentations}` -- the denominator of `odorx_abortion_rate`.
+
+    Counts `presentations` rows only, so the valve-only positions never enter.
+    """
+    rows = _position_rows(position_data, "in_presentations")
+    if rows is None or rows.empty:
+        return {}
+    rows = rows[rows["odor_name"].notna()]
+    return {od: int(n) for od, n in rows.groupby("odor_name").size().items()}
+
+
+def odorx_abortion_rate(trials, position_data, *, with_counts=False):
+    """aborts@odor / presentations@odor."""
+    empty = ({}, {}, {}) if with_counts else pd.Series(dtype=float)
+    if trials.empty or "presentations" not in trials.columns:
+        return empty
+    odor_col = "last_odor_name" if "last_odor_name" in trials.columns else "last_odor"
+    if odor_col not in trials.columns:
+        return empty
+
+    aborted = trials[_aborted_mask(trials)]
     abortions = aborted[odor_col].dropna().value_counts().to_dict()
-
-    presentations = {}
-    for _, row in df.iterrows():
-        pres_list = parse_json_column(row.get("presentations", []))
-        if isinstance(pres_list, list):
-            for pres in pres_list:
-                od = pres.get("odor_name") if isinstance(pres, dict) else None
-                if od is not None:
-                    presentations[od] = presentations.get(od, 0) + 1
+    presentations = presentation_counts_by_odor(position_data)
 
     all_odors = set(presentations.keys()).union(abortions.keys())
     rates = {}
     for od in sorted(all_odors):
-        n_ab = abortions.get(od, 0)
         n_pres = presentations.get(od, 0)
-        rates[od] = n_ab / n_pres if n_pres > 0 else np.nan
-        print(f"{od}: {n_ab}/{n_pres} abortions, Rate: {rates[od]:.3f}")
-    return pd.Series(rates).sort_index()
+        rates[od] = abortions.get(od, 0) / n_pres if n_pres > 0 else np.nan
+    if with_counts:
+        return rates, abortions, presentations
+    return pd.Series(rates, dtype=float).sort_index()
+
+
+def odorx_abortion_rate_session(results):
+    parts = odorx_abortion_rate(results.get("trial_data", pd.DataFrame()),
+                                results.get("position_data"), with_counts=True)
+    if not isinstance(parts, tuple):
+        return parts
+    rates, abortions, presentations = parts
+    for od in sorted(rates):
+        print(f"{od}: {abortions.get(od, 0)}/{presentations.get(od, 0)} abortions, "
+              f"Rate: {rates[od]:.3f}")
+    return pd.Series(rates, dtype=float).sort_index()
 
 def hidden_rule_performance_contributions(trials):
     return (((_truthy(trials, "hidden_rule_success")
@@ -1265,17 +1333,22 @@ def _infer_hr_odors_from_row(row, hr_odors, hr_positions):
     return out or ["Unknown"]
 
 
-def hidden_rule_counts_by_odor(results):
+def _fmt_rate(val):
+    return f"{val:.3f}" if isinstance(val, (int, float, np.floating)) and not np.isnan(val) else "nan"
+
+
+def hidden_rule_counts_by_odor(trials, position_data, hr_odors, hr_positions):
     """
     Aggregate HR trials by odor across outcome categories to support per-odor performance/detection.
     Returns a dict with hr_odors, hr_positions, and per-odor counts plus rates.
+
+    `hr_odors` / `hr_positions` are session *metadata*, not trial data, so the
+    core takes them as arguments and `_extract_hr_config` stays in the wrapper.
     """
-    df = results.get("trial_data", pd.DataFrame())
+    df = trials
     if df.empty:
-        print("Hidden Rule Counts by Odor: no trial_data")
         return {"hr_odors": [], "hr_positions": [], "by_odor": {}}
 
-    hr_odors, hr_positions = _extract_hr_config(results)
     hr_set = set(hr_odors)
     counts = defaultdict(lambda: defaultdict(int))
 
@@ -1313,18 +1386,10 @@ def hidden_rule_counts_by_odor(results):
     # Missed HR trials: not aborted and not successful
     _add_counts((~aborted_mask) & (~success_mask), "missed")
 
-    # Total presentations per odor (match odorx_abortion_rate logic)
-    presentations = {}
-    for _, row in df.iterrows():
-        pres_list = parse_json_column(row.get("presentations", []))
-        if isinstance(pres_list, list):
-            for pres in pres_list:
-                od = pres.get("odor_name") if isinstance(pres, dict) else None
-                if od is not None and od in hr_set:
-                    presentations[od] = presentations.get(od, 0) + 1
-
-    def _fmt_rate(val):
-        return f"{val:.3f}" if isinstance(val, (int, float, np.floating)) and not np.isnan(val) else "nan"
+    # Total presentations per odor -- the same count `odorx_abortion_rate` uses,
+    # restricted to the hidden-rule odors.
+    presentations = {od: n for od, n in presentation_counts_by_odor(position_data).items()
+                     if od in hr_set}
 
     by_odor = {}
     for odor in sorted(seen_odors):
@@ -1341,14 +1406,6 @@ def hidden_rule_counts_by_odor(results):
 
         performance = rewarded / completed_no_timeout if completed_no_timeout > 0 else np.nan
         detection_rate = completed_no_timeout / total_presentations if total_presentations > 0 else np.nan
-
-        print(
-            f"Hidden Rule Odor {odor}: {rewarded} Rewarded, {unrewarded} Unrewarded, {timeout} Timeout, {total_presentations} Total Presentations."
-        )
-        print(
-            f"  HR Odor {odor} Performance: {rewarded}/{completed_no_timeout} = {_fmt_rate(performance)}, "
-            f"HR Odor {odor} Detection Rate: {completed_no_timeout}/{total_presentations} = {_fmt_rate(detection_rate)}"
-        )
 
         by_odor[odor] = {
             "rewarded": int(rewarded),
@@ -1370,6 +1427,29 @@ def hidden_rule_counts_by_odor(results):
         "hr_positions": hr_positions,
         "by_odor": by_odor,
     }
+
+
+def hidden_rule_counts_by_odor_session(results):
+    trials = results.get("trial_data", pd.DataFrame())
+    if trials.empty:
+        print("Hidden Rule Counts by Odor: no trial_data")
+        return {"hr_odors": [], "hr_positions": [], "by_odor": {}}
+    hr_odors, hr_positions = _extract_hr_config(results)
+    out = hidden_rule_counts_by_odor(trials, results.get("position_data"),
+                                     hr_odors, hr_positions)
+    for odor in out["hr_odors"]:
+        c = out["by_odor"][odor]
+        print(
+            f"Hidden Rule Odor {odor}: {c['rewarded']} Rewarded, {c['unrewarded']} Unrewarded, "
+            f"{c['timeout']} Timeout, {c['total_presentations']} Total Presentations."
+        )
+        print(
+            f"  HR Odor {odor} Performance: {c['rewarded']}/{c['completed_no_timeout']} = "
+            f"{_fmt_rate(c['performance'])}, "
+            f"HR Odor {odor} Detection Rate: {c['completed_no_timeout']}/{c['total_presentations']} = "
+            f"{_fmt_rate(c['detection_rate'])}"
+        )
+    return out
 
 def choice_timeout_rate_contributions(trials):
     completed = ~_aborted_mask(trials)
@@ -1393,77 +1473,71 @@ def choice_timeout_rate_session(results):
     print(f"Choice Timeout Rate: {n_tmo}/{denom} = {rate:.3f}")
     return n_tmo, denom, rate
 
-def avg_sampling_time_odor_x(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty:
+def avg_sampling_time_odor_x(position_data):
+    """Mean `poke_time_ms` per odor over completed trials, from `position_poke_times`."""
+    rows = _position_rows(position_data, "in_poke_times", aborted=False)
+    if rows is None or rows.empty:
         return pd.Series(dtype=float)
-
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    completed = df[~aborted_mask]
-    if completed.empty:
+    rows = rows[rows["odor_name"].notna() & rows["poke_time_ms"].notna()]
+    if rows.empty:
         return pd.Series(dtype=float)
-
-    odor_times = {}
-    for _, row in completed.iterrows():
-        ppt = parse_json_column(row.get("position_poke_times", {}))
-        if isinstance(ppt, dict):
-            for _, info in ppt.items():
-                od = info.get("odor_name") if isinstance(info, dict) else None
-                poke_ms = info.get("poke_time_ms") if isinstance(info, dict) else None
-                if od is not None and poke_ms is not None:
-                    odor_times.setdefault(od, []).append(poke_ms)
-
-    avg_times = pd.Series({od: np.mean(times) for od, times in odor_times.items()}).sort_index()
-    for odor, avg_time in avg_times.items():
-        print(f"{odor} Average Sampling Time: {avg_time:.2f} ms")
-
+    # `np.mean` on each group's values rather than `Series.mean()`: this
+    # replaces a per-odor Python list passed to `np.mean`, and pandas' reduction
+    # kernel can land a ULP away. `rename`s keep the unnamed Series shape the
+    # single-dict construction produced.
+    avg_times = (rows.groupby("odor_name")["poke_time_ms"]
+                 .apply(lambda s: np.mean(s.to_numpy()))
+                 .rename(None).rename_axis(None).sort_index())
     return avg_times
 
-def avg_sampling_time_completed_sequence(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty:
+
+def avg_sampling_time_odor_x_session(results):
+    avg_times = avg_sampling_time_odor_x(results.get("position_data"))
+    for odor, avg_time in avg_times.items():
+        print(f"{odor} Average Sampling Time: {avg_time:.2f} ms")
+    return avg_times
+
+
+def avg_sampling_time_completed_sequence(position_data):
+    """Pooled mean `poke_time_ms` over completed trials' `position_poke_times`."""
+    rows = _position_rows(position_data, "in_poke_times", aborted=False)
+    if rows is None or rows.empty:
         return np.nan
+    return _sequential_mean(rows.loc[rows["poke_time_ms"].notna(), "poke_time_ms"])
 
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    completed = df[~aborted_mask]
 
-    total_time = 0.0
-    total_presentations = 0
-    for _, row in completed.iterrows():
-        ppt = parse_json_column(row.get("position_poke_times", {}))
-        if isinstance(ppt, dict):
-            for _, info in ppt.items():
-                poke_ms = info.get("poke_time_ms") if isinstance(info, dict) else None
-                if poke_ms is not None:
-                    total_time += poke_ms
-                    total_presentations += 1
-    avg = total_time / total_presentations if total_presentations > 0 else np.nan
+def avg_sampling_time_completed_sequence_session(results):
+    if results.get("trial_data", pd.DataFrame()).empty:
+        return np.nan
+    avg = avg_sampling_time_completed_sequence(results.get("position_data"))
     print(f"Average Sampling Time (Completed Sequences): {avg:.2f} ms")
     return avg
 
-def avg_sampling_time_aborted_sequence(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty:
-        return np.nan
 
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    aborted = df[aborted_mask]
-    if aborted.empty:
-        return np.nan
+def avg_sampling_time_aborted_sequence(position_data):
+    """Pooled mean `poke_time_ms` over aborted trials' `presentations`.
 
-    total_time = 0.0
-    total_presentations = 0
-    for _, row in aborted.iterrows():
-        pres_list = parse_json_column(row.get("presentations", []))
-        last_idx = row.get("last_event_index")
-        if isinstance(pres_list, list):
-            for pres in pres_list:
-                idx = pres.get("index_in_trial") if isinstance(pres, dict) else None
-                poke_ms = pres.get("poke_time_ms") if isinstance(pres, dict) else None
-                if idx is not None and idx != last_idx and poke_ms is not None:
-                    total_time += poke_ms
-                    total_presentations += 1
-    avg = total_time / total_presentations if total_presentations > 0 else np.nan
+    Excludes the abort event itself -- the entry whose `index_in_trial` equals
+    the trial's `last_event_index`. A null `last_event_index` matches nothing, so
+    that trial contributes every entry, as it does today.
+    """
+    rows = _position_rows(position_data, "in_presentations", aborted=True)
+    if rows is None or rows.empty:
+        return np.nan
+    idx = rows["index_in_trial"]
+    keep = (idx.notna() & (idx != rows["last_event_index"])
+            & rows["poke_time_ms"].notna())
+    return _sequential_mean(rows.loc[keep, "poke_time_ms"])
+
+
+def avg_sampling_time_aborted_sequence_session(results):
+    # Silent on an empty trial table and on a session with no aborted trials --
+    # both bail before the print today, where a session that aborted but
+    # recorded no usable presentation still prints "nan ms".
+    trials = results.get("trial_data", pd.DataFrame())
+    if trials.empty or not _aborted_mask(trials).any():
+        return np.nan
+    avg = avg_sampling_time_aborted_sequence(results.get("position_data"))
     print(f"Average Sampling Time (Aborted Sequences): {avg:.2f} ms")
     return avg
 
@@ -1483,31 +1557,43 @@ def avg_sampling_time_initiation_abortion(results):
     print(f"Average Sampling Time (Initiation Abortions): {all_vals.mean() if not all_vals.empty else np.nan:.2f} ms")
     return all_vals.mean() if not all_vals.empty else np.nan
 
-def abortion_rate_positionX(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty:
-        return pd.Series(dtype=float)
+def abortion_rate_positionX(trials, *, with_counts=False):
+    """aborts@position / trials that reached it.
 
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    aborted = df[aborted_mask]
-    completed = df[~aborted_mask]
+    The denominator is `frames.reached_counts` -- the single definition of
+    "reached" for the package (audit Q5), which is why this core needs only the
+    trial frame even though it is a per-position metric.
+    """
+    empty = ({}, {}, {}) if with_counts else pd.Series(dtype=float)
+    if trials.empty:
+        return empty
+    position_col = "last_odor_position" if "last_odor_position" in trials.columns else "last_event_index"
+    if position_col not in trials.columns:
+        return empty
 
-    position_col = "last_odor_position" if "last_odor_position" in df.columns else "last_event_index"
-    if position_col not in df.columns:
-        return pd.Series(dtype=float)
-
+    aborted = trials[_aborted_mask(trials)]
     abortions = aborted[position_col].dropna().value_counts().to_dict()
+    reached = _reached_counts(trials)
 
-    reached = _reached_counts(df)
-
-    all_positions = sorted(set(list(abortions.keys()) + list(reached.keys())))
     rates = {}
-    for pos in all_positions:
-        n_ab = abortions.get(pos, 0)
+    for pos in sorted(set(list(abortions.keys()) + list(reached.keys()))):
         n_reached = reached.get(pos, 0)
-        rates[pos] = n_ab / n_reached if n_reached > 0 else np.nan
-        print(f"Position {pos}: {n_ab}/{n_reached} abortions, Rate: {rates[pos]:.3f}")
-    return pd.Series(rates).sort_index()
+        rates[pos] = abortions.get(pos, 0) / n_reached if n_reached > 0 else np.nan
+    if with_counts:
+        return rates, abortions, reached
+    return pd.Series(rates, dtype=float).sort_index()
+
+
+def abortion_rate_positionX_session(results):
+    parts = abortion_rate_positionX(results.get("trial_data", pd.DataFrame()),
+                                    with_counts=True)
+    if not isinstance(parts, tuple):
+        return parts
+    rates, abortions, reached = parts
+    for pos in sorted(rates):
+        print(f"Position {pos}: {abortions.get(pos, 0)}/{reached.get(pos, 0)} abortions, "
+              f"Rate: {rates[pos]:.3f}")
+    return pd.Series(rates, dtype=float).sort_index()
 
 def avg_response_time(trials):
     """Mean `response_time_ms` by category, plus the pooled rewarded+unrewarded."""
@@ -1593,31 +1679,32 @@ def response_rate_session(results):
     print(f"Response Rate: {num}/{denom} = {rate:.3f}")
     return num, denom, rate
 
-def manual_vs_auto_stop_preference(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty:
+def manual_vs_auto_stop_preference(position_data):
+    """Valve durations on completed trials, split at 1000 ms.
+
+    Reads `position_valve_times` only. That blob is a *superset* of the other
+    two -- it records positions whose poke registered as ~0 ms -- so this is the
+    one metric that would gain rows if the provenance filter were dropped.
+    """
+    rows = _position_rows(position_data, "in_valve_times", aborted=False)
+    if rows is None or rows.empty:
         return {"short_valve": 0, "long_valve": 0, "ratio": np.nan}
+    dur = rows.loc[rows["valve_duration_ms"].notna(), "valve_duration_ms"]
+    # `if dur <= 1000 ... elif dur >= 1000`: exactly 1000 ms counts short only.
+    short = int((dur <= 1000).sum())
+    long = int((dur > 1000).sum())
+    return {"short_valve": short, "long_valve": long,
+            "ratio": short / long if long > 0 else float('nan')}
 
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    completed = df[~aborted_mask]
 
-    short = 0
-    long = 0
-    for _, row in completed.iterrows():
-        vts = parse_json_column(row.get("position_valve_times", {}))
-        if isinstance(vts, dict):
-            for _, info in vts.items():
-                dur = info.get("valve_duration_ms") if isinstance(info, dict) else None
-                if dur is not None:
-                    if dur <= 1000:
-                        short += 1
-                    elif dur >= 1000:
-                        long += 1
-    ratio = short / long if long > 0 else float('nan')
-    print(f"Manual Stops: {short}")
-    print(f"Auto Stops: {long}")
-    print(f"Manual vs Auto Stop: {ratio:.2f}")
-    return {"short_valve": short, "long_valve": long, "ratio": ratio}
+def manual_vs_auto_stop_preference_session(results):
+    if results.get("trial_data", pd.DataFrame()).empty:
+        return {"short_valve": 0, "long_valve": 0, "ratio": np.nan}
+    out = manual_vs_auto_stop_preference(results.get("position_data"))
+    print(f"Manual Stops: {out['short_valve']}")
+    print(f"Auto Stops: {out['long_valve']}")
+    print(f"Manual vs Auto Stop: {out['ratio']:.2f}")
+    return out
 
 def non_initiated_FA_rate(results):
     fa_noninit_df = results.get("non_initiated_FA", pd.DataFrame())
@@ -1728,32 +1815,37 @@ def odor_initiation_bias_session(results):
         print(f"{od}: {n_init[od]}/{n_ab[od]} initiation abortions, Bias: {bias[od]:.3f}")
     return pd.Series(bias).sort_index()
 
-def fa_abortion_stats(results, return_df=False):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "fa_label" not in df.columns:
-        print("No FA abortion data available.")
-        return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+def _fa_abortion_frames_missing(trials):
+    """The guard `fa_abortion_stats` fails on, or None. Message is the caller's."""
+    if trials.empty or "fa_label" not in trials.columns:
+        return "No FA abortion data available."
+    odor_col = "last_odor_name" if "last_odor_name" in trials.columns else "last_odor"
+    if odor_col not in trials.columns:
+        return "No FA abortion data available (missing odor column)."
+    if "last_odor_position" not in trials.columns:
+        return "No FA abortion data available (missing last_odor_position)."
+    if not _aborted_mask(trials).any():
+        return "No aborted trials found."
+    return None
+
+
+def fa_abortion_stats(trials):
+    """FA abortion breakdown by odor / position / odor x position.
+
+    Returns three DataFrames, empty when the frame lacks what they need. Values
+    are pre-formatted strings (`"3/10 (0.30)"`) -- the audit's finding 3 wants
+    them numeric, which is a 4b/`summary.py` change, not a 4a one.
+    """
+    df = trials
+    empty = (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    if _fa_abortion_frames_missing(df) is not None:
+        return empty
 
     odor_col = "last_odor_name" if "last_odor_name" in df.columns else "last_odor"
-    if odor_col not in df.columns:
-        print("No FA abortion data available (missing odor column).")
-        return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+    pos_col = "last_odor_position"
 
-    pos_col = "last_odor_position" if "last_odor_position" in df.columns else None
-    if pos_col is None:
-        print("No FA abortion data available (missing last_odor_position).")
-        return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
-
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    aborted_all = df[aborted_mask]
-    completed = df[~aborted_mask]
+    aborted_all = df[_aborted_mask(df)]
     allowed_fa = {"FA_time_in", "FA_time_out", "FA_late"}
-    fa_mask = aborted_all["fa_label"].isin(allowed_fa)
-    fa_df = aborted_all[fa_mask]
-
-    if aborted_all.empty:
-        print("No aborted trials found.")
-        return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
 
     subtype_labels = [
         ("FA_time_in", "FA Time In"),
@@ -1837,6 +1929,18 @@ def fa_abortion_stats(results, return_df=False):
             row[pretty] = f"{count} ({count/n_total:.2f})"
         pos_rows.append(row)
     df_pos = pd.DataFrame(pos_rows)
+
+    return df_odor, df_pos, df_out
+
+
+def fa_abortion_stats_session(results, return_df=False):
+    trials = results.get("trial_data", pd.DataFrame())
+    missing = _fa_abortion_frames_missing(trials)
+    if missing is not None:
+        print(missing)
+        return None if not return_df else (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
+
+    df_odor, df_pos, df_out = fa_abortion_stats(trials)
 
     if not return_df:
         if not df_odor.empty:

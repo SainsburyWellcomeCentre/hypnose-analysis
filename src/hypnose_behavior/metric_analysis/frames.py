@@ -205,6 +205,17 @@ _PRES_FIELDS = ("index_in_trial", "is_last_event", "poke_time_ms", "poke_first_i
 
 _ID_COLUMNS = ("trial_id", "global_trial_id", "subjid", "date", "session_num")
 
+# Trial-level columns denormalised onto every position row, because a
+# per-position metric needs them and joining back to `trials` for one scalar is
+# not worth it. `is_aborted` is already carried this way.
+#
+# `last_event_index` is the abort event's index within the trial:
+# `avg_sampling_time_aborted_sequence` excludes exactly the entry whose
+# `index_in_trial` equals it. The `is_last_event` flag `presentations` carries
+# agrees with that rule on all 9 fixture sessions, but it is a *different* rule,
+# and 4a reproduces today's values rather than a rule that happens to match.
+_TRIAL_COLUMNS = ("last_event_index",)
+
 
 def _entries_by_position(val) -> dict[int, dict]:
     """Normalise a position blob (dict-of-dicts or list-of-dicts) to {position: entry}."""
@@ -255,7 +266,7 @@ def build_position_data(trials) -> pd.DataFrame:
     if trials is None or len(trials) == 0:
         return pd.DataFrame()
 
-    id_cols = [c for c in _ID_COLUMNS if c in trials.columns]
+    id_cols = [c for c in _ID_COLUMNS + _TRIAL_COLUMNS if c in trials.columns]
     rows = []
     for _, trial in trials.iterrows():
         poke = _entries_by_position(trial.get("position_poke_times", {}))
