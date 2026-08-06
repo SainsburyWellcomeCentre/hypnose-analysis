@@ -22,8 +22,8 @@ from matplotlib import cm
 from typing import Iterable, Optional, Union
 from hypnose_behavior.utils.helpers import _filter_session_dirs, _iter_subject_dirs
 from hypnose_behavior.io.paths import get_derivatives_root
-from hypnose_behavior.io.layout import derivatives, normalize_subjid
-from hypnose_behavior.io.loaders import _load_trial_views
+from hypnose_behavior.io.layout import derivatives, list_sessions, normalize_subjid
+from hypnose_behavior.io.loaders import _load_trial_views, _odor_to_letter
 from hypnose_behavior.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_metrics,
     compute_sing_rew_rates,
@@ -1324,6 +1324,72 @@ def _infer_hr_odors_from_row(row, hr_odors, hr_positions):
 
 def _fmt_rate(val):
     return f"{val:.3f}" if isinstance(val, (int, float, np.floating)) and not np.isnan(val) else "nan"
+
+
+def hr_odor_associations(subj_dirs) -> dict:
+    """Learn which reward ('A' or 'B') each hidden-rule odor maps to.
+
+    Scans hidden-rule sessions for the given subject directories and, for every
+    hidden-rule *success* trial, reads which HR odor fired (odor_sequence at the
+    success position) and the reward identity it produced
+    (``first_supply_odor_identity``). Votes are accumulated per odor; since the
+    association is conserved for an animal, we stop scanning a subject once all
+    of its HR odors are resolved.
+
+    Returns ``{odor_letter: 'A' | 'B'}`` (empty if no HR sessions found).
+
+    Judgement call 1 of the metric audit: it is **session metadata**, not a
+    plotting concern -- `visualization/` only used it to pick a colour, but the
+    fact it establishes (which reward an animal's hidden-rule odor pays out) is
+    an analysis result. Moved here verbatim.
+
+    One thing 4b should reconcile: the truthiness test below accepts the string
+    ``"1.0"``, which `_is_truthy` -- and therefore `hidden_rule_mask` -- does not.
+    The move keeps today's rule rather than silently adopting the other one.
+    """
+    votes: dict = defaultdict(lambda: {"A": 0, "B": 0})
+    for subj_dir in subj_dirs:
+        if subj_dir is None:
+            continue
+        for session in list_sessions(subj_dir):
+            results_dir = session.path / "saved_analysis_results"
+            summary_path = results_dir / "summary.json"
+            if not summary_path.exists():
+                continue
+            try:
+                with open(summary_path, "r", encoding="utf-8") as f:
+                    hr_raw = json.load(f).get("params", {}).get("hidden_rule_odors", []) or []
+            except Exception:
+                hr_raw = []
+            # A/B are decision/reward odors, not genuine hidden-rule odors; some
+            # probe sessions list them as hidden_rule_odors, so ignore them here.
+            hr_letters = {_odor_to_letter(o) for o in hr_raw if o} - {"A", "B"}
+            if not hr_letters:
+                continue
+            td = _load_trial_views(results_dir)["trial_data"]
+            if td.empty or "hidden_rule_success" not in td.columns:
+                continue
+            mask = td["hidden_rule_success"].astype(str).str.lower().isin(["true", "1", "1.0"])
+            for _, r in td[mask].iterrows():
+                ident = r.get("first_supply_odor_identity")
+                if ident not in ("A", "B"):
+                    continue
+                seq = parse_json_column(r.get("odor_sequence"))
+                pos = r.get("hidden_rule_success_position")
+                if not isinstance(seq, (list, tuple, np.ndarray)) or pos is None:
+                    continue
+                try:
+                    if isinstance(pos, float) and np.isnan(pos):
+                        continue
+                    letter = _odor_to_letter(seq[int(pos) - 1])
+                except Exception:
+                    continue
+                if letter in hr_letters:
+                    votes[letter][ident] += 1
+            # Association is conserved per animal; stop once all HR odors resolved.
+            if all(sum(votes[l].values()) > 0 for l in hr_letters):
+                break
+    return {l: ("A" if v["A"] >= v["B"] else "B") for l, v in votes.items() if sum(v.values()) > 0}
 
 
 def hidden_rule_counts_by_odor(trials, position_data, hr_odors, hr_positions):

@@ -163,6 +163,38 @@ def run_speed_analysis_batch(
     return processed
 
 
+def speed_threshold(baseline_values, *, alpha: float = 10.0, beta: float = 10.0,
+                    enabled: bool = True) -> dict:
+    """Baseline speed statistics and the movement-onset threshold.
+
+    ``vthresh = max(alpha * mu, mu + beta * sigma)`` over the speeds in the
+    baseline window, where ``mu``/``sigma`` are the population mean and SD.
+
+    Finding 7 of the metric audit: this was written three times -- here, and
+    again in `plot_epoch_speeds_by_condition` and `plot_traces_with_speed_threshold`,
+    which re-derived it rather than reading it back. A plotted threshold that
+    disagrees with the one used to compute the saved latencies is the failure that
+    invites, and it is invisible in any output.
+
+    ``enabled=False`` reports mu/sigma but no combined threshold, matching the
+    plotters' ``threshold=False`` switch. Every value is ``None`` when the
+    baseline window is empty.
+    """
+    values = np.asarray(baseline_values, dtype=float)
+    mu = float(np.nanmean(values)) if values.size else None
+    sigma = float(np.nanstd(values)) if values.size else None
+    alpha_mu = mu * alpha if mu is not None else None
+    mu_plus_beta_sigma = mu + beta * sigma if mu is not None and sigma is not None else None
+    thr_max = None
+    if enabled and mu is not None:
+        candidates = [v for v in (alpha_mu, mu_plus_beta_sigma) if v is not None]
+        if candidates:
+            thr_max = max(candidates)
+    return {"mu": mu, "sigma": sigma, "alpha": alpha, "beta": beta,
+            "alpha_mu": alpha_mu, "mu_plus_beta_sigma": mu_plus_beta_sigma,
+            "max_alpha_mu_mu_plus_beta_sigma": thr_max}
+
+
 def compute_speed_analysis(
     subjid,
     dates=None,
@@ -614,19 +646,12 @@ def compute_speed_analysis(
             print(f"No epoch data for {date_str}")
             continue
 
-        baseline_mean = np.nanmean(baseline_vals) if baseline_vals else None
-        baseline_sd = np.nanstd(baseline_vals) if baseline_vals else None
-        thr_alpha_mu = baseline_mean * threshold_alpha if baseline_mean is not None else None
-        thr_mu_plus_beta_sigma = (
-            baseline_mean + threshold_beta * baseline_sd
-            if baseline_mean is not None and baseline_sd is not None
-            else None
-        )
-        thr_max = None
-        if threshold and baseline_mean is not None:
-            candidates = [v for v in [thr_alpha_mu, thr_mu_plus_beta_sigma] if v is not None]
-            if candidates:
-                thr_max = max(candidates)
+        stats = speed_threshold(baseline_vals, alpha=threshold_alpha,
+                                beta=threshold_beta, enabled=threshold)
+        baseline_mean, baseline_sd = stats["mu"], stats["sigma"]
+        thr_alpha_mu = stats["alpha_mu"]
+        thr_mu_plus_beta_sigma = stats["mu_plus_beta_sigma"]
+        thr_max = stats["max_alpha_mu_mu_plus_beta_sigma"]
 
         # compute and store per-trial crossing times using per-trial bins
         if "latency_s" not in trial_data.columns:

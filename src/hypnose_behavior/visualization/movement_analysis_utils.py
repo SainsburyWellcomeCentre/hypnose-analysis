@@ -47,16 +47,17 @@ from hypnose_behavior.io.loaders import _load_table_with_trial_data, _load_trial
 # Moved out of this file in Phase 4a: the tracking loader is io/, and
 # compute_speed_analysis is a metrics module (it does no plotting at all).
 from hypnose_behavior.io.tracking import _load_tracking_and_behavior
+from hypnose_behavior.metric_analysis.stats.kw_mwu import kw_mwu_by_group
 from hypnose_behavior.metric_analysis.movement import (
     _binned_speed,
     compute_speed_analysis,
     run_speed_analysis_batch,
+    speed_threshold,
 )
 from hypnose_behavior.io.save import save_figure
 import re
 import numpy as np
 import json
-from scipy.stats import kruskal, mannwhitneyu
 
 
 MOVEMENT_FIGURES_SUBDIR = "movement_figures"
@@ -1760,19 +1761,14 @@ def plot_epoch_speeds_by_condition(
         # Baseline stats from stored speeds
         baseline_mask = (df_speed["bin_mid_s"] >= baseline_window[0]) & (df_speed["bin_mid_s"] <= baseline_window[1])
         baseline_vals = df_speed.loc[baseline_mask, "speed"].dropna().to_numpy()
-        baseline_mean = np.nanmean(baseline_vals) if baseline_vals.size else None
-        baseline_sd = np.nanstd(baseline_vals) if baseline_vals.size else None
-        thr_alpha_mu = baseline_mean * threshold_alpha if baseline_mean is not None else None
-        thr_mu_plus_beta_sigma = (
-            baseline_mean + threshold_beta * baseline_sd
-            if baseline_mean is not None and baseline_sd is not None
-            else None
-        )
-        thr_max = None
-        if threshold and baseline_mean is not None:
-            candidates = [v for v in [thr_alpha_mu, thr_mu_plus_beta_sigma] if v is not None]
-            if candidates:
-                thr_max = max(candidates)
+        # One definition of the threshold, shared with compute_speed_analysis --
+        # which is what produced the latencies this figure draws (finding 7).
+        stats = speed_threshold(baseline_vals, alpha=threshold_alpha,
+                                beta=threshold_beta, enabled=threshold)
+        baseline_mean, baseline_sd = stats["mu"], stats["sigma"]
+        thr_alpha_mu = stats["alpha_mu"]
+        thr_mu_plus_beta_sigma = stats["mu_plus_beta_sigma"]
+        thr_max = stats["max_alpha_mu_mu_plus_beta_sigma"]
 
         figs_by_cond = {}
         for cond in conds_with_data:
@@ -2313,11 +2309,10 @@ def plot_traces_with_speed_threshold(
             if skipped_no_poke_end:
                 print(f"Warning [{date_str}]: skipped trials with no poke_odor_end in position_poke_times: {skipped_no_poke_end}")
             continue
-        mu = float(np.nanmean(baseline_vals_arr))
-        sigma = float(np.nanstd(baseline_vals_arr))
-        thr_alpha_mu = mu * threshold_alpha
-        thr_mu_plus_beta_sigma = mu + threshold_beta * sigma
-        vthresh = max(thr_alpha_mu, thr_mu_plus_beta_sigma)
+        stats = speed_threshold(baseline_vals_arr, alpha=threshold_alpha,
+                                beta=threshold_beta)
+        mu, sigma = stats["mu"], stats["sigma"]
+        vthresh = stats["max_alpha_mu_mu_plus_beta_sigma"]
 
         if "speed_threshold_time" not in trial_data.columns:
             trial_data["speed_threshold_time"] = pd.NaT
@@ -2830,82 +2825,6 @@ def plot_movement_analysis_statistics(
     ses_dirs = _filter_session_dirs(subj_dir, dates)
     if not ses_dirs:
         raise FileNotFoundError(f"No sessions found for subject {subjid} with given dates")
-
-
-    def _kw_mwu_by_group(df, value_col, group_col="condition", min_pair_n=5):
-        """Run Kruskal-Wallis across groups, then pairwise Mann-Whitney U with Holm correction if KW is significant.
-
-        Returns dict with keys:
-          - kruskal: {"stat": H, "p": p, "n_per_group": {...}, "groups": [...]} or None
-          - pairwise: list of {g1, g2, n1, n2, u_stat, p_raw, p_corr} (only if KW significant and n>=min_pair_n in both).
-        """
-        if df is None or df.empty or value_col not in df.columns or group_col not in df.columns:
-            return {"kruskal": None, "pairwise": []}
-
-        clean_df = df[[group_col, value_col]].dropna()
-        clean_df = clean_df[np.isfinite(clean_df[value_col].astype(float))]
-        if clean_df.empty:
-            return {"kruskal": None, "pairwise": []}
-
-        groups = {}
-        for g, sub in clean_df.groupby(group_col):
-            vals = sub[value_col].astype(float).to_numpy()
-            if vals.size > 0:
-                groups[g] = vals
-
-        if len(groups) < 2:
-            return {"kruskal": None, "pairwise": []}
-
-        # Kruskal-Wallis
-        try:
-            kw_stat, kw_p = kruskal(*groups.values())
-        except Exception:
-            return {"kruskal": None, "pairwise": []}
-
-        kruskal_res = {
-            "stat": float(kw_stat),
-            "p": float(kw_p),
-            "n_per_group": {k: int(len(v)) for k, v in groups.items()},
-            "groups": list(groups.keys()),
-        }
-
-        # Pairwise only if significant
-        pairwise = []
-        if kw_p < 0.05:
-            pairs = [("rewarded", "unrewarded"), ("rewarded", "fa"), ("unrewarded", "fa")]
-            raw_ps = []
-            stats_tmp = []
-            for g1, g2 in pairs:
-                v1 = groups.get(g1)
-                v2 = groups.get(g2)
-                n1 = len(v1) if v1 is not None else 0
-                n2 = len(v2) if v2 is not None else 0
-                if v1 is None or v2 is None or n1 < min_pair_n or n2 < min_pair_n:
-                    continue
-                try:
-                    u_stat, p_raw = mannwhitneyu(v1, v2, alternative="two-sided")
-                except Exception:
-                    continue
-                raw_ps.append(p_raw)
-                stats_tmp.append({"g1": g1, "g2": g2, "n1": n1, "n2": n2, "u_stat": float(u_stat), "p_raw": float(p_raw)})
-
-            # Holm-Bonferroni on the collected raw p-values
-            m = len(raw_ps)
-            if m > 0:
-                order = np.argsort(raw_ps)
-                adjusted = np.empty(m)
-                max_adj = 0.0
-                for rank, idx in enumerate(order):
-                    adj = raw_ps[idx] * (m - rank)
-                    adj = min(adj, 1.0)
-                    max_adj = max(max_adj, adj) # this should enfore monotonicity, as each p_corr should be >= the previous one
-                    adjusted[idx] = max_adj
-                # map back
-                for i, entry in enumerate(stats_tmp):
-                    entry["p_corr"] = float(adjusted[i])
-                    pairwise.append(entry)
-
-        return {"kruskal": kruskal_res, "pairwise": pairwise}
 
 
     def _has_odor(seq, odor_letter: str) -> bool:
@@ -3613,11 +3532,11 @@ def plot_movement_analysis_statistics(
 
     # Statistical summaries across all pooled sessions/trials (by condition)
     stats_summary = {}
-    stats_summary["latency_s"] = _kw_mwu_by_group(pd.DataFrame(combined_rows) if combined_rows else pd.DataFrame(), "latency_s")
-    stats_summary["movement_from_valve_s"] = _kw_mwu_by_group(pd.DataFrame(combined_valve_rows) if combined_valve_rows else pd.DataFrame(), "movement_from_valve_s")
-    stats_summary["path_length_px"] = _kw_mwu_by_group(pd.DataFrame(combined_path_rows) if combined_path_rows else pd.DataFrame(), "path_length_px")
-    stats_summary["travel_time_s"] = _kw_mwu_by_group(pd.DataFrame(combined_travel_rows) if combined_travel_rows else pd.DataFrame(), "travel_time_s")
-    stats_summary["tortuosity"] = _kw_mwu_by_group(pd.DataFrame(combined_tortuosity_rows) if combined_tortuosity_rows else pd.DataFrame(), "tortuosity")
+    stats_summary["latency_s"] = kw_mwu_by_group(pd.DataFrame(combined_rows) if combined_rows else pd.DataFrame(), "latency_s")
+    stats_summary["movement_from_valve_s"] = kw_mwu_by_group(pd.DataFrame(combined_valve_rows) if combined_valve_rows else pd.DataFrame(), "movement_from_valve_s")
+    stats_summary["path_length_px"] = kw_mwu_by_group(pd.DataFrame(combined_path_rows) if combined_path_rows else pd.DataFrame(), "path_length_px")
+    stats_summary["travel_time_s"] = kw_mwu_by_group(pd.DataFrame(combined_travel_rows) if combined_travel_rows else pd.DataFrame(), "travel_time_s")
+    stats_summary["tortuosity"] = kw_mwu_by_group(pd.DataFrame(combined_tortuosity_rows) if combined_tortuosity_rows else pd.DataFrame(), "tortuosity")
 
     # Print statistical summary
     print("\n" + "="*60)

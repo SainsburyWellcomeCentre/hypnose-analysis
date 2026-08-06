@@ -23,6 +23,7 @@ from hypnose_behavior.metric_analysis.metrics_utils import (
     fa_rate_by_position,
     fa_port_counts,
     hidden_rule_mask,
+    hr_odor_associations,
     hr_abort_poke_gap,
     inter_trial_interval,
     rolling_hr_reward_fraction,
@@ -721,68 +722,11 @@ _POOLED_SERIES_COLORS = {
 }
 
 
-def _hr_odor_associations(subj_dirs) -> dict:
-    """Learn which reward ('A' or 'B') each hidden-rule odor maps to.
-
-    Scans hidden-rule sessions for the given subject directories and, for every
-    hidden-rule *success* trial, reads which HR odor fired (odor_sequence at the
-    success position) and the reward identity it produced
-    (``first_supply_odor_identity``). Votes are accumulated per odor; since the
-    association is conserved for an animal, we stop scanning a subject once all
-    of its HR odors are resolved.
-
-    Returns ``{odor_letter: 'A' | 'B'}`` (empty if no HR sessions found).
-    """
-    votes: dict = defaultdict(lambda: {"A": 0, "B": 0})
-    for subj_dir in subj_dirs:
-        if subj_dir is None:
-            continue
-        for session in list_sessions(subj_dir):
-            results_dir = session.path / "saved_analysis_results"
-            summary_path = results_dir / "summary.json"
-            if not summary_path.exists():
-                continue
-            try:
-                with open(summary_path, "r", encoding="utf-8") as f:
-                    hr_raw = json.load(f).get("params", {}).get("hidden_rule_odors", []) or []
-            except Exception:
-                hr_raw = []
-            # A/B are decision/reward odors, not genuine hidden-rule odors; some
-            # probe sessions list them as hidden_rule_odors, so ignore them here.
-            hr_letters = {_odor_to_letter(o) for o in hr_raw if o} - {"A", "B"}
-            if not hr_letters:
-                continue
-            td = _load_trial_views(results_dir)["trial_data"]
-            if td.empty or "hidden_rule_success" not in td.columns:
-                continue
-            mask = td["hidden_rule_success"].astype(str).str.lower().isin(["true", "1", "1.0"])
-            for _, r in td[mask].iterrows():
-                ident = r.get("first_supply_odor_identity")
-                if ident not in ("A", "B"):
-                    continue
-                seq = parse_json_column(r.get("odor_sequence"))
-                pos = r.get("hidden_rule_success_position")
-                if not isinstance(seq, (list, tuple, np.ndarray)) or pos is None:
-                    continue
-                try:
-                    if isinstance(pos, float) and np.isnan(pos):
-                        continue
-                    letter = _odor_to_letter(seq[int(pos) - 1])
-                except Exception:
-                    continue
-                if letter in hr_letters:
-                    votes[letter][ident] += 1
-            # Association is conserved per animal; stop once all HR odors resolved.
-            if all(sum(votes[l].values()) > 0 for l in hr_letters):
-                break
-    return {l: ("A" if v["A"] >= v["B"] else "B") for l, v in votes.items() if sum(v.values()) > 0}
-
-
 def _build_odor_colors(subj_dirs, odors_list) -> Tuple[dict, dict]:
     """Return ``({odor_letter: color}, {hr_odor_letter: 'A'|'B'})`` using the
     shared scheme: A=red, B=green, hidden-rule odor=lighter red/green by its
     learned A/B association, every other odor=a distinct palette colour."""
-    assoc = _hr_odor_associations(subj_dirs)
+    assoc = hr_odor_associations(subj_dirs)
     colors: dict = {}
     other_i = 0
     for letter in odors_list:

@@ -1219,18 +1219,31 @@ drawn value by 18.8 ns (max rel 5.4e-9), the same ns recovery as the `pred_seq_u
 
 `_fr_mask` stays: it *selects* false-response trials, it does not compute anything.
 
-#### `movement_analysis_utils.py` — 2 items (finding 7)
+#### `movement_analysis_utils.py` — 2 items ✅ *(done 2026-08-06)* (finding 7)
 
-`plot_epoch_speeds_by_condition` and `plot_traces_with_speed_threshold` still re-derive baseline
-mu/sigma and `vthresh` instead of reading `speed_threshold` from `speed_analysis.parquet`. Also
-removes the risk of a plotted threshold disagreeing with the one used to compute the saved
-latencies.
+`plot_epoch_speeds_by_condition` and `plot_traces_with_speed_threshold` re-derived baseline
+mu/sigma and `vthresh`. Removes the risk of a plotted threshold disagreeing with the one used
+to compute the saved latencies.
 
-#### 2 judgement-call moves, never started
+**Corrected as implemented: the threshold is not in the parquet.** `speed_analysis.parquet`
+carries per-trial `speed_threshold_time`; the scalar `vthresh` only ever existed in
+`compute_speed_analysis`' in-memory return. So there was nothing to read back, and the fix is
+the other one the checklist implies: the 8-line derivation becomes
+**`metric_analysis/movement.speed_threshold(baseline_values, alpha=, beta=)`**, returning the
+same `mu / sigma / alpha_mu / mu_plus_beta_sigma / max_alpha_mu_mu_plus_beta_sigma` dict that
+`compute_speed_analysis` already reports. All three sites call it. Both plotters byte-identical.
 
-`_hr_odor_associations` (`visualization_utils:714`) → `metric_analysis` as session metadata;
-`_kw_mwu_by_group` (`movement_analysis_utils`) → `metric_analysis/stats/kw_mwu.py`, one module
-per test.
+#### 2 judgement-call moves ✅ *(done 2026-08-06)*
+
+`_hr_odor_associations` → `metrics_utils.hr_odor_associations` (session metadata);
+`_kw_mwu_by_group` → `metric_analysis/stats/kw_mwu.kw_mwu_by_group`, one module per test.
+Both bodies verified byte-identical against `git show HEAD:...` after normalising the
+docstring, and `movement_analysis_utils` no longer imports scipy at all.
+
+**One thing left for 4b:** `hr_odor_associations` tests truthiness with
+`astype(str).str.lower().isin(["true", "1", "1.0"])`, which accepts `"1.0"` where `_is_truthy`
+-- and so `hidden_rule_mask` -- does not. The move kept today's rule rather than silently
+adopting the other; `metric_analysis` now holds both, and 4b should reconcile them.
 
 #### Explicitly NOT 4a
 

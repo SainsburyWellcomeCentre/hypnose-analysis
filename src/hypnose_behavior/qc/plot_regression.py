@@ -97,6 +97,10 @@ CASES = [
     # session in the coverage set; on any other subject these draw nothing.
     ("FR_ratio", [[57]], {"dates": [20260709]}),
     ("FR_latency", [[57]], {"dates": [20260709]}),
+    # movement_analysis_utils (checklist 18-19). sub-040 20251124 is the one
+    # coverage session with SLEAP tracking *and* a speed_analysis.parquet.
+    ("plot_epoch_speeds_by_condition", [40], {"dates": [20251124]}),
+    ("plot_traces_with_speed_threshold", [40], {"dates": [20251124]}),
 ]
 
 # Runs inside the child process, against whichever tree is on sys.path.

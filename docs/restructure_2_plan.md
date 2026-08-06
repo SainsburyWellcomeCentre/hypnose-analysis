@@ -707,9 +707,7 @@ duplication is visible.
 .boxplot( 0    .hist( 0    .barh( 0    .bar( 1
 ```
 
-Two things follow. First, **there are no boxplots today** — a common boxplot helper is new
-capability, not deduplication; worth adding, but don't expect it to shrink anything. Second,
-the largest real repetition is **axis decoration**: 53 legends and 55 axis labels.
+One thing follows. The largest real repetition is **axis decoration**: 53 legends and 55 axis labels.
 
 **Target shape:**
 
