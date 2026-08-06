@@ -977,6 +977,16 @@ Tick items off here as they land, so a later chat sees what remains. Commits are
 | D0 | **`by_group` / `over_windows`** → `metric_analysis/resolvers.py` | `9215384`, `634b9c5` | Both evaluate the core on a *slice*, so rates reduce `num.sum()/den.sum()` rather than averaging per-trial values. `by_group`'s parts verified to sum back to the session value exactly. |
 | D0 | **cores + wrappers, tier-1 remainder + all 3 tier-3** | `f6051b7` | `decision_accuracy_by_odor`, `avg_response_time`, `FA_avg_response_times`; and `FA_odor_bias` / `FA_position_bias` / `odor_initiation_bias` now take `reference=`. Values **and printed output** identical on all 9 sessions -- the print check caught a float/int rendering drift in `decision_accuracy_by_odor` that the fingerprint cannot see, since `metrics_*.txt` is not part of it. |
 | D0 | **`position_data` derived at load time** | `67d7f29` | `build_position_data` in `frames.py`; `load_session_results` emits `results["position_data"]`. |
+| D0 | **cores + wrappers, all 8 tier-2 metrics** | `07182bd` | `odorx_abortion_rate`, `hidden_rule_counts_by_odor`, `avg_sampling_time_{odor_x,completed_sequence,aborted_sequence}`, `abortion_rate_positionX`, `manual_vs_auto_stop_preference`, `fa_abortion_stats`. **D0 is now complete for every tier.** Two traps found and avoided -- see "Two things tier 2 turned on" below. |
+| 1-9 | **NEW behavioural metrics** out of `visualization_utils` | `611eb2a` | `fa_rate_by_odor`, `fa_rate_by_position`, `rolling_reward_fraction`, `rolling_hr_reward_fraction`, `poke_duration_by_{position,odor}`, `inter_trial_interval`, `hr_abort_poke_gap`, `hidden_rule_mask`. Checklist 7 is `by_group` over that mask, not a metric. `frames.odor_letter` replaces the token normaliser four sites re-implemented. |
+| 17-22 | **NEW trial-timing metrics** out of `pred_seq_utils` / `sing_rew` | `e9516e4` | `trial_poke_span`, `trial_poke_total`, `reward_delivery_latency`, `valve_to_reward_latency`, `fa_latency_from_pokeout`, `false_response_ratio`. Verified against the plotters' own arithmetic on all 9 sessions: identical trial sets, max divergence **0.999 ns** -- scalar `Timedelta.total_seconds()` truncates to microseconds, the vectorised form does not, and the exact value is kept. |
+| 23-24 | **`ambiguous_rate` / `correct_rejection_rate`** into `compute_sing_rew_rates` | `ef7bb4a` | **Output change 1 of 2** (confirmed with Joschua; the plan had assumed step 6 was the only one). Diff was exactly `~ sing_rew_metrics` on sub-057, the one singrew session; `--generate 057:20260709`. `sing_rew._metric_value` now just looks both up. |
+| 1 | **One FA port counter** | `7e05f7c` | `fa_port_counts` / `fa_port_ratio` / `fa_port_share_a`; the seven `visualization_utils` recomputes keep their slicing and lose the arithmetic. `A/(A+B)` is rescaled from the signed ratio per VARIANT resolutions 1-2, never recounted. `fa_port_ratio_by_odor` joined them in step 6. |
+| DEDUP | **three exact DEDUPs** | `a8e1292` | `plot_response_times_completed_vs_fa` -> `avg_response_time` + `FA_avg_response_times`; `plot_cumulative_rewards`' threshold gate -> `decision_accuracy`; the rolling-average builder -> `rolling_reward_fraction`. |
+| Q5 | **definitions B and C deleted** | `eed459c` | `plot_position_completion_rate` is now the complement of `abortion_rate_positionX`; `plot_false_alarm_rate_by_position` calls `fa_rate_by_position`. Both denominators are `reached_counts`. **Intended figure change**, confirmed by the plot gate to touch exactly those two plotters and only their y-values. |
+| 6 | **step 6 -- non-initiated out of the metric set** | `05a4b1b` | **Output change 2 of 2.** Diff was exactly the 3 removed keys plus `fa_port_ratio_by_odor` on all 9, `trial_data` green throughout, nothing added. `fa_port_ratio_by_odor` flattened (no `with_`/`without_` wrapper) and its counts are real ints, not `np.int64` serialising as strings. |
+| 15 | **`_compute_real_time_offset`** -> `io/loaders` | `601eeeb` | `compute_real_time_offset`; `valve_poke_plots` calls the loader's rather than its own copy. |
+| — | **`qc/plot_regression.py`** (new gate, not a 4a item) | `601eeeb`, `9ebb031` | See "The gate the audit said did not exist" below. |
 
 ### One deviation from the audit, deliberate — read before touching per-position metrics
 
@@ -1047,28 +1057,180 @@ The registry declares which frame each metric consumes via a decorator argument
 (`@metric(frame="trials" | "position_data")`), **not** by file boundary — so grouping stays
 by behavioural construct rather than by D0 tier.
 
+### Two things tier 2 turned on
+
+Both would have changed values silently, and neither is visible in any printed output.
+
+1. **Summation style is part of the metric.** The two pooled `avg_sampling_time_*` metrics
+   accumulate `total += x` left to right; `avg_sampling_time_odor_x` calls `np.mean` on a
+   per-odor list, which sums pairwise. The two disagree in the last ULP over a few hundred
+   values -- enough to move the metrics md5. `_sequential_mean` exists to reproduce the first;
+   the second uses `np.mean` on the group's array. Do not "tidy" either into `Series.mean()`.
+
+2. **`last_event_index` is denormalised onto `position_data`.**
+   `avg_sampling_time_aborted_sequence` excludes the entry whose `index_in_trial` equals it.
+   `presentations` also carries an `is_last_event` flag, and it agrees with that rule on all
+   9 fixture sessions -- but it is a *different* rule, and 4a reproduces today's values rather
+   than a rule that happens to match.
+
+Also worth knowing: `manual_vs_auto_stop_preference` returned `np.int64` counts, which
+`json.dumps(..., default=str)` writes as **strings**. Any tier-2 port has to cast to `int`, or
+the fingerprint moves for a reason that looks like nothing.
+
+### The gate the audit said did not exist
+
+This document and the plan both note that figures are outside the regression fingerprint and
+"need eyeballing rather than a gate". They now have one: **`qc/plot_regression.py`** runs 19
+plotters under Agg against a git revision and the working tree, then diffs every line's xy
+data, collection offsets, patch geometry, axis decoration and stdout.
+
+It earned itself twice on the day it was written. It caught a `pd.concat(fa_list, ...)` left
+behind by the step 6 edits -- `fa_list` no longer existed, and `get_fa_ratio_a_stats`' bare
+`except Exception: continue` would have swallowed the `NameError` and silently returned an
+empty frame for every session. And it confirmed the Q5 denominator change moved exactly two
+plotters, only their y-values, with no artist, axis or label change anywhere else.
+
+**Phase 5 should lean on it heavily** -- it is the only thing standing between a plotting
+refactor and a silently wrong figure. Note it seeds the global RNG before each call, because
+several plotters jitter points and never seed it.
+
 ### Remaining
 
-**D0 is complete for tiers 1 and 3.** What is left:
+**D0 is complete for every tier, all 24 checklist metrics exist, and both output changes are
+done.** What is left is repointing plot code at metrics that now exist -- value-neutral for
+`metrics_*.json` by construction, and gated by `qc/plot_regression.py` rather than by
+`regression.py`.
 
-1. **Tier 2 (8 metrics) onto `position_data`.** `odorx_abortion_rate`,
-   `hidden_rule_counts_by_odor`, `avg_sampling_time_{odor_x,completed_sequence,aborted_sequence}`,
-   `abortion_rate_positionX`, `manual_vs_auto_stop_preference`, `fa_abortion_stats`. The frame
-   exists and is verified; these still parse blobs inline. **Each must filter on the provenance
-   flag matching the blob it reads today** -- `in_poke_times` for `avg_sampling_time_*`,
-   `in_valve_times` for `manual_vs_auto_stop_preference`, `in_presentations` for
-   `odorx_abortion_rate` / `hidden_rule_counts_by_odor`. Skipping the filter changes values: the
-   blobs differ by 19 rows on sub-057, 7 on sub-048, 4 on sub-040, 1 on sub-046.
-   Tier 4 is deleted by step 6 -- do **not** port it.
-2. The exact `DEDUP`s, then the `NEW` metrics, then the helper consolidations
-   (poke-time extractors, FA port counting, trajectory prep, `_compute_real_time_offset`).
-3. Step 6 (drop non-initiated) -- **ask before running `--generate`**.
+1. **Plotters still carrying their own copy of a metric that now exists:**
+   `hidden_rule_and_false_alarm` -> `fa_rate_by_odor`;
+   `plot_decision_accuracy._decision_acc` -> `decision_accuracy` + `by_group(hidden_rule_mask)`
+   (VARIANT 6); `plot_sampling_times_analysis`, `plot_poke_duration_by_position` and
+   `plot_poke_duration_by_odor` -> `poke_durations` / `poke_duration_by_*` (VARIANTs 8-9 and
+   finding 5's four extractors); `_load_subject_trial_timeline` -> `inter_trial_interval`.
+2. **Three that need the loop restructured, not just a call swapped.**
+   `plot_hr_reward_fraction_over_trials`, `plot_hidden_rule_abort_poke_gap` and the ITI axis
+   build per-session dict rows and then pool *across* sessions before computing, whereas the
+   metrics take one session's frame. Pool `trial_data` first, then call the metric -- do not
+   apply the metric per session and concatenate, which is a different quantity.
+3. **VARIANTs 3-4** (`plot_fa_ratio_by_hr_position`, `plot_fa_ratio_by_abort_odor`): the
+   counting is already shared via `fa_port_counts`; only the HR/abort-odor slicing is still
+   written out longhand and could become `by_group`. Cosmetic, not a lost metric.
+4. **`pred_seq_utils` (7 sites) and `sing_rew` (`FR_ratio`, `_response_time_ms`)** still compute
+   their own copies of checklist 17-22. The metrics exist; the plotters have not been repointed.
+5. **Movement finding 7** -- `plot_epoch_speeds_by_condition` and
+   `plot_traces_with_speed_threshold` still re-derive baseline mu/sigma and `vthresh` instead of
+   reading them from `speed_analysis.parquet`.
+6. **Findings 10 and 14** -- trajectory prep duplicated across `movement_analysis_utils` and
+   `sing_rew_movement`, and the context-dependent `OdorG` relabelling written twice. Both are
+   `PREP`, so they belong to the shared `visualization/` prep module, i.e. Phase 5.
+
+**Finding 3 is a 4b item, not an oversight.** `fa_abortion_stats` returns pre-formatted strings
+and `plot_abortion_and_fa_rates` parses them back. Making it return numbers changes
+`metrics['fa_abortion_stats']`, and this document already assigns the formatting to `summary.py`
+in 4b -- so it lands there, with the fixture regeneration, rather than as a third output change
+in 4a.
 
 **Check printed output, not just values.** `metrics_*.txt` is written from the wrappers' stdout
 and is *not* in the fingerprint, so a print-only drift is invisible to the regression. The
-old-vs-new harness used throughout (import the pre-change module from `git show HEAD:...`,
-compare both the return value and captured stdout across all 9 sessions) caught exactly that
-once already. It also runs in ~1 minute against saved derivatives, so it is worth running
-*before* each 15-minute regression.
+old-vs-new harness used throughout (export the pre-change tree with `git archive`, compare both
+the return value and captured stdout across all 9 sessions) caught exactly that once already. It
+runs in ~7 seconds against saved derivatives, so run it *before* each 15-minute regression.
+**Copy the repo's git-ignored `configs/data_locations.local.yml` into the exported tree** or it
+resolves its own absent config and silently reads a wrong derivatives root -- the same
+`__file__` trap as Phase 2a.
 
 Then 4b executes the grouping confirmed above.
+
+---
+
+## Handoff prompt for the 4b chat *(written 2026-08-06)*
+
+Paste this into a fresh chat.
+
+```
+I'm continuing a planned restructure of hypnose-behavior-analysis
+(/Users/joschua/repos/harris_lab/hypnose/hypnose-behavior-analysis), on branch
+hypnose-restructure. Use Opus 5 at max effort — the failure mode here is subtle
+silent output change, not throughput.
+
+FIRST, read both in full before doing anything:
+1. docs/restructure_2_plan.md — the authoritative plan. Phases 0-3 are DONE.
+2. docs/metric_audit.md — the Phase 4a audit. Read "Implementation progress" CLOSELY:
+   it is the tick-list, and its "Remaining", "Two things tier 2 turned on" and
+   "The gate the audit said did not exist" sections carry things you must not
+   rediscover the hard way.
+
+This chat: **Phase 4b — modularise metric_analysis.** Do not start Phase 5.
+
+## State you are inheriting
+
+4a's metric side is COMPLETE: all 24 checklist metrics exist in metric_analysis,
+every metric has a pure f(frame) core plus a thin *_session(results) wrapper, the
+resolvers (by_group / over_windows) exist, and both deliberate output changes have
+landed with fixtures regenerated. Fixtures are current; the gate is GREEN.
+
+What 4a did NOT finish is plot-side repointing — several plotters still carry their
+own copy of a metric that now exists. That list is in the audit's "Remaining".
+**It is not 4b's job.** Do it only if you finish 4b and want more; otherwise leave it
+for Phase 5, which rewrites those plotters anyway.
+
+## What 4b is
+
+The grouping is already CONFIRMED and recorded in the audit: 6 modules under
+metric_analysis/metrics/ (accuracy, false_alarm, sequence, hidden_rule, sampling,
+timing) plus the existing movement.py and sing_rew_metrics.py. The plan's "propose a
+grouping and get it confirmed before moving anything" gate is satisfied — do not
+re-open it.
+
+Also in 4b, per the plan:
+- Plumbing out of metrics_utils.py: load_session_results / parse_json_columns → io/;
+  run_all_metrics + batch_run_all_metrics_with_merge → metric_analysis/run.py;
+  pool_results_dicts → merge.py; save_merged_metrics_txt → summary.py;
+  merged_results_output_dir / merged_metrics_filename → io/.
+- A registry so run_all_metrics discovers metrics, declaring each metric's frame via a
+  decorator argument (@metric(frame="trials" | "position_data")), NOT by file boundary.
+  Note the signature is not uniform: some tier-2 metrics legitimately take BOTH frames
+  (odorx_abortion_rate, hidden_rule_counts_by_odor), and hidden_rule_counts_by_odor also
+  takes session metadata (hr_odors, hr_positions) that its wrapper extracts.
+- Finding 3 belongs here: fa_abortion_stats returns pre-formatted strings
+  ("3/10 (0.30)") and plot_abortion_and_fa_rates parses them back. Make it numeric and
+  move the formatting to summary.py. This CHANGES metrics['fa_abortion_stats'] →
+  deliberate fixture regeneration, ASK ME FIRST with the metric-key diff.
+
+## Hard constraints
+
+- /Volumes/harris is STRICTLY READ-ONLY. Never write, move, rename, chmod or delete
+  anything under it, and do not explore it. If every session fails with a
+  FileNotFoundError or "No experiment runs found", that is a dropped/weak mount, not a
+  code regression. CHECK THE MOUNT BEFORE DIAGNOSING.
+- Run everything with ~/miniconda3/envs/hypnose-analysis-test/bin/python. Do NOT
+  install, upgrade or remove packages in any conda env. If something is missing, tell me.
+- Invoke the QC tools by ABSOLUTE path with -u and no cd. The `cd <repo> && python src/...`
+  form is blocked at the permission layer and looks like a hang.
+- ~/repos/harris_lab is itself a commitless git repo. Always use `git -C /full/path`.
+- hypnose_helpers must import nothing from the other two repos.
+
+## Workflow
+
+- Before each change, tell me what you're doing and what regression result you expect.
+- Gate on reachability from run_all_metrics. 4b is almost entirely pure moves, so
+  nearly everything is regression-gated — but run the fast harnesses first:
+  * ~7 s: metric parity. `git archive` the pre-change tree to a temp dir, COPY
+    configs/data_locations.local.yml into it (git-ignored; without it the tree resolves
+    a wrong derivatives root and silently fails), then compare BOTH the return value and
+    captured stdout of run_all_metrics across all 9 sessions. metrics_*.txt comes from
+    the wrappers' stdout and is NOT fingerprinted, so print-only drift is invisible to
+    regression.py — this has already caught one.
+  * ~4 min: $QC/plot_regression.py — diffs what the plotters draw between two trees.
+  * ~15 min: $QC/regression.py, then check_imports.py.
+- **Show the FULL regression output — all 9 sessions, both trial_data and metrics lines.
+  Do not truncate the gate.**
+- GREEN → commit. Unexpected RED → STOP and diagnose. Never regenerate fixtures to make
+  red go away.
+- **Commit messages: subject + 2-3 short sentences MAX**, then gate results, then
+  `Co-Authored-By: Claude Opus 5` (no email). Rationale goes in the chat or the audit.
+- Tick items off the audit as you go. At the end: update the Progress table in the plan,
+  commit it with the work, and write the Phase 5 handoff prompt.
+
+Ask me rather than guessing if a decision isn't settled in the audit.
+```
