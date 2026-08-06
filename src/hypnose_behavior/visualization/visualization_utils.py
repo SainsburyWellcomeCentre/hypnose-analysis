@@ -16,8 +16,10 @@ from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
 from hypnose_behavior.metric_analysis.metrics_utils import (
     FA_avg_response_times,
+    abortion_rate_positionX,
     avg_response_time,
     decision_accuracy,
+    fa_rate_by_position,
     fa_port_counts,
     rolling_reward_fraction,
     fa_port_ratio,
@@ -4264,41 +4266,18 @@ def plot_position_completion_rate(
                 continue
             views = _load_trial_views(results_dir)
             td = views["trial_data"]
-            if td.empty or "num_odors" not in td.columns:
+            if td.empty:
                 continue
 
-            num_odors = pd.to_numeric(td["num_odors"], errors="coerce").dropna().astype(int)
-            if num_odors.empty:
-                continue
-            max_pos = int(num_odors.max())
-            if max_pos < 1:
-                continue
-
-            completed = views["completed"]
-            aborted = views["aborted"]
-
-            # 1-indexed position arrays (index 0 unused).
-            completed_counts = np.zeros(max_pos + 1, dtype=int)
-            aborted_counts = np.zeros(max_pos + 1, dtype=int)
-
-            # Completed trials contribute one completed-count at every position 1..max_pos.
-            completed_counts[1:max_pos + 1] += int(len(completed))
-
-            if not aborted.empty and "last_odor_position" in aborted.columns:
-                lp = pd.to_numeric(aborted["last_odor_position"], errors="coerce").dropna().astype(int)
-                lp = lp[(lp >= 1) & (lp <= max_pos)]
-                for pos in lp:
-                    aborted_counts[pos] += 1
-                    if pos > 1:
-                        completed_counts[1:pos] += 1
+            abortion = abortion_rate_positionX(td)
 
             for p in positions:
-                if p < 1 or p > max_pos:
+                if p not in abortion.index:
                     continue
-                denom = completed_counts[p] + aborted_counts[p]
-                if denom == 0:
+                rate = 1.0 - float(abortion.loc[p])
+                if np.isnan(rate):
                     continue
-                rates_per_position[p].append(completed_counts[p] / denom)
+                rates_per_position[p].append(rate)
                 subj_per_position[p].append(subjid)
 
     fig, ax = plt.subplots(figsize=figsize)
@@ -4554,33 +4533,12 @@ def plot_false_alarm_rate_by_position(
             if td.empty or "presentations" not in td.columns:
                 continue
 
-            reach_counts: dict[int, int] = {p: 0 for p in positions}
-            fa_counts: dict[int, int] = {p: 0 for p in positions}
-
-            # Denominator: every position each trial reached.
-            for pres in td["presentations"]:
-                for p in set(_positions_in_presentations(pres)):
-                    if p in reach_counts:
-                        reach_counts[p] += 1
-
-            # Numerator: FA-aborts, counted at their last sampled position.
-            aborted = views["aborted"]
-            if not aborted.empty and "fa_label" in aborted.columns and "last_odor_position" in aborted.columns:
-                fa_lc = aborted["fa_label"].astype(str).str.lower()
-                if fa_set is None:
-                    fa_mask = fa_lc.ne("nfa") & aborted["fa_label"].notna()
-                else:
-                    fa_mask = fa_lc.isin(fa_set)
-                fa_pos = pd.to_numeric(aborted.loc[fa_mask, "last_odor_position"], errors="coerce").dropna().astype(int)
-                for p in fa_pos:
-                    if p in fa_counts:
-                        fa_counts[p] += 1
+            rates = fa_rate_by_position(td, fa_types=fa_set)
 
             for p in positions:
-                denom = reach_counts[p]
-                if denom == 0:
+                if p not in rates.index:
                     continue
-                rates_per_position[p].append(fa_counts[p] / denom)
+                rates_per_position[p].append(float(rates.loc[p]))
                 subj_per_position[p].append(subjid)
 
     fig, ax = plt.subplots(figsize=figsize)
