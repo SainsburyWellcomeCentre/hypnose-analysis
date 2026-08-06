@@ -33,6 +33,7 @@ __all__ = [
     "sequence_depth",
     "sampled_positions",
     "reached_counts",
+    "build_position_data",
 ]
 
 
@@ -190,3 +191,103 @@ def sampled_positions(trial, *, only_true_pokes: bool = False) -> Optional[list[
 
     out = [_as_int(k) for k in entries.keys()]
     return sorted(p for p in out if p is not None)
+
+
+# ---------------------------------------------------------------- position_data
+
+# Fields carried by each blob. `presentations` is the only one with
+# index_in_trial / is_last_event; only `position_poke_times` has the poke
+# start/end timestamps; only `position_valve_times` has valve_end.
+_POKE_FIELDS = ("poke_time_ms", "poke_odor_start", "poke_odor_end", "poke_first_in")
+_VALVE_FIELDS = ("valve_start", "valve_end", "valve_duration_ms")
+_PRES_FIELDS = ("index_in_trial", "is_last_event", "poke_time_ms", "poke_first_in",
+                "valve_start", "valve_end", "valve_duration_ms")
+
+_ID_COLUMNS = ("trial_id", "global_trial_id", "subjid", "date", "session_num")
+
+
+def _entries_by_position(val) -> dict[int, dict]:
+    """Normalise a position blob (dict-of-dicts or list-of-dicts) to {position: entry}."""
+    parsed = parse_json_column(val)
+    out: dict[int, dict] = {}
+    if isinstance(parsed, dict):
+        items = parsed.items()
+    elif isinstance(parsed, list):
+        items = ((e.get("position") if isinstance(e, dict) else None, e) for e in parsed)
+    else:
+        return out
+    for key, entry in items:
+        if not isinstance(entry, dict):
+            continue
+        pos = _as_int(entry.get("position", key))
+        if pos is None:
+            pos = _as_int(key)
+        if pos is not None:
+            out[pos] = entry
+    return out
+
+
+def build_position_data(trials) -> pd.DataFrame:
+    """Expand the per-trial position blobs into one row per ``trial x position``.
+
+    The long frame every per-position and per-odor metric groups on. Built from
+    the union of ``position_poke_times``, ``presentations`` and
+    ``position_valve_times``, because **the three do not carry the same
+    positions** and a metric that reads one must not silently pick up rows from
+    another:
+
+    - on a *completed* trial ``position_valve_times`` holds every position with a
+      valve activation, including ones whose poke registered as ~0 ms -- which
+      ``position_poke_times``, ``presentations`` and ``num_odors`` all drop
+      (Q5 pattern 2, seen from the writer's side);
+    - on an *aborted* trial all three are restricted to positions with a poke.
+
+    So each row records **which blobs it came from** (``in_poke_times`` /
+    ``in_presentations`` / ``in_valve_times``) and every metric filters on the
+    provenance matching the blob it reads today. Without that,
+    ``manual_vs_auto_stop_preference`` -- which counts valve durations -- would
+    gain the 0 ms positions and change value.
+
+    ``poke_source`` is deliberately **not** synthesised: Phase 7b adds it, and an
+    absent column is how ``sampled_positions`` knows to omit the
+    ``only_true_pokes`` variants rather than return the unfiltered value.
+    """
+    if trials is None or len(trials) == 0:
+        return pd.DataFrame()
+
+    id_cols = [c for c in _ID_COLUMNS if c in trials.columns]
+    rows = []
+    for _, trial in trials.iterrows():
+        poke = _entries_by_position(trial.get("position_poke_times", {}))
+        pres = _entries_by_position(trial.get("presentations", []))
+        valve = _entries_by_position(trial.get("position_valve_times", {}))
+        aborted = _is_aborted(trial)
+
+        for pos in sorted(set(poke) | set(pres) | set(valve)):
+            p_entry, r_entry, v_entry = poke.get(pos, {}), pres.get(pos, {}), valve.get(pos, {})
+            row = {c: trial.get(c) for c in id_cols}
+            row.update({
+                "position": pos,
+                "is_aborted": aborted,
+                "in_poke_times": pos in poke,
+                "in_presentations": pos in pres,
+                "in_valve_times": pos in valve,
+                # odor_name agrees across blobs; take whichever is present.
+                "odor_name": (p_entry.get("odor_name") or v_entry.get("odor_name")
+                              or r_entry.get("odor_name")),
+                "required_min_sampling_time_ms": (
+                    p_entry.get("required_min_sampling_time_ms")
+                    or v_entry.get("required_min_sampling_time_ms")
+                    or r_entry.get("required_min_sampling_time_ms")),
+            })
+            # Poke fields: position_poke_times wins, presentations fills in.
+            for f in _POKE_FIELDS:
+                row[f] = p_entry.get(f, r_entry.get(f))
+            # Valve fields: position_valve_times wins, presentations fills in.
+            for f in _VALVE_FIELDS:
+                row[f] = v_entry.get(f, r_entry.get(f))
+            for f in ("index_in_trial", "is_last_event"):
+                row[f] = r_entry.get(f)
+            rows.append(row)
+
+    return pd.DataFrame(rows)

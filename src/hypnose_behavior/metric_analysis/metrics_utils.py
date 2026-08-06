@@ -31,6 +31,7 @@ from hypnose_behavior.metric_analysis.sing_rew_metrics import (
 # `parse_json_column` is defined in frames.py (it is frame construction, not a
 # metric) and re-exported here so existing importers keep working.
 from hypnose_behavior.metric_analysis.frames import (  # noqa: F401
+    build_position_data,
     parse_json_column,
     presented_positions,
     reached_counts as _reached_counts,
@@ -73,6 +74,12 @@ def load_session_results(subjid, date):
     if trial_df.empty and trial_csv.exists():
         trial_df = pd.read_csv(trial_csv)
     results["trial_data"] = trial_df
+
+    # Long per-position frame, derived here rather than written by the classifier,
+    # so metrics never parse a JSON blob and legacy sessions need no
+    # compatibility branch (D0, tier 2). Phase 7b's position_data side-table
+    # turns this from a derivation into a read.
+    results["position_data"] = build_position_data(trial_df)
 
     # Tables still saved separately
     for t in ["non_initiated_sequences", "non_initiated_odor1_attempts", "non_initiated_FA"]:
