@@ -2117,7 +2117,6 @@ def plot_abortion_and_fa_rates(
     subjid,
     dates=None,
     figsize=(18, 14),
-    include_noninitiated_in_fa_odor=True,
     fa_types='FA_time_in',
     *,
     save=False,
@@ -2134,8 +2133,6 @@ def plot_abortion_and_fa_rates(
         Dates to include
     figsize : tuple
         Figure size
-    include_noninitiated_in_fa_odor : bool
-        If True, include non-initiated FAs in FA Rate per Odor.
     fa_types : str or list, optional
         Which FA types to include:
         - 'FA_Time_In' : only FA_Time_In
@@ -2232,39 +2229,13 @@ def plot_abortion_and_fa_rates(
                             except (ValueError, IndexError):
                                 continue
             
-            # Non-Initiated FA before position 1 (add as "Non-Initiated" to position category)
-            fa_noninit_rate = metrics.get("non_initiated_FA_rate", None)
-            if isinstance(fa_noninit_rate, (tuple, list)) and len(fa_noninit_rate) == 3:
-                n_fa, n_total, rate_noninit = fa_noninit_rate
-                rows.append({
-                    "date": int(date_str),
-                    "metric_type": "fa_rate",
-                    "category": "position",
-                    "position_or_odor": "Non-Initiated",
-                    "rate": rate_noninit
-                })
-
-            # ============ FA PORT RATIO - from trial_data aborted_fa (+ optional non-initiated) ============
+            # ============ FA PORT RATIO - from trial_data aborted_fa ============
             try:
                 views = _load_trial_views(results_dir)
                 ab_det = views.get("aborted_fa", pd.DataFrame())
                 if not ab_det.empty and "fa_label" in ab_det.columns:
                     ab_det = ab_det[fa_filter_fn(ab_det["fa_label"])]
-                if include_noninitiated_in_fa_odor:
-                    fa_noninit = _load_table_with_trial_data(results_dir, "non_initiated_FA")
-                    if not fa_noninit.empty and "fa_label" in fa_noninit.columns:
-                        fa_noninit = fa_noninit[fa_filter_fn(fa_noninit["fa_label"])]
-                        if "odor_name" in fa_noninit.columns:
-                            fa_noninit = fa_noninit.rename(columns={"odor_name": "last_odor_name"})
-                    else:
-                        fa_noninit = pd.DataFrame()
-                else:
-                    fa_noninit = pd.DataFrame()
-
-                if include_noninitiated_in_fa_odor:
-                    fa_all = pd.concat([ab_det, fa_noninit], ignore_index=True)
-                else:
-                    fa_all = ab_det.copy()
+                fa_all = ab_det.copy()
 
                 if not fa_all.empty and {"fa_port", "last_odor_name"}.issubset(fa_all.columns):
                     for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
@@ -2392,14 +2363,13 @@ def plot_abortion_and_fa_rates(
     axes = [ax1, ax2, ax3, ax4, ax5]
     panel_has_data = [False] * len(axes)
     
-    # ============ PLOT 1: FA Rate per Position (with Non-Initiated) ============
+    # ============ PLOT 1: FA Rate per Position ============
     ax = ax1
     df_fa_pos = df[(df["metric_type"] == "fa_rate") & (df["category"] == "position")].copy()
     
     if not df_fa_pos.empty:
         panel_has_data[0] = True
-        # Sort positions: Non-Initiated first, then 1, 2, 3, 4, 5
-        positions = ["Non-Initiated"] + sorted([p for p in df_fa_pos["position_or_odor"].unique() if p != "Non-Initiated"])
+        positions = sorted(df_fa_pos["position_or_odor"].unique())
         position_to_x = {pos: i for i, pos in enumerate(positions)}
         
         for pos in positions:
@@ -2761,7 +2731,6 @@ def plot_fa_ratio_a_over_sessions(
     subjid,
     dates=None,
     figsize=(14, 10),
-    include_noninitiated=True
 ):
     """
     Plot FA Ratio A/(A+B) over sessions for each odor (OPTIMIZED).
@@ -2789,35 +2758,15 @@ def plot_fa_ratio_a_over_sessions(
                 needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
                 ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
 
-            fa_noninit = pd.DataFrame()
-            if include_noninitiated:
-                fa_noninit = _load_table_with_trial_data(results_dir, "non_initiated_FA")
-                if not fa_noninit.empty:
-                    needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
-                    fa_noninit = fa_noninit[[col for col in needed_cols if col in fa_noninit.columns]]
-            
-            # Combine only if we have data
-            if ab_det.empty and fa_noninit.empty:
+            if ab_det.empty:
                 continue
-            
-            # Filter and combine FA data
+
             try:
-                fa_list = []
-                
-                if not ab_det.empty and 'fa_label' in ab_det.columns:
-                    fa_ab = ab_det[ab_det['fa_label'].astype(str) == 'FA_time_in']
-                    if not fa_ab.empty:
-                        fa_list.append(fa_ab)
-                
-                if not fa_noninit.empty and 'fa_label' in fa_noninit.columns:
-                    fa_ni = fa_noninit[fa_noninit['fa_label'].astype(str) == 'FA_time_in']
-                    if not fa_ni.empty:
-                        fa_list.append(fa_ni)
-                
-                if not fa_list:
+                if 'fa_label' not in ab_det.columns:
                     continue
-                
-                fa_all = pd.concat(fa_list, ignore_index=True)
+                fa_all = ab_det[ab_det['fa_label'].astype(str) == 'FA_time_in']
+                if fa_all.empty:
+                    continue
             except Exception as e:
                 continue
             
@@ -5904,33 +5853,16 @@ def get_fa_ratio_a_stats(subjid, dates=None, odors=['C', 'F']):
                 needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
                 ab_det = ab_det[[col for col in needed_cols if col in ab_det.columns]]
 
-            fa_noninit = _load_table_with_trial_data(results_dir, "non_initiated_FA")
-            if not fa_noninit.empty:
-                needed_cols = ['fa_label', 'last_odor_name', 'fa_port']
-                fa_noninit = fa_noninit[[col for col in needed_cols if col in fa_noninit.columns]]
-            
-            # Combine only if we have data
-            if ab_det.empty and fa_noninit.empty:
+            if ab_det.empty:
                 continue
-            
-            # Filter and combine FA data (matching plot_fa_ratio_a_over_sessions logic)
+
+            # Same FA filter as plot_fa_ratio_a_over_sessions, widened to every FA_*.
             try:
-                fa_list = []
-                
-                if not ab_det.empty and 'fa_label' in ab_det.columns:
-                    fa_ab = ab_det[ab_det['fa_label'].astype(str).str.startswith('FA_', na=False)]
-                    if not fa_ab.empty:
-                        fa_list.append(fa_ab)
-                
-                if not fa_noninit.empty and 'fa_label' in fa_noninit.columns:
-                    fa_ni = fa_noninit[fa_noninit['fa_label'].astype(str).str.startswith('FA_', na=False)]
-                    if not fa_ni.empty:
-                        fa_list.append(fa_ni)
-                
-                if not fa_list:
+                if 'fa_label' not in ab_det.columns:
                     continue
-                
-                fa_all = pd.concat(fa_list, ignore_index=True)
+                fa_all = ab_det[ab_det['fa_label'].astype(str).str.startswith('FA_', na=False)]
+                if fa_all.empty:
+                    continue
             except Exception as e:
                 continue
             

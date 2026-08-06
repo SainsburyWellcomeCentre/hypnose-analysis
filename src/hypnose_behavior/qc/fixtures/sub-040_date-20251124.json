@@ -63,7 +63,7 @@
     "total_supply_count": "2b75ab50c8063314e79c42dc669174fe",
     "trial_id": "31f703daf5497de9556ae4f76f13f051"
   },
-  "metrics": "d7d2662df32f8d8011ab82f68a38fadb",
+  "metrics": "741a71a9ab69d3550cba145f57252fdf",
   "metrics_keys": {
     "decision_accuracy": "cefbe91cf247c5b85a9ca6ed8ef1cd00",
     "decision_accuracy_by_odor": "108472fe95ec55f7a0e2309a0d9bb38a",
@@ -82,16 +82,13 @@
     "avg_sampling_time_odor_x": "53ae0acf46745a9c9d770c39dba29826",
     "avg_sampling_time_completed_sequence": "29b5fae72c75a17375e947f8d31dac01",
     "avg_sampling_time_aborted_sequence": "ce52f65994c0c92cca633874f35f9437",
-    "avg_sampling_time_initiation_abortion": "470e0a9a1da1e8ca4e8c75819a9d1146",
     "abortion_rate_positionX": "97455f989ae8c8f2fa52a303a1a55ba6",
     "avg_response_time": "cf7873fe4aefa833d699ab79895c6f05",
     "FA_avg_response_times": "e67d0c3ae24b5940d2ae27b8b182bdf5",
     "response_rate": "bb2236f43e38a2c619f005eec52affd6",
     "manual_vs_auto_stop_preference": "96a2d54200dd0d4f912d44439745f7f4",
-    "non_initiated_FA_rate": "a2da9bc11be0f0cd2b24e9db4c09b137",
-    "non_initiation_odor_bias": "0f9cd0558fa771c19f9fc7c97b9ba48f",
     "odor_initiation_bias": "377f775804060f53c609520c8f9f3ea2",
     "fa_abortion_stats": "22251ad7eaae050b7988f675c2ef1f43",
-    "fa_port_ratio_by_odor": "e24718ce3ea07838eb026feaad655707"
+    "fa_port_ratio_by_odor": "b48408213f4d616f20382efdac13a62e"
   }
 }

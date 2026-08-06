@@ -83,10 +83,12 @@ def load_session_results(subjid, date):
     # turns this from a derivation into a read.
     results["position_data"] = build_position_data(trial_df)
 
-    # Tables still saved separately
-    for t in ["non_initiated_sequences", "non_initiated_odor1_attempts", "non_initiated_FA"]:
-        f = results_dir / f"{t}.csv"
-        results[t] = pd.read_csv(f) if f.exists() else pd.DataFrame()
+    # The three `non_initiated_*` tables are deliberately not loaded. Phase 4a
+    # step 6 dropped non-initiated trials from the metric set: they are not in
+    # `trial_data`, so every metric over them needed its own frame and its own
+    # shape, and integrating them properly is its own piece of work. Trial
+    # classification still writes the tables; nothing in `metric_analysis` reads
+    # them.
 
     # Attach manifest and summary
     results["manifest"] = manifest
@@ -248,8 +250,6 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         metrics['avg_sampling_time_completed_sequence'] = avg_sampling_time_completed_sequence_session(results)
         print("\n--- Average Sampling Time (Aborted Sequences) ---")
         metrics['avg_sampling_time_aborted_sequence'] = avg_sampling_time_aborted_sequence_session(results)
-        print("\n--- Average Sampling Time (Initiation Abortions) ---")
-        metrics['avg_sampling_time_initiation_abortion'] = avg_sampling_time_initiation_abortion(results)
         print("\n--- Abortion Rate by Position ---")
         abrt_pos = abortion_rate_positionX_session(results)
         metrics['abortion_rate_positionX'] = abrt_pos.to_dict() if hasattr(abrt_pos, 'to_dict') else abrt_pos
@@ -261,11 +261,6 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         metrics['response_rate'] = response_rate_session(results)
         print("\n--- Manual vs Auto Stop Preference ---")
         metrics['manual_vs_auto_stop_preference'] = manual_vs_auto_stop_preference_session(results)
-        print("\n--- Non-Initiated FA Rate ---")
-        metrics['non_initiated_FA_rate'] = non_initiated_FA_rate(results)
-        print("\n--- Non-Initiation Odor Bias ---")
-        noninit_odor = non_initiation_odor_bias(results)
-        metrics['non_initiation_odor_bias'] = noninit_odor.to_dict() if hasattr(noninit_odor, 'to_dict') else noninit_odor
         print("\n--- Odor Initiation Bias ---")
         odor_init = odor_initiation_bias_session(results)
         metrics['odor_initiation_bias'] = odor_init.to_dict() if hasattr(odor_init, 'to_dict') else odor_init
@@ -286,22 +281,13 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         else:
             metrics['fa_abortion_stats'] = None
         print("\n--- FA Port Ratio by Odor ---")
-        # Calculate with non-initiated FAs included
-        fa_port_ratio_with = fa_port_ratio_by_odor(results, include_non_initiated=True)
-        # Calculate without non-initiated FAs
-        fa_port_ratio_without = fa_port_ratio_by_odor(results, include_non_initiated=False)
-        
+        # One variant, not two: step 6 removed the non-initiated FAs, so the
+        # `with_`/`without_non_initiated` wrapper no longer distinguishes anything.
+        fa_port = fa_port_ratio_by_odor_session(results)
         metrics['fa_port_ratio_by_odor'] = {
-            'with_non_initiated': {
-                'by_odor': fa_port_ratio_with['by_odor'].to_dict() if hasattr(fa_port_ratio_with['by_odor'], 'to_dict') else fa_port_ratio_with['by_odor'],
-                'counts': fa_port_ratio_with['counts'],
-                'total_fa_by_odor': fa_port_ratio_with['total_fa_by_odor'],
-            },
-            'without_non_initiated': {
-                'by_odor': fa_port_ratio_without['by_odor'].to_dict() if hasattr(fa_port_ratio_without['by_odor'], 'to_dict') else fa_port_ratio_without['by_odor'],
-                'counts': fa_port_ratio_without['counts'],
-                'total_fa_by_odor': fa_port_ratio_without['total_fa_by_odor'],
-            }
+            'by_odor': fa_port['by_odor'].to_dict() if hasattr(fa_port['by_odor'], 'to_dict') else fa_port['by_odor'],
+            'counts': fa_port['counts'],
+            'total_fa_by_odor': fa_port['total_fa_by_odor'],
         }
 
         # Single-reward protocol only: outcome-category metrics (Hit / Miss / FA / CR)
@@ -1543,22 +1529,6 @@ def avg_sampling_time_aborted_sequence_session(results):
     print(f"Average Sampling Time (Aborted Sequences): {avg:.2f} ms")
     return avg
 
-def avg_sampling_time_initiation_abortion(results):
-    def _choose_poke_series(df, columns):
-        for col in columns:
-            if col in df.columns:
-                s = pd.to_numeric(df[col], errors="coerce").dropna()
-                if not s.empty:
-                    return s
-        return pd.Series(dtype=float)
-    non_ini = results.get("non_initiated_sequences", pd.DataFrame())
-    pos1 = results.get("non_initiated_odor1_attempts", pd.DataFrame())
-    base_vals = _choose_poke_series(non_ini, ["continuous_poke_time_ms", "poke_time_ms", "poke_time", "poke_ms"])
-    pos1_vals = _choose_poke_series(pos1, ["pos1_poke_time_ms", "attempt_poke_time_ms", "poke_time_ms", "poke_time", "poke_ms"])
-    all_vals = pd.concat([base_vals, pos1_vals], ignore_index=True)
-    print(f"Average Sampling Time (Initiation Abortions): {all_vals.mean() if not all_vals.empty else np.nan:.2f} ms")
-    return all_vals.mean() if not all_vals.empty else np.nan
-
 def abortion_rate_positionX(trials, *, with_counts=False):
     """aborts@position / trials that reached it.
 
@@ -1707,76 +1677,6 @@ def manual_vs_auto_stop_preference_session(results):
     print(f"Auto Stops: {out['long_valve']}")
     print(f"Manual vs Auto Stop: {out['ratio']:.2f}")
     return out
-
-def non_initiated_FA_rate(results):
-    fa_noninit_df = results.get("non_initiated_FA", pd.DataFrame())
-    if fa_noninit_df.empty or "fa_label" not in fa_noninit_df.columns:
-        return np.nan
-    n_fa = (fa_noninit_df["fa_label"] == "FA_time_in").sum()
-    print(f"Non-Initiated FA Rate: {n_fa}/{len(fa_noninit_df)} = {n_fa/len(fa_noninit_df) if len(fa_noninit_df)>0 else np.nan:.3f}")
-    return n_fa, len(fa_noninit_df), n_fa / len(fa_noninit_df) if len(fa_noninit_df) > 0 else np.nan
-
-def non_initiation_odor_bias(results):
-    non_ini = results.get("non_initiated_sequences", pd.DataFrame())
-    pos1 = results.get("non_initiated_odor1_attempts", pd.DataFrame())
-    trial_df = results.get("trial_data", pd.DataFrame())
-
-    # Only consider first odor attempts in non-initiated tables
-    non_ini = non_ini[non_ini["odor_position"] == 1] if "odor_position" in non_ini.columns else non_ini
-    pos1 = pos1[pos1["odor_position"] == 1] if "odor_position" in pos1.columns else pos1
-
-    all_non_init = pd.concat([non_ini, pos1], ignore_index=True)
-
-    # Numerator: non-initiated trials with this odor as first odor
-    if all_non_init.empty or "odor_name" not in all_non_init.columns:
-        count_odors = pd.Series(dtype=int)
-    else:
-        count_odors = all_non_init["odor_name"].value_counts()
-
-    # Denominator: all trials (initiated + non-initiated) with first odor = odor
-    first_odors = []
-
-    # Initiated trials from trial_data presentations
-    if not trial_df.empty and "presentations" in trial_df.columns:
-        for _, row in trial_df.iterrows():
-            pres_list = parse_json_column(row.get("presentations", []))
-            if isinstance(pres_list, list):
-                for pres in pres_list:
-                    if not isinstance(pres, dict):
-                        continue
-                    pos = pres.get("position")
-                    if pos is None and pres.get("index_in_trial") is not None:
-                        try:
-                            pos = int(pres.get("index_in_trial")) + 1
-                        except Exception:
-                            pos = None
-                    if pos == 1:
-                        first_odors.append(pres.get("odor_name"))
-                        break
-
-    # Non-initiated (baseline and pos1)
-    for df in [non_ini, pos1]:
-        if not df.empty and "odor_name" in df.columns:
-            first_odors.extend(df["odor_name"].dropna().tolist())
-
-    total_first_odors = pd.Series(first_odors).value_counts()
-
-    # Global rates for normalization
-    total_noninit = len(all_non_init)
-    total_trials = int(total_first_odors.sum()) if not total_first_odors.empty else 0
-    global_rate = total_noninit / total_trials if total_trials > 0 else np.nan
-
-    bias = {}
-    for od in sorted(total_first_odors.index):
-        n_noninit = count_odors.get(od, 0)
-        n_total = total_first_odors.get(od, 0)
-        if n_total > 0 and global_rate > 0:
-            bias[od] = (n_noninit / n_total) / global_rate
-        else:
-            bias[od] = np.nan
-        print(f"{od}: {n_noninit}/{n_total} non-initiated, Bias: {bias[od]:.3f}")
-
-    return pd.Series(bias).sort_index()
 
 def odor_initiation_bias(trials, *, reference=None, with_counts=False):
     """Per-odor initiation-abortion share / the overall share. See `FA_odor_bias`."""
@@ -1958,87 +1858,62 @@ def fa_abortion_stats_session(results, return_df=False):
             print("No FA abortions found.")
     return (df_odor, df_pos, df_out) if return_df else None
 
-def fa_port_ratio_by_odor(results, include_non_initiated=True, fa_type="FA_time_in"):
+def fa_port_ratio_by_odor(trials, *, fa_type="FA_time_in"):
+    """Signed FA port bias per odor: `(port A - port B) / (port A + port B)`.
+
+    0 is no preference, positive a bias towards port A. A tier-1 core on
+    `trial_data` since step 6 dropped the non-initiated FAs -- which is what makes
+    it the canonical target for finding 1, the FA port ratio written eight times.
+
+    `fa_type` takes a single label, `"all"` for every `FA_*`, or a set/list of
+    labels; the set form is what lets the plotters' `fa_types` filters call this
+    instead of re-counting.
+
+    Returns `{'by_odor': Series, 'counts': {odor: {port_a, port_b}},
+    'total_fa_by_odor': {odor: n}}`.
     """
-    Calculate FA port bias ratio per odor: (Port A - Port B) / (Port A + Port B).
-    
-    This metric shows the signed bias in which port (A or B) is selected during
-    false alarm responses for each odor. A ratio of 0 indicates no preference,
-    positive values indicate bias towards port A, and negative values indicate bias towards port B.
-    
-    Parameters:
-    -----------
-    results : dict
-        Results dictionary containing 'aborted_sequences_detailed' and optionally 'non_initiated_FA'
-    include_non_initiated : bool
-        If True, include non-initiated FAs in calculation. Default: True
-    fa_type : str
-        Which FA type to filter for. Default: 'FA_time_in'
-        Can be 'FA_time_in', 'FA_time_out', 'FA_late', or 'all' for all FA types.
-    
-    Returns:
-    --------
-    dict : Dictionary with structure:
-        {
-            'by_odor': pd.Series indexed by odor letter with FA port ratios,
-            'counts': dict with counts of FA events per port per odor,
-            'total_fa_by_odor': dict with total FA counts per odor
-        }
-    """
-    print(f"FA Port Ratio by Odor ({fa_type}):")
-    
-    df = results.get("trial_data", pd.DataFrame())
-    fa_noninit = results.get("non_initiated_FA", pd.DataFrame()) if include_non_initiated else pd.DataFrame()
+    empty = {'by_odor': pd.Series(dtype=float), 'counts': {}, 'total_fa_by_odor': {}}
+    if trials.empty:
+        return empty
 
-    if df.empty and fa_noninit.empty:
-        print("  No FA data with port and odor information found.")
-        return {'by_odor': pd.Series(dtype=float), 'counts': {}, 'total_fa_by_odor': {}}
-
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    fa_ab = df[aborted_mask] if not df.empty else pd.DataFrame()
-
-    # Define filter function based on fa_type
-    if fa_type.lower() == 'all':
-        fa_filter = lambda x: x.astype(str).str.startswith('FA_', na=False)
-    else:
-        fa_filter = lambda x: x.astype(str) == fa_type
-
-    fa_ab = fa_ab[fa_filter(fa_ab.get("fa_label", pd.Series(dtype=str)))] if not fa_ab.empty else pd.DataFrame()
-    fa_ni = fa_noninit[fa_filter(fa_noninit.get("fa_label", pd.Series(dtype=str)))] if not fa_noninit.empty else pd.DataFrame()
-
-    fa_all = pd.concat([fa_ab, fa_ni], ignore_index=True) if include_non_initiated else fa_ab
-
+    fa_all = trials[_aborted_mask(trials) & _fa_type_mask(trials, fa_type)]
     if fa_all.empty or "fa_port" not in fa_all.columns or "last_odor_name" not in fa_all.columns:
-        print("  No FA data with port and odor information found.")
-        return {'by_odor': pd.Series(dtype=float), 'counts': {}, 'total_fa_by_odor': {}}
-    
-    # Calculate ratio per odor
-    ratios = {}
-    counts = {}
-    total_fa_by_odor = {}
-    
+        return empty
+
+    ratios, counts, total_fa_by_odor = {}, {}, {}
     for odor in sorted(fa_all["last_odor_name"].dropna().unique()):
-        fa_odor = fa_all[fa_all["last_odor_name"] == odor]
-        n_port_a = (fa_odor["fa_port"] == 1).sum()
-        n_port_b = (fa_odor["fa_port"] == 2).sum()
-        n_total = n_port_a + n_port_b
-        
-        if n_total > 0:
-            ratio = (n_port_a - n_port_b) / n_total
-            ratios[odor] = ratio
-            counts[odor] = {'port_a': n_port_a, 'port_b': n_port_b}
-            total_fa_by_odor[odor] = n_total
-            print(f"  {odor}: A={n_port_a}, B={n_port_b}, Bias ratio: {ratio:.3f}")
-        else:
-            ratios[odor] = np.nan
-            counts[odor] = {'port_a': 0, 'port_b': 0}
-            total_fa_by_odor[odor] = 0
-    
-    return {
-        'by_odor': pd.Series(ratios).sort_index(),
-        'counts': counts,
-        'total_fa_by_odor': total_fa_by_odor
-    }
+        n_a, n_b = fa_port_counts(fa_all[fa_all["last_odor_name"] == odor])
+        n_total = n_a + n_b
+        ratios[odor] = fa_port_ratio(n_a, n_b)
+        counts[odor] = {'port_a': n_a, 'port_b': n_b} if n_total > 0 else {'port_a': 0, 'port_b': 0}
+        total_fa_by_odor[odor] = n_total
+    return {'by_odor': pd.Series(ratios).sort_index(), 'counts': counts,
+            'total_fa_by_odor': total_fa_by_odor}
+
+
+def _fa_type_mask(trials, fa_type):
+    """`fa_label` mask for a single label, `"all"`, or a set of labels."""
+    if "fa_label" not in trials.columns:
+        return pd.Series(False, index=trials.index)
+    labels = trials["fa_label"].astype(str)
+    if isinstance(fa_type, str):
+        if fa_type.lower() == 'all':
+            return labels.str.startswith('FA_', na=False)
+        return labels == fa_type
+    return labels.isin({str(t) for t in fa_type})
+
+
+def fa_port_ratio_by_odor_session(results):
+    out = fa_port_ratio_by_odor(results.get("trial_data", pd.DataFrame()))
+    print("FA Port Ratio by Odor (FA_time_in):")
+    if not out['counts']:
+        print("  No FA data with port and odor information found.")
+        return out
+    for odor, ratio in out['by_odor'].items():
+        c = out['counts'][odor]
+        if out['total_fa_by_odor'][odor] > 0:
+            print(f"  {odor}: A={c['port_a']}, B={c['port_b']}, Bias ratio: {ratio:.3f}")
+    return out
 
 
 # ================== NEW metrics -- no canonical version before Phase 4a =========
