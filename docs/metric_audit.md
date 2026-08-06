@@ -975,6 +975,7 @@ Tick items off here as they land, so a later chat sees what remains. Commits are
 | 10-16 | **`compute_speed_analysis` + `run_speed_analysis_batch` + `_binned_speed`** → `metric_analysis/movement.py` | `8b7d09f` | All seven movement metrics. 711 lines verified byte-identical. `_load_tracking_and_behavior` → **`io/tracking.py`**, not the audit's suggested `visualization/io/`, because `metric_analysis` is now a consumer and must not import `visualization`. `visualization/` 16,618 → 15,194 lines. |
 | D0 | **cores + `*_contributions` + `*_session` wrappers, 10 tier-1 rate metrics** | `fd0c7cc` | `decision_accuracy`, `global_choice_accuracy`, `premature_response_rate`, `response_contingent_FA_rate`, `global_FA_rate`, `sequence_completion_rate`, `hidden_rule_performance`, `hidden_rule_detection_rate`, `choice_timeout_rate`, `response_rate`. Values **and printed output** verified identical on all 9 sessions. |
 | D0 | **`by_group` / `over_windows`** → `metric_analysis/resolvers.py` | `9215384`, `634b9c5` | Both evaluate the core on a *slice*, so rates reduce `num.sum()/den.sum()` rather than averaging per-trial values. `by_group`'s parts verified to sum back to the session value exactly. |
+| D0 | **cores + wrappers, tier-1 remainder + all 3 tier-3** | `f6051b7` | `decision_accuracy_by_odor`, `avg_response_time`, `FA_avg_response_times`; and `FA_odor_bias` / `FA_position_bias` / `odor_initiation_bias` now take `reference=`. Values **and printed output** identical on all 9 sessions -- the print check caught a float/int rendering drift in `decision_accuracy_by_odor` that the fingerprint cannot see, since `metrics_*.txt` is not part of it. |
 | D0 | **`position_data` derived at load time** | `67d7f29` | `build_position_data` in `frames.py`; `load_session_results` emits `results["position_data"]`. |
 
 ### One deviation from the audit, deliberate — read before touching per-position metrics
@@ -1048,19 +1049,26 @@ by behavioural construct rather than by D0 tier.
 
 ### Remaining
 
-1. **D0 for the rest of the catalog.** Done: the 10 tier-1 *rate* metrics. Still on the old
-   `f(results)` shape: `decision_accuracy_by_odor`, `avg_response_time`,
-   `FA_avg_response_times` (tier 1, mean/frame-returning); all 8 tier-2; all 3 tier-3
-   (these take the `reference=` argument, which is what buys plotters
-   `baseline="session"|"window"`); tier 4 is being deleted by step 6, so do **not** port it.
-2. **Port the tier-2 metrics onto `position_data`.** The frame exists and is verified; the
-   metrics still parse blobs inline. **Each must filter on the provenance flag matching the
-   blob it reads today** — `in_poke_times` for `avg_sampling_time_*`, `in_valve_times` for
-   `manual_vs_auto_stop_preference`, `in_presentations` for `odorx_abortion_rate` and
-   `hidden_rule_counts_by_odor`. Skipping the filter changes values: the blobs differ by
-   19 rows on sub-057, 7 on sub-048, 4 on sub-040, 1 on sub-046.
-3. The exact `DEDUP`s, then the `NEW` metrics, then the helper consolidations
+**D0 is complete for tiers 1 and 3.** What is left:
+
+1. **Tier 2 (8 metrics) onto `position_data`.** `odorx_abortion_rate`,
+   `hidden_rule_counts_by_odor`, `avg_sampling_time_{odor_x,completed_sequence,aborted_sequence}`,
+   `abortion_rate_positionX`, `manual_vs_auto_stop_preference`, `fa_abortion_stats`. The frame
+   exists and is verified; these still parse blobs inline. **Each must filter on the provenance
+   flag matching the blob it reads today** -- `in_poke_times` for `avg_sampling_time_*`,
+   `in_valve_times` for `manual_vs_auto_stop_preference`, `in_presentations` for
+   `odorx_abortion_rate` / `hidden_rule_counts_by_odor`. Skipping the filter changes values: the
+   blobs differ by 19 rows on sub-057, 7 on sub-048, 4 on sub-040, 1 on sub-046.
+   Tier 4 is deleted by step 6 -- do **not** port it.
+2. The exact `DEDUP`s, then the `NEW` metrics, then the helper consolidations
    (poke-time extractors, FA port counting, trajectory prep, `_compute_real_time_offset`).
-4. Step 6 (drop non-initiated) — **ask before running `--generate`**.
+3. Step 6 (drop non-initiated) -- **ask before running `--generate`**.
+
+**Check printed output, not just values.** `metrics_*.txt` is written from the wrappers' stdout
+and is *not* in the fingerprint, so a print-only drift is invisible to the regression. The
+old-vs-new harness used throughout (import the pre-change module from `git show HEAD:...`,
+compare both the return value and captured stdout across all 9 sessions) caught exactly that
+once already. It also runs in ~1 minute against saved derivatives, so it is worth running
+*before* each 15-minute regression.
 
 Then 4b executes the grouping confirmed above.
