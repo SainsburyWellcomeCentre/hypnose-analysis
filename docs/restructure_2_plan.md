@@ -146,6 +146,7 @@ Update this table at the end of each phase, in the same commit as the work.
 | 7b schema & formats | not started | | intended output change |
 | 8 profile, then vectorise | not started | | |
 | 9 validation | not started | | |
+| 10 modularise `visualization_utils.py` | **proposed** 2026-08-06, after the restructure | | 4a did **not** de-bloat `visualization/`: measured, it went 16,627 → 15,040 lines, and almost all of that is one wholesale move (`compute_speed_analysis`). `visualization_utils.py` itself lost **137 lines, 1.9%**, and `metrics_utils.py` gained 635 — the metrics moved, they did not vanish. 4a's value is one definition per metric, not line count; the plan overpromised a de-bloat here. So `visualization_utils.py` needs the same split 4b gives `metrics_utils.py`: plumbing apart from plotters, then per-plot-family modules. Pure function moves, so low risk — and `qc/plot_regression.py` gates it exactly. **One trap:** moving a plotter between modules changes `file`/`chain` in saved-figure provenance, and any `save_figure` wrapper needs `skip_modules=(__name__,)` (see "State at the end of 2c" §1) |
 | ∥ time-base audit | not started, deferred | | parallelisable |
 
 ### Model and reasoning effort
