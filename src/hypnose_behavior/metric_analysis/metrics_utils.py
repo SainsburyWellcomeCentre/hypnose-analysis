@@ -2375,3 +2375,166 @@ def hr_abort_poke_gap(trials, position_data):
         })
     return pd.DataFrame(rows, columns=cols)
 
+
+# ---- trial-timing family (checklist 17-22) -------------------------------------
+#
+# All indexed by `global_trial_id`, so pass one session's frames: pooled frames
+# repeat ids and the index alignment below would mis-pair trials.
+#
+# The 10x-group-mean outlier rule that `pred_seq_utils.response_time` and
+# `fa_analysis` apply is deliberately **not** here. Judgement call 4 of the audit
+# settles it: metrics raw, filtering is display -- so the rule stays in
+# `visualization/`, where it can be seen and changed.
+
+
+def _trial_position_frame(position_data, blob):
+    """One blob's rows sorted by position within trial, or None if unusable."""
+    rows = _position_rows(position_data, blob)
+    if rows is None or rows.empty or "global_trial_id" not in rows.columns:
+        return None
+    return rows.sort_values(["global_trial_id", "position"], kind="stable")
+
+
+def _deepest_position_timestamp(position_data, blob, field):
+    """`field` at each trial's deepest position, tz-naive, indexed by trial id."""
+    rows = _trial_position_frame(position_data, blob)
+    if rows is None:
+        return None
+    frame = pd.DataFrame({"gid": rows["global_trial_id"].to_numpy(),
+                          "ts": _tz_naive(rows[field]).to_numpy()})
+    return frame.groupby("gid", sort=True)["ts"].agg(lambda s: s.iloc[-1])
+
+
+def _trial_timestamp(trials, field):
+    """A trial-level timestamp column, tz-naive, indexed by trial id."""
+    if field not in trials.columns or "global_trial_id" not in trials.columns:
+        return None
+    return pd.Series(_tz_naive(trials[field]).to_numpy(),
+                     index=trials["global_trial_id"].to_numpy())
+
+
+def _latency_ms(later, earlier):
+    """`later - earlier` in ms, dropping pairs where either side is missing.
+
+    Vectorised `.dt.total_seconds()` on purpose. The plotters walk trials one at
+    a time and go through *scalar* `Timedelta.total_seconds()`, which truncates
+    to microseconds, so they silently discard the nanoseconds the blob
+    timestamps carry (`...T13:49:07.507839999`). The timedeltas themselves are
+    bit-identical either way; only the conversion differs. Measured on all 9
+    fixture sessions the two forms agree to **0.999 ns**, on latencies of
+    hundreds to thousands of ms -- so this keeps the exact value rather than
+    reproducing the truncation.
+    """
+    if later is None or earlier is None:
+        return pd.Series(dtype=float)
+    return (later - earlier).dropna().dt.total_seconds() * 1000.0
+
+
+def trial_poke_span(position_data):
+    """Wall-clock span of a trial's odor-sampling phase, in ms. Checklist 17.
+
+    `poke_odor_end` at the deepest position minus `poke_odor_start` at position 1.
+    Distinct from `trial_poke_total`: the span contains the travel between ports,
+    the sum does not. Trials missing either timestamp are dropped.
+    """
+    rows = _trial_position_frame(position_data, "in_poke_times")
+    if rows is None:
+        return pd.Series(dtype=float)
+    frame = pd.DataFrame({
+        "gid": rows["global_trial_id"].to_numpy(),
+        # Only position 1 contributes a start, so `max` picks it out.
+        "start": _tz_naive(rows["poke_odor_start"]).where(rows["position"] == 1).to_numpy(),
+        "end": _tz_naive(rows["poke_odor_end"]).to_numpy(),
+    })
+    grouped = frame.groupby("gid", sort=True)
+    span = grouped["end"].agg(lambda s: s.iloc[-1]) - grouped["start"].max()
+    return span.dropna().dt.total_seconds() * 1000.0
+
+
+def trial_poke_total(position_data):
+    """Sum of `poke_time_ms` across a trial's positions, in ms. Checklist 21.
+
+    Related to `avg_sampling_time_completed_sequence` but per trial rather than a
+    session mean.
+    """
+    rows = _position_rows(position_data, "in_poke_times")
+    if rows is None or rows.empty or "global_trial_id" not in rows.columns:
+        return pd.Series(dtype=float)
+    usable = rows[rows["poke_time_ms"].notna()]
+    if usable.empty:
+        return pd.Series(dtype=float)
+    return usable.groupby("global_trial_id")["poke_time_ms"].sum()
+
+
+def reward_delivery_latency(trials, position_data):
+    """`first_supply_time` minus the last odor poke-out, in ms. Checklist 18.
+
+    **Not** `trial_data.response_time_ms`, which is measured from the reward-port
+    poke rather than from leaving the odor port -- the audit's finding 11, two
+    quantities sharing an everyday name and not a definition. Written twice
+    today, as `pred_seq_utils.response_time` and `sing_rew._response_time_ms`.
+    """
+    return _latency_ms(_trial_timestamp(trials, "first_supply_time"),
+                       _deepest_position_timestamp(position_data, "in_poke_times",
+                                                   "poke_odor_end"))
+
+
+def valve_to_reward_latency(trials, position_data):
+    """`first_supply_time` minus the last position's `valve_start`, in ms.
+
+    Checklist 20. Nothing canonical measures anything from a valve opening.
+    """
+    return _latency_ms(_trial_timestamp(trials, "first_supply_time"),
+                       _deepest_position_timestamp(position_data, "in_valve_times",
+                                                   "valve_start"))
+
+
+def fa_latency_from_pokeout(trials, position_data, *, fa_types=None):
+    """`fa_time` minus the poke-out of the trial's last odor, in ms. Checklist 19.
+
+    **Not** `trial_data.fa_latency_ms`, which is measured from the abortion
+    timestamp (finding 11). The reference is the *first* position whose
+    `odor_name` matches the trial's `last_odor`, not the deepest one -- they
+    differ when an odor repeats within a sequence, and the plotter uses the first.
+    """
+    rows = _trial_position_frame(position_data, "in_poke_times")
+    if rows is None or "last_odor" not in trials.columns:
+        return pd.Series(dtype=float)
+    selected = trials[_fa_filter_mask(trials, fa_types)] if fa_types is not None else trials
+    if selected.empty or "global_trial_id" not in selected.columns:
+        return pd.Series(dtype=float)
+
+    last_odor = pd.Series(selected["last_odor"].map(odor_letter).to_numpy(),
+                          index=selected["global_trial_id"].to_numpy())
+    wanted = rows["global_trial_id"].map(last_odor)
+    at_last_odor = rows[rows["odor_name"].map(odor_letter) == wanted]
+    if at_last_odor.empty:
+        return pd.Series(dtype=float)
+    first = at_last_odor.groupby("global_trial_id", sort=True).head(1)
+    poke_end = pd.Series(_tz_naive(first["poke_odor_end"]).to_numpy(),
+                         index=first["global_trial_id"].to_numpy())
+    return _latency_ms(_trial_timestamp(selected, "fa_time"), poke_end)
+
+
+def false_response_ratio_contributions(trials, *, fr_types=None):
+    completed = ~_aborted_mask(trials)
+    if "false_response" not in trials.columns:
+        return pd.Series(0, index=trials.index), completed.astype(int)
+    fr = trials["false_response"] == True  # noqa: E712 (element-wise, NaN-safe)
+    if fr_types is not None and "fr_label" in trials.columns:
+        wanted = {fr_types} if isinstance(fr_types, str) else set(fr_types)
+        fr = fr & trials["fr_label"].isin(wanted)
+    return (completed & fr).astype(int), completed.astype(int)
+
+
+def false_response_ratio(trials, *, fr_types=None):
+    """False-response trials / completed trials. Checklist 22.
+
+    **Not** the single-reward `fa_rate`, which is `false_alarm / n_nogo` off a
+    different column (`fa_label`, not `fr_label`). `fr_types=None` counts every
+    `false_response == True` trial whatever its label.
+    """
+    if trials.empty:
+        return 0, 0, np.nan
+    return _reduce_rate(*false_response_ratio_contributions(trials, fr_types=fr_types))
+
