@@ -10,6 +10,7 @@ read-only `rawdata` and redirect all derivatives I/O to a throwaway temp dir
 | --- | --- |
 | [`regression.py`](regression.py) | Golden-master value check: `trial_data` + metrics vs stored fixtures |
 | [`verify_scripts.py`](verify_scripts.py) | Same, but through the actual `scripts/` CLIs (covers arg wiring) |
+| [`plot_regression.py`](plot_regression.py) | Old-vs-new check of what the **plotters draw** — `regression.py` never sees a figure |
 | [`check_imports.py`](check_imports.py) | Static check: flag any referenced global that isn't imported |
 | [`check_qlearning.py`](check_qlearning.py) | Structural self-check of the Q-learning null model — **synthetic data only, no mount needed** |
 | [`validate.py`](validate.py) | `validate_subject()` — pre-flight data-existence check used by the scripts |
@@ -32,6 +33,27 @@ the report say exactly *what* changed:
       + added metric: false_response_rate
       ~ changed metric: choice_accuracy
 ```
+
+## What `plot_regression.py` checks
+
+`regression.py` fingerprints `trial_data` + the metrics dict, so every change
+inside `visualization/` is invisible to it. `plot_regression.py` closes that gap:
+it runs each plotter under the Agg backend against a git revision *and* the
+working tree, then diffs every line's xy data, every collection's offsets, every
+patch's geometry, the axis decoration and stdout.
+
+```bash
+$PY -u $QC/plot_regression.py                 # working tree vs HEAD
+$PY -u $QC/plot_regression.py --ref f72d201   # ... vs any revision
+$PY -u $QC/plot_regression.py --only plot_decision_accuracy
+```
+
+**Deliberately not a golden master.** Figures are meant to change as the plotters
+evolve, so a stored fixture would be stale within a phase. The useful question is
+always "did *this* change move a curve", which is a two-tree diff.
+
+Several plotters jitter points with the global RNG and never seed it, so the
+harness seeds it before every call; without that the comparison is noise.
 
 ## Standard workflow
 
