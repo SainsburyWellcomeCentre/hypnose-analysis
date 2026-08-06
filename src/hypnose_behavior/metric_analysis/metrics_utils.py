@@ -1958,6 +1958,19 @@ def _fa_filter_mask(frame, fa_types=None):
     return lower.isin({str(s).strip().lower() for s in fa_types})
 
 
+def fa_port_label(frame):
+    """`fa_port` as `"A"` / `"B"` / None, one entry per row.
+
+    The 1-is-A, 2-is-B mapping written out at every FA-port site (finding 1).
+    `fa_port_counts` counts these labels, and `pred_seq_utils.fa_analysis` buckets
+    its latencies by them, so the mapping itself is stated once.
+    """
+    if frame is None or len(frame) == 0 or "fa_port" not in frame.columns:
+        return pd.Series(dtype=object, index=getattr(frame, "index", None))
+    port = pd.to_numeric(frame["fa_port"], errors="coerce")
+    return port.map({1: "A", 2: "B"}).where(port.isin([1, 2]))
+
+
 def fa_port_counts(frame):
     """`(n_port_a, n_port_b)` over `fa_port` -- 1 is port A, 2 is port B.
 

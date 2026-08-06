@@ -81,6 +81,18 @@ CASES = [
     # sees checklist 7 (`inter_trial_interval`).
     ("plot_iti_over_time", [[40]], {"dates": [20251124, 20251229]}),
     ("plot_latency_over_time", [[40]], {"dates": [20251124, 20251229]}),
+    # pred_seq_utils (checklist 10-15). sub-053 20260520 is the seqLen-2 session,
+    # so it exercises the `_sequence_len_ok` skip alongside sub-040's 3+ sequences.
+    ("trial_poke_duration", [[40]], {"dates": [20251124, 20251229]}),
+    ("response_time", [[40]], {"dates": [20251124, 20251229]}),
+    ("fa_analysis", [[40]], {"dates": [20251124, 20251229]}),
+    ("valve_to_reward", [[40]], {"dates": [20251124, 20251229]}),
+    ("cummulative_poke_time", [[40]], {"dates": [20251124, 20251229]}),
+    ("performance", [[40]], {"dates": [20251124, 20251229]}),
+    # The rolling branch is a different code path (`_plot_performance_rolling`,
+    # i.e. `over_windows`), and nothing else reaches it.
+    ("performance#rolling", [[40]], {"dates": [20251124, 20251229],
+                                     "moving_avg": True, "window_size": 10}),
 ]
 
 # Runs inside the child process, against whichever tree is on sys.path.
@@ -104,7 +116,13 @@ MODULES = json.loads(sys.argv[4])
 
 
 def _resolve(name):
-    """First module in MODULES that defines `name`, or None."""
+    """First module in MODULES that defines `name`, or None.
+
+    A case may be labelled `name#variant` so one function can be exercised with
+    two argument sets (e.g. `performance` daily vs rolling) without the two
+    results overwriting each other in the report.
+    """
+    name = name.split("#", 1)[0]
     for mod_name in MODULES:
         try:
             mod = importlib.import_module(mod_name)
@@ -218,7 +236,13 @@ def _flatten(obj, prefix=""):
 def _run(tree: Path, out_path: Path, only: list[str]) -> None:
     script = out_path.parent / "_plot_child.py"
     script.write_text(_CHILD)
-    env = {**__import__("os").environ, "PYTHONPATH": str(tree / "src")}
+    # PYTHONHASHSEED: several plotters order groups by iterating a `set` of
+    # strings (`pred_seq_utils._ordered_groups`, fed from `all_groups = set()`),
+    # so the drawn order varies between processes. That is a real reproducibility
+    # defect in those figures -- but it is pre-existing, and left unpinned it
+    # makes the two trees differ by 340 values with no source change at all.
+    env = {**__import__("os").environ, "PYTHONPATH": str(tree / "src"),
+           "PYTHONHASHSEED": "0"}
     subprocess.run([sys.executable, "-u", str(script), str(out_path),
                     json.dumps(CASES), json.dumps(only), json.dumps(MODULES)],
                    env=env, check=True)
@@ -236,6 +260,36 @@ def _materialise(ref: str, dest: Path) -> Path:
         # silently falls through to a wrong derivatives root -- the 2a __file__ trap.
         shutil.copy(local, dest / "configs" / local.name)
     return dest
+
+
+def _magnitudes(old_flat, new_flat, changed) -> str:
+    """How *big* the changed values are, not just how many.
+
+    A repoint onto a canonical metric routinely moves drawn values by a ULP or by
+    the nanosecond that vectorised `.dt.total_seconds()` keeps and the scalar path
+    truncates. Both are RED, and both look identical to a moved curve in a list of
+    ten diffs. This line separates them: `max |dy|` and `max rel` say at a glance
+    whether anything left floating-point noise.
+    """
+    abs_d, rel_d, non_numeric = 0.0, 0.0, 0
+    for k in changed:
+        try:
+            a, b = float(old_flat[k]), float(new_flat[k])
+        except (TypeError, ValueError):
+            non_numeric += 1
+            continue
+        d = abs(b - a)
+        abs_d = max(abs_d, d)
+        scale = max(abs(a), abs(b))
+        if scale > 0:
+            rel_d = max(rel_d, d / scale)
+    if not changed:
+        return ""
+    numeric = len(changed) - non_numeric
+    parts = [f"{numeric} numeric: max |dy| = {abs_d:.3g}, max rel = {rel_d:.3g}"]
+    if non_numeric:
+        parts.append(f"{non_numeric} non-numeric (labels, limits, text)")
+    return " | ".join(parts)
 
 
 def main() -> int:
@@ -292,6 +346,9 @@ def main() -> int:
                 print(f"           ~ {k}: {fo[k]!r} -> {fn_[k]!r}")
             if len(added) + len(removed) + len(changed) > 30:
                 print(f"           ... {len(added) + len(removed) + len(changed)} entries total")
+            summary = _magnitudes(fo, fn_, changed)
+            if summary:
+                print(f"           {summary}")
         else:
             print(f"  [green] {name}")
 

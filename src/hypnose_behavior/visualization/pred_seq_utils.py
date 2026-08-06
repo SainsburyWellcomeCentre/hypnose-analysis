@@ -13,6 +13,17 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 
 from hypnose_behavior.utils.helpers import _filter_session_dirs, _iter_subject_dirs
+from hypnose_behavior.metric_analysis.frames import build_position_data
+from hypnose_behavior.metric_analysis.metrics_utils import (
+	decision_accuracy,
+	fa_latency_from_pokeout,
+	fa_port_label,
+	reward_delivery_latency,
+	trial_poke_span,
+	trial_poke_total,
+	valve_to_reward_latency,
+)
+from hypnose_behavior.metric_analysis.resolvers import by_group, over_windows
 from hypnose_behavior.io.paths import get_derivatives_root
 from hypnose_behavior.io.save import save_figure, nice_x_locator
 from matplotlib.patches import Patch
@@ -720,6 +731,7 @@ def trial_poke_duration(
 				continue
 			n_trials = len(df)
 			completed = df[df.get("is_aborted") == False]
+			spans = trial_poke_span(build_position_data(df))
 			for cat in categories:
 				session_groups = {}
 				cat_df = completed[completed.get("response_time_category") == cat]
@@ -730,21 +742,10 @@ def trial_poke_duration(
 					seq_label = _sequence_label(seq)
 					if not seq_label:
 						continue
-					pos_dict = _parse_json_value(row.get("position_poke_times"))
-					first_entry = _extract_position_entry(pos_dict, 1)
-					last_entry = _last_position_entry(pos_dict)
-					if not first_entry or not last_entry:
+					dur_val = spans.get(row.get("global_trial_id"))
+					if dur_val is None or pd.isna(dur_val):
 						continue
-					start_ts = first_entry.get("poke_odor_start")
-					end_ts = last_entry.get("poke_odor_end")
-					if not start_ts or not end_ts:
-						continue
-					start_dt = pd.to_datetime(start_ts, errors="coerce")
-					end_dt = pd.to_datetime(end_ts, errors="coerce")
-					if pd.isna(start_dt) or pd.isna(end_dt):
-						continue
-					duration_ms = (end_dt - start_dt).total_seconds() * 1000.0
-					dur_val = float(duration_ms)
+					dur_val = float(dur_val)
 					trial_idx = int(row["_trial_idx"])
 					session_groups.setdefault(seq_label, []).append((trial_idx, dur_val))
 					per_cat_pooled[cat].setdefault(seq_label, []).append(dur_val)
@@ -1018,6 +1019,9 @@ def response_time(
 			n_trials = len(df)
 			completed = df[df.get("is_aborted") == False]
 			completed = completed[completed.get("response_time_category") != "timeout_delayed"]
+			# Raw: the 10x-group-mean outlier rule below is a display filter, and
+			# deliberately stays out of the metric (judgement call 4 of the audit).
+			latencies = reward_delivery_latency(df, build_position_data(df))
 			records = []
 			for _, row in completed.iterrows():
 				seq = _parse_json_value(row.get("odor_sequence"))
@@ -1026,19 +1030,10 @@ def response_time(
 				seq_label = _sequence_label(seq)
 				if not seq_label:
 					continue
-				pos_dict = _parse_json_value(row.get("position_poke_times"))
-				last_entry = _last_position_entry(pos_dict)
-				if not last_entry:
+				rt_ms = latencies.get(row.get("global_trial_id"))
+				if rt_ms is None or pd.isna(rt_ms):
 					continue
-				poke_end = last_entry.get("poke_odor_end")
-				supply_time = row.get("first_supply_time")
-				if poke_end is None or supply_time is None:
-					continue
-				poke_end_dt = pd.to_datetime(poke_end, errors="coerce")
-				supply_dt = pd.to_datetime(supply_time, errors="coerce")
-				if pd.isna(poke_end_dt) or pd.isna(supply_dt):
-					continue
-				rt_ms = float((supply_dt - poke_end_dt).total_seconds() * 1000.0)
+				rt_ms = float(rt_ms)
 				trial_idx = int(row["_trial_idx"])
 				cat = row.get("response_time_category")
 				records.append((trial_idx, seq_label, cat, rt_ms))
@@ -1169,6 +1164,9 @@ def fa_analysis(
 			session_n_trials.append(n_trials)
 			aborted = df[df.get("is_aborted") == True]
 			fa_df = aborted[aborted.get("fa_label").isin(fa_labels)]
+			# Raw latencies; the 10x-group-mean rule below is a display filter.
+			fa_latencies = fa_latency_from_pokeout(df, build_position_data(df))
+			port_labels = fa_port_label(fa_df)
 
 			session_poke = {}
 			session_resp_raw = []
@@ -1210,26 +1208,12 @@ def fa_analysis(
 					poke_groups.setdefault(last_odor_poke_label, []).append(poke_val)
 					session_poke.setdefault(last_odor_poke_label, []).append((trial_idx, poke_val))
 
-				fa_time = row.get("fa_time")
-				poke_end = odor_entry.get("poke_odor_end")
-				if fa_time is None or poke_end is None:
+				rt_ms = fa_latencies.get(row.get("global_trial_id"))
+				if rt_ms is None or pd.isna(rt_ms):
 					continue
-				fa_dt = pd.to_datetime(fa_time, errors="coerce")
-				poke_end_dt = pd.to_datetime(poke_end, errors="coerce")
-				if pd.isna(fa_dt) or pd.isna(poke_end_dt):
-					continue
-				rt_ms = (fa_dt - poke_end_dt).total_seconds() * 1000.0
 
-				port = row.get("fa_port")
-				try:
-					port_val = int(port)
-				except Exception:
-					port_val = None
-				if port_val == 1:
-					port_label = "A"
-				elif port_val == 2:
-					port_label = "B"
-				else:
+				port_label = port_labels.get(row.name)
+				if port_label is None or pd.isna(port_label):
 					continue
 
 				rt_val = float(rt_ms)
@@ -1468,6 +1452,7 @@ def valve_to_reward(
 				continue
 			n_trials = len(df)
 			completed = df[df.get("is_aborted") == False]
+			valve_latencies = valve_to_reward_latency(df, build_position_data(df))
 			for cat in categories:
 				session_groups = {}
 				cat_df = completed[completed.get("response_time_category") == cat]
@@ -1478,19 +1463,10 @@ def valve_to_reward(
 					seq_label = _sequence_label(seq)
 					if not seq_label:
 						continue
-					valve_dict = _parse_json_value(row.get("position_valve_times"))
-					last_valve_entry = _last_position_entry(valve_dict)
-					if not last_valve_entry:
+					dur_ms = valve_latencies.get(row.get("global_trial_id"))
+					if dur_ms is None or pd.isna(dur_ms):
 						continue
-					valve_start = last_valve_entry.get("valve_start")
-					supply_time = row.get("first_supply_time")
-					if valve_start is None or supply_time is None:
-						continue
-					valve_dt = pd.to_datetime(valve_start, errors="coerce")
-					supply_dt = pd.to_datetime(supply_time, errors="coerce")
-					if pd.isna(valve_dt) or pd.isna(supply_dt):
-						continue
-					dur_ms = float((supply_dt - valve_dt).total_seconds() * 1000.0)
+					dur_ms = float(dur_ms)
 					trial_idx = int(row["_trial_idx"])
 					session_groups.setdefault(seq_label, []).append((trial_idx, dur_ms))
 					per_cat_pooled[cat].setdefault(seq_label, []).append(dur_ms)
@@ -1541,28 +1517,29 @@ def valve_to_reward(
 	return figs
 
 
-def _plot_performance_daily(sessions_records, subjid):
-	n_sessions = len(sessions_records)
+def _plot_performance_daily(sessions_frames, subjid):
+	n_sessions = len(sessions_frames)
 	if n_sessions == 0:
 		return None
 
 	# Per sequence: list of (session_idx, pct, count). Plus pooled overall.
+	# The percentage is scaled from the metric's own numerator and denominator
+	# rather than from its rate, so the arithmetic is the `100.0 * r / t` this
+	# replaces and not a second rounding of it.
 	sequence_data = {}
 	overall_data = []
-	for i, records in enumerate(sessions_records):
-		if not records:
+	for i, sub in enumerate(sessions_frames):
+		if sub is None or sub.empty:
 			continue
-		per_seq_counts = {}
-		n_rewarded_all = 0
-		n_total_all = 0
-		for _, seq_label, is_rewarded in records:
-			r, t = per_seq_counts.get(seq_label, (0, 0))
-			per_seq_counts[seq_label] = (r + int(is_rewarded), t + 1)
-			n_rewarded_all += int(is_rewarded)
-			n_total_all += 1
-		for seq_label, (r, t) in per_seq_counts.items():
+		stats = by_group(decision_accuracy, sub, "sequence", values_only=False)
+		# First-seen order, not `by_group`'s sorted index: it decides the insertion
+		# order of `sequence_data`, and `_ordered_groups` draws any label outside
+		# SEQUENCE_ORDER in exactly that order.
+		for seq_label in sub["sequence"].drop_duplicates():
+			r, t, _ = stats[seq_label]
 			if t > 0:
 				sequence_data.setdefault(seq_label, []).append((i + 1, 100.0 * r / t, t))
+		n_rewarded_all, n_total_all, _ = decision_accuracy(sub)
 		if n_total_all > 0:
 			overall_data.append((i + 1, 100.0 * n_rewarded_all / n_total_all, n_total_all))
 
@@ -1606,10 +1583,10 @@ def _plot_performance_daily(sessions_records, subjid):
 	return fig
 
 
-def _plot_performance_rolling(sessions_records, window_size, step_size, subjid):
+def _plot_performance_rolling(sessions_frames, window_size, step_size, subjid):
 	window_n = max(1, int(window_size))
 	step_n = max(1, int(step_size))
-	if not sessions_records:
+	if not sessions_frames:
 		return None
 
 	fig, ax = plt.subplots(figsize=(12, 6))
@@ -1620,38 +1597,35 @@ def _plot_performance_rolling(sessions_records, window_size, step_size, subjid):
 	legend_done = set()
 
 	all_seq_labels = set()
-	for records in sessions_records:
-		for _, seq_label, _ in records:
-			all_seq_labels.add(seq_label)
+	for sub in sessions_frames:
+		if sub is not None and not sub.empty:
+			all_seq_labels.update(sub["sequence"].tolist())
 	ordered_seqs = _ordered_groups(all_seq_labels, SEQUENCE_ORDER)
 
-	def _rolling_pts(entries):
-		entries_sorted = sorted(entries, key=lambda x: x[0])
-		idxs = np.array([e[0] for e in entries_sorted])
-		vals = np.array([e[1] for e in entries_sorted], dtype=float)
-		n = len(vals)
-		pts = []
-		for end in range(window_n, n + 1, step_n):
-			start = end - window_n
-			frac = float(np.nanmean(vals[start:end])) * 100.0
-			pts.append((int(idxs[end - 1]), frac))
-		return pts
+	def _rolling_pts(frame):
+		"""(x, percentage) per trailing window -- `over_windows` on the metric core.
 
-	for records in sessions_records:
-		if not records:
+		x is the `_trial_idx` of the window's last trial. `over_windows` defaults to
+		`min_periods=window`, i.e. no partial windows, and anchors the first window
+		at position `window - 1`, which is where the loop this replaces emitted its
+		first point for any `step`.
+		"""
+		frame = frame.sort_values("_trial_idx", kind="stable")
+		windows = over_windows(decision_accuracy, frame, window_n, step=step_n)
+		idxs = frame["_trial_idx"].to_numpy()
+		return [(int(idxs[int(end)]), float(v) * 100.0)
+			for end, v in zip(windows["end_index"], windows["value"])]
+
+	for sub in sessions_frames:
+		if sub is None or sub.empty:
 			if global_offset > 0:
 				boundary_lines.append(global_offset - 0.5)
 			global_offset += empty_session_span
 			continue
 
-		per_seq = {}
-		all_entries = []
-		for trial_idx, seq_label, is_rewarded in records:
-			per_seq.setdefault(seq_label, []).append((trial_idx, int(is_rewarded)))
-			all_entries.append((trial_idx, int(is_rewarded)))
-
-		seq_pts = {seq: _rolling_pts(entries) for seq, entries in per_seq.items()}
-		overall_pts = _rolling_pts(all_entries)
+		seq_pts = {seq: _rolling_pts(part)
+			for seq, part in sub.groupby("sequence", sort=False)}
+		overall_pts = _rolling_pts(sub)
 
 		min_x = None
 		max_x = None
@@ -1736,39 +1710,34 @@ def performance(
 	"""
 	figs = []
 	for subjid, date_vals, results_dirs in _collect_sessions(subjids, dates):
-		sessions_records = []
+		# One frame per session, already reduced to the rows `decision_accuracy`
+		# scores: completed, sequence-labelled, timeouts dropped. VARIANT 5 -- the
+		# denominator then matches the canonical metric exactly, so the two plot
+		# helpers below are `by_group` / `over_windows` calls rather than their own
+		# rewarded/(rewarded+unrewarded) arithmetic.
+		sessions_frames = []
 		for results_dir in results_dirs:
 			df = _load_sorted_session(results_dir)
 			if df.empty:
-				sessions_records.append([])
+				sessions_frames.append(pd.DataFrame())
 				continue
 			completed = df[df.get("is_aborted") == False]
-			records = []
-			for _, row in completed.iterrows():
-				seq = _parse_json_value(row.get("odor_sequence"))
-				if not _sequence_len_ok(seq):
-					continue
-				seq_label = _sequence_label(seq)
-				if not seq_label:
-					continue
-				cat = row.get("response_time_category")
-				if cat == "rewarded":
-					is_rewarded = 1
-				elif cat == "unrewarded":
-					is_rewarded = 0
-				else:
-					continue
-				trial_idx = int(row["_trial_idx"])
-				records.append((trial_idx, seq_label, is_rewarded))
-			sessions_records.append(records)
+			labels = completed["odor_sequence"].map(
+				lambda v: _sequence_label(_parse_json_value(v))
+				if _sequence_len_ok(_parse_json_value(v)) else None
+			)
+			sub = completed.assign(sequence=labels)
+			sub = sub[sub["sequence"].notna()
+				& sub["response_time_category"].isin(["rewarded", "unrewarded"])]
+			sessions_frames.append(sub)
 
-		if not any(sessions_records):
+		if not any(len(f) for f in sessions_frames):
 			continue
 
 		if moving_avg:
-			fig = _plot_performance_rolling(sessions_records, window_size, step_size, subjid)
+			fig = _plot_performance_rolling(sessions_frames, window_size, step_size, subjid)
 		else:
-			fig = _plot_performance_daily(sessions_records, subjid)
+			fig = _plot_performance_daily(sessions_frames, subjid)
 
 		if fig is not None:
 			figs.append(fig)
@@ -1811,6 +1780,7 @@ def cummulative_poke_time(
 				continue
 			n_trials = len(df)
 			completed = df[df.get("is_aborted") == False]
+			poke_totals = trial_poke_total(build_position_data(df))
 			for cat in categories:
 				session_groups = {}
 				cat_df = completed[completed.get("response_time_category") == cat]
@@ -1821,21 +1791,10 @@ def cummulative_poke_time(
 					seq_label = _sequence_label(seq)
 					if not seq_label:
 						continue
-					pos_dict = _parse_json_value(row.get("position_poke_times"))
-					if not isinstance(pos_dict, dict):
+					total_ms = poke_totals.get(row.get("global_trial_id"))
+					if total_ms is None or pd.isna(total_ms):
 						continue
-					total_ms = 0.0
-					valid = False
-					for entry in pos_dict.values():
-						if not isinstance(entry, dict):
-							continue
-						poke_ms = entry.get("poke_time_ms")
-						if poke_ms is None:
-							continue
-						total_ms += float(poke_ms)
-						valid = True
-					if not valid:
-						continue
+					total_ms = float(total_ms)
 					trial_idx = int(row["_trial_idx"])
 					session_groups.setdefault(seq_label, []).append((trial_idx, total_ms))
 					per_cat_pooled[cat].setdefault(seq_label, []).append(total_ms)

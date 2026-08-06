@@ -1165,7 +1165,7 @@ per session and concatenating the results is a **different quantity** — for th
 restarts the window at every session boundary, and `plot_regression.py` will show it as a
 changed curve rather than an error.
 
-#### `pred_seq_utils.py` — 6 items, none started
+#### `pred_seq_utils.py` — 6 items ✅ *(all done 2026-08-06)*
 
 `trial_poke_duration` → `trial_poke_span`; `response_time` → `reward_delivery_latency`;
 `fa_analysis` → `fa_latency_from_pokeout` (and its A/B counts → `fa_port_counts`, the 9th site
@@ -1176,6 +1176,36 @@ denominator matches canonical exactly).
 
 **The 10× outlier rule stays in the plotters** (judgement call 4: metrics raw, filtering is
 display). Do not move it with the metric.
+
+**What the repoint moved on screen, and why it is not a regression.** Five of the six are
+RED under `plot_regression.py`, and every changed value is one of the two differences this
+document already settled:
+
+| plotter | changed | max abs | max rel | cause |
+|---|---|---|---|---|
+| `trial_poke_duration` | 69 | 9.99e-4 ms | 2.2e-7 | ns recovery |
+| `response_time` | 91 | 3.33e-4 ms | 2.2e-7 | ns recovery |
+| `valve_to_reward` | 60 | 3.33e-4 ms | 1.7e-7 | ns recovery |
+| `fa_analysis` | 11 | 1.05e-6 ms | 2.7e-10 | ns recovery |
+| `cummulative_poke_time` | 93 | 1.8e-12 ms | 3.1e-16 | summation order (one ULP) |
+
+"ns recovery" is `e9516e4`'s deliberate decision reaching the figures: the plotters went
+through *scalar* `Timedelta.total_seconds()`, which truncates to microseconds; the metrics
+use the vectorised form and keep the nanoseconds the blob timestamps carry. The audit
+measured that as 0.999 ns and chose to keep the exact value, so the plotters inherit it the
+moment they stop doing their own arithmetic. **0.999 ns on latencies of thousands of ms.**
+
+`performance` is byte-identical on both branches. Two traps it surfaced, both worth knowing
+before the remaining files:
+
+- **`by_group` sorts its index; the dict it replaces did not.** Iterating `by_group(...)`
+  directly changed the *first-seen* order of the sequence labels, which is what
+  `_ordered_groups` uses for any label outside `SEQUENCE_ORDER` — 20 drawn values swapped
+  between series. Fixed by driving the loop from `sub["sequence"].drop_duplicates()`.
+- **Scale from the metric's contributions, not from its rate.** The daily panel drew
+  `100.0 * r / t`; `rate * 100.0` is a second rounding and differs in the last ULP.
+  `values_only=False` gives the `(n, denom, rate)` triple, so the original expression is
+  preserved exactly.
 
 #### `sing_rew.py` — 2 items
 
