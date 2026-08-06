@@ -1094,41 +1094,92 @@ plotters, only their y-values, with no artist, axis or label change anywhere els
 refactor and a silently wrong figure. Note it seeds the global RNG before each call, because
 several plotters jitter points and never seed it.
 
-### Remaining
+### Remaining — the 4a completion checklist
 
-**D0 is complete for every tier, all 24 checklist metrics exist, and both output changes are
-done.** What is left is repointing plot code at metrics that now exist -- value-neutral for
-`metrics_*.json` by construction, and gated by `qc/plot_regression.py` rather than by
-`regression.py`.
+**4a is NOT finished.** What is done is the *first* half of the phase: every metric that
+`visualization/` computes now also exists in `metric_analysis` (the "lose no metric" gate), D0
+is complete for every tier, and both deliberate output changes have landed. But 4a's stated
+goal is stronger — *`visualization/` ends up only fetching and plotting, no metric math
+remains* — and **21 recomputes are still in place**. Until they are gone, 4a is half a phase:
+the duplication it exists to remove is still there, now in two places instead of one.
 
-1. **Plotters still carrying their own copy of a metric that now exists:**
-   `hidden_rule_and_false_alarm` -> `fa_rate_by_odor`;
-   `plot_decision_accuracy._decision_acc` -> `decision_accuracy` + `by_group(hidden_rule_mask)`
-   (VARIANT 6); `plot_sampling_times_analysis`, `plot_poke_duration_by_position` and
-   `plot_poke_duration_by_odor` -> `poke_durations` / `poke_duration_by_*` (VARIANTs 8-9 and
-   finding 5's four extractors); `_load_subject_trial_timeline` -> `inter_trial_interval`.
-2. **Three that need the loop restructured, not just a call swapped.**
-   `plot_hr_reward_fraction_over_trials`, `plot_hidden_rule_abort_poke_gap` and the ITI axis
-   build per-session dict rows and then pool *across* sessions before computing, whereas the
-   metrics take one session's frame. Pool `trial_data` first, then call the metric -- do not
-   apply the metric per session and concatenate, which is a different quantity.
-3. **VARIANTs 3-4** (`plot_fa_ratio_by_hr_position`, `plot_fa_ratio_by_abort_odor`): the
-   counting is already shared via `fa_port_counts`; only the HR/abort-odor slicing is still
-   written out longhand and could become `by_group`. Cosmetic, not a lost metric.
-4. **`pred_seq_utils` (7 sites) and `sing_rew` (`FR_ratio`, `_response_time_ms`)** still compute
-   their own copies of checklist 17-22. The metrics exist; the plotters have not been repointed.
-5. **Movement finding 7** -- `plot_epoch_speeds_by_condition` and
-   `plot_traces_with_speed_threshold` still re-derive baseline mu/sigma and `vthresh` instead of
-   reading them from `speed_analysis.parquet`.
-6. **Findings 10 and 14** -- trajectory prep duplicated across `movement_analysis_utils` and
-   `sing_rew_movement`, and the context-dependent `OdorG` relabelling written twice. Both are
-   `PREP`, so they belong to the shared `visualization/` prep module, i.e. Phase 5.
+Every item below is a *deletion* of a recompute in favour of a canonical function that already
+exists. None can lose a metric. None changes `metrics_*.json`, so `regression.py` stays GREEN
+throughout — **`qc/plot_regression.py` is the gate that matters here**, and it is the only one
+that can see these changes at all.
 
-**Finding 3 is a 4b item, not an oversight.** `fa_abortion_stats` returns pre-formatted strings
-and `plot_abortion_and_fa_rates` parses them back. Making it return numbers changes
-`metrics['fa_abortion_stats']`, and this document already assigns the formatting to `summary.py`
-in 4b -- so it lands there, with the fixture regeneration, rather than as a third output change
-in 4a.
+#### `visualization_utils.py` — 9 items *(7 of the audit's 19 are done)*
+
+| # | function | becomes | kind |
+|---|---|---|---|
+| 1 | `hidden_rule_and_false_alarm` | `fa_rate_by_odor` | call swap |
+| 2 | `plot_sampling_times_analysis` | `poke_durations` + `poke_duration_by_{position,odor}` | call swap; deletes 2 of finding 5's 4 extractors |
+| 3 | `plot_poke_duration_by_position` | `poke_duration_by_position` | call swap; deletes the other 2 |
+| 4 | `plot_poke_duration_by_odor` | `poke_duration_by_odor` + `by_group(…, "date")` | VARIANT 9 |
+| 5 | `plot_decision_accuracy._decision_acc` | `decision_accuracy` + `by_group(…, hidden_rule_mask(td))` | VARIANT 6 |
+| 6 | **`get_fa_ratio_a_stats`** | **moves wholesale into `metric_analysis`** | it is `METRIC` — no plotting in it at all. Only its FA-port counting was shared; the function itself is still in `visualization/` |
+| 7 | `_load_subject_trial_timeline` | `inter_trial_interval` | **restructure** |
+| 8 | `plot_hidden_rule_abort_poke_gap` | `hr_abort_poke_gap` | **restructure** |
+| 9 | `plot_hr_reward_fraction_over_trials` | `rolling_hr_reward_fraction` | **restructure** |
+
+**On 7-9 — the one place a naive swap is wrong.** These three build per-session dict rows and
+then pool *across* sessions before computing, while the metrics take one frame. Concatenate the
+sessions' `trial_data` first and call the metric once on the pooled frame. Applying the metric
+per session and concatenating the results is a **different quantity** — for the rolling ones it
+restarts the window at every session boundary, and `plot_regression.py` will show it as a
+changed curve rather than an error.
+
+#### `pred_seq_utils.py` — 6 items, none started
+
+`trial_poke_duration` → `trial_poke_span`; `response_time` → `reward_delivery_latency`;
+`fa_analysis` → `fa_latency_from_pokeout` (and its A/B counts → `fa_port_counts`, the 9th site
+of finding 1); `valve_to_reward` → `valve_to_reward_latency`; `cummulative_poke_time` →
+`trial_poke_total`; `performance` → `by_group(decision_accuracy, …, "sequence")` +
+`over_windows(decision_accuracy, …)` (VARIANT 5 — timeouts are already dropped, so the
+denominator matches canonical exactly).
+
+**The 10× outlier rule stays in the plotters** (judgement call 4: metrics raw, filtering is
+display). Do not move it with the metric.
+
+#### `sing_rew.py` — 2 items
+
+`FR_ratio` → `false_response_ratio`; `_response_time_ms` → `reward_delivery_latency` (the same
+`NEW` metric `pred_seq_utils.response_time` computes — finding 11's duplicate pair).
+
+#### `movement_analysis_utils.py` — 2 items (finding 7)
+
+`plot_epoch_speeds_by_condition` and `plot_traces_with_speed_threshold` still re-derive baseline
+mu/sigma and `vthresh` instead of reading `speed_threshold` from `speed_analysis.parquet`. Also
+removes the risk of a plotted threshold disagreeing with the one used to compute the saved
+latencies.
+
+#### 2 judgement-call moves, never started
+
+`_hr_odor_associations` (`visualization_utils:714`) → `metric_analysis` as session metadata;
+`_kw_mwu_by_group` (`movement_analysis_utils`) → `metric_analysis/stats/kw_mwu.py`, one module
+per test.
+
+#### Explicitly NOT 4a
+
+- **Finding 3.** `fa_abortion_stats` returns pre-formatted strings (`"3/10 (0.30)"`) and
+  `plot_abortion_and_fa_rates:2190` parses them back with `int(s.split()[0])`. Making it
+  numeric changes `metrics['fa_abortion_stats']`, and this document already assigns the
+  formatting to `summary.py` in 4b — so it lands there with its own fixture regeneration,
+  rather than as a third output change in 4a.
+- **Findings 10 and 14.** Trajectory prep duplicated across `movement_analysis_utils` and
+  `sing_rew_movement`, and the context-dependent `OdorG` relabelling written twice. Both are
+  `PREP`, not metric math → the shared `visualization/` prep module, i.e. Phase 5.
+- **VARIANTs 3-4** (`plot_fa_ratio_by_hr_position`, `plot_fa_ratio_by_abort_odor`) are
+  **done**: all counting goes through `fa_port_counts` and all ratios through `fa_port_ratio`.
+  Only the HR/abort-odor slicing is still longhand, which is what the resolution asks for —
+  the caller slices, the metric counts.
+
+#### Done when
+
+`grep` finds no division, aggregation or category-mask arithmetic over trial data anywhere in
+`visualization/` outside a `DISPLAY-AGG` (cross-subject/session mean±SEM, cumsum, rolling
+median for a band) — those stay, per standing rule 1. `regression.py` GREEN,
+`plot_regression.py` accounted for line by line, `check_imports` PASS.
 
 **Check printed output, not just values.** `metrics_*.txt` is written from the wrappers' stdout
 and is *not* in the fingerprint, so a print-only drift is invisible to the regression. The
@@ -1141,11 +1192,14 @@ resolves its own absent config and silently reads a wrong derivatives root -- th
 
 Then 4b executes the grouping confirmed above.
 
+
 ---
 
-## Handoff prompt for the 4b chat *(written 2026-08-06)*
+## Handoff prompt — FINISH 4a *(written 2026-08-06)*
 
-Paste this into a fresh chat.
+4a is half done: every metric exists canonically, but 21 recomputes are still in
+`visualization/`. Paste this into a fresh chat. **Do not hand off to 4b until the
+checklist above is empty** — the last task in this prompt is to write that handoff.
 
 ```
 I'm continuing a planned restructure of hypnose-behavior-analysis
@@ -1155,82 +1209,111 @@ silent output change, not throughput.
 
 FIRST, read both in full before doing anything:
 1. docs/restructure_2_plan.md — the authoritative plan. Phases 0-3 are DONE.
-2. docs/metric_audit.md — the Phase 4a audit. Read "Implementation progress" CLOSELY:
-   it is the tick-list, and its "Remaining", "Two things tier 2 turned on" and
-   "The gate the audit said did not exist" sections carry things you must not
-   rediscover the hard way.
+2. docs/metric_audit.md — the Phase 4a audit. It classifies every function in all
+   seven visualization/ files, so you never need to read the 16k lines of source.
+   Trust it. Read "Implementation progress" CLOSELY, and especially
+   **"Remaining — the 4a completion checklist"**, which is your task list.
 
-This chat: **Phase 4b — modularise metric_analysis.** Do not start Phase 5.
+This chat: **FINISH Phase 4a.** Do NOT start 4b. 4b's grouping is already confirmed
+and recorded; executing it belongs to a later chat, and it is blocked on 4a.
 
-## State you are inheriting
+## What 4a is, and where it stands
 
-4a's metric side is COMPLETE: all 24 checklist metrics exist in metric_analysis,
-every metric has a pure f(frame) core plus a thin *_session(results) wrapper, the
-resolvers (by_group / over_windows) exist, and both deliberate output changes have
-landed with fixtures regenerated. Fixtures are current; the gate is GREEN.
+4a = "visualization/ ends up only fetching and plotting; no metric math remains".
 
-What 4a did NOT finish is plot-side repointing — several plotters still carry their
-own copy of a metric that now exists. That list is in the audit's "Remaining".
-**It is not 4b's job.** Do it only if you finish 4b and want more; otherwise leave it
-for Phase 5, which rewrites those plotters anyway.
+The FIRST half is done (previous chat, 07182bd..9ebb031): all 24 checklist metrics
+now exist in metric_analysis, every metric has a pure f(frame) core plus a thin
+*_session(results) wrapper, by_group/over_windows exist, and both deliberate output
+changes have landed with fixtures regenerated. Fixtures are current, gate is GREEN.
 
-## What 4b is
+The SECOND half is your job: **21 recomputes still in visualization/**, itemised in
+the audit's completion checklist — 9 in visualization_utils.py, 6 in pred_seq_utils.py,
+2 in sing_rew.py, 2 in movement_analysis_utils.py, plus 2 judgement-call moves.
 
-The grouping is already CONFIRMED and recorded in the audit: 6 modules under
-metric_analysis/metrics/ (accuracy, false_alarm, sequence, hidden_rule, sampling,
-timing) plus the existing movement.py and sing_rew_metrics.py. The plan's "propose a
-grouping and get it confirmed before moving anything" gate is satisfied — do not
-re-open it.
+Every one is a deletion of a recompute in favour of a function that already exists.
+None can lose a metric. None should change metrics_*.json.
 
-Also in 4b, per the plan:
-- Plumbing out of metrics_utils.py: load_session_results / parse_json_columns → io/;
-  run_all_metrics + batch_run_all_metrics_with_merge → metric_analysis/run.py;
-  pool_results_dicts → merge.py; save_merged_metrics_txt → summary.py;
-  merged_results_output_dir / merged_metrics_filename → io/.
-- A registry so run_all_metrics discovers metrics, declaring each metric's frame via a
-  decorator argument (@metric(frame="trials" | "position_data")), NOT by file boundary.
-  Note the signature is not uniform: some tier-2 metrics legitimately take BOTH frames
-  (odorx_abortion_rate, hidden_rule_counts_by_odor), and hidden_rule_counts_by_odor also
-  takes session metadata (hr_odors, hr_positions) that its wrapper extracts.
-- Finding 3 belongs here: fa_abortion_stats returns pre-formatted strings
-  ("3/10 (0.30)") and plot_abortion_and_fa_rates parses them back. Make it numeric and
-  move the formatting to summary.py. This CHANGES metrics['fa_abortion_stats'] →
-  deliberate fixture regeneration, ASK ME FIRST with the metric-key diff.
+## The three that are NOT simple call swaps
+
+Items 7-9 (_load_subject_trial_timeline, plot_hidden_rule_abort_poke_gap,
+plot_hr_reward_fraction_over_trials) build per-session rows and pool ACROSS sessions
+before computing, while the metrics take one frame. Concatenate the sessions'
+trial_data first and call the metric once on the pooled frame. Applying the metric
+per session and concatenating results is a DIFFERENT quantity — for the rolling ones
+it restarts the window at every session boundary. It will not error; it will just be
+wrong, and only plot_regression.py can see it.
+
+Item 6 (get_fa_ratio_a_stats) is not a repoint at all — it is a pure METRIC function
+with no plotting, and it MOVES WHOLESALE into metric_analysis.
+
+## Settled — do not re-open
+
+- All D0/Q5 decisions, the 6 local judgement calls, and all 9 VARIANT resolutions are
+  settled in the audit. Read them; don't re-litigate.
+- The 10x outlier rule STAYS in the plotters (judgement call 4: metrics raw, filtering
+  is display). Do not move it with reward_delivery_latency / fa_latency_from_pokeout.
+- Finding 3 (fa_abortion_stats returning strings) is a 4b item, not an oversight — it
+  changes a saved metric and the audit assigns the formatting to summary.py in 4b.
+- Findings 10 and 14 are PREP, not metric math → Phase 5.
+- sequence_depth deliberately reproduces TODAY's rule, not the audit's
+  presentations-sourced target. It becomes a one-line change in 7b.
 
 ## Hard constraints
 
 - /Volumes/harris is STRICTLY READ-ONLY. Never write, move, rename, chmod or delete
-  anything under it, and do not explore it. If every session fails with a
-  FileNotFoundError or "No experiment runs found", that is a dropped/weak mount, not a
-  code regression. CHECK THE MOUNT BEFORE DIAGNOSING.
+  anything under it. Do not explore it — no browsing, no inventorying, no find over
+  the mount. To learn about a session, call the pipeline's own loaders for specific
+  subject/date pairs. If every session fails with a FileNotFoundError or "No
+  experiment runs found", that is a dropped or weak mount, not a code regression.
+  CHECK THE MOUNT BEFORE DIAGNOSING.
 - Run everything with ~/miniconda3/envs/hypnose-analysis-test/bin/python. Do NOT
-  install, upgrade or remove packages in any conda env. If something is missing, tell me.
-- Invoke the QC tools by ABSOLUTE path with -u and no cd. The `cd <repo> && python src/...`
-  form is blocked at the permission layer and looks like a hang.
+  install, upgrade or remove packages in any conda env. If something is missing,
+  tell me.
+- Invoke the QC tools by ABSOLUTE path with -u and no cd. The `cd <repo> && python
+  src/...` form is blocked at the permission layer and looks like a hang.
 - ~/repos/harris_lab is itself a commitless git repo. Always use `git -C /full/path`.
 - hypnose_helpers must import nothing from the other two repos.
 
+## Gates — read this, the usual one is nearly blind here
+
+Almost none of your work is reachable from run_all_metrics, so regression.py will sit
+GREEN no matter what you break. **qc/plot_regression.py is the gate that matters.**
+
+  PY=~/miniconda3/envs/hypnose-analysis-test/bin/python
+  QC=~/repos/harris_lab/hypnose/hypnose-behavior-analysis/src/hypnose_behavior/qc
+
+  $PY -u $QC/plot_regression.py            # ~4 min; working tree vs HEAD
+  $PY -u $QC/plot_regression.py --only plot_decision_accuracy
+  $PY -u $QC/check_imports.py              # seconds — it has already caught a
+                                           # NameError a bare except would have eaten
+  $PY -u $QC/regression.py                 # ~15 min; run before each commit anyway
+
+Also keep the ~7 s metric-parity check: git archive the pre-change tree to a temp dir,
+COPY configs/data_locations.local.yml into it (git-ignored; without it the tree
+resolves a wrong derivatives root and silently reads nothing), then compare BOTH the
+return value and captured stdout of run_all_metrics across all 9 sessions.
+metrics_*.txt comes from the wrappers' stdout and is NOT fingerprinted, so print-only
+drift is invisible to regression.py — that has already caught one.
+
+Expected result for every item on the checklist: plot_regression GREEN and regression
+GREEN. **Any RED is a real regression** — there are no intended output changes left in
+4a; both of them already landed. Stop and diagnose; never regenerate fixtures to make
+red go away.
+
 ## Workflow
 
-- Before each change, tell me what you're doing and what regression result you expect.
-- Gate on reachability from run_all_metrics. 4b is almost entirely pure moves, so
-  nearly everything is regression-gated — but run the fast harnesses first:
-  * ~7 s: metric parity. `git archive` the pre-change tree to a temp dir, COPY
-    configs/data_locations.local.yml into it (git-ignored; without it the tree resolves
-    a wrong derivatives root and silently fails), then compare BOTH the return value and
-    captured stdout of run_all_metrics across all 9 sessions. metrics_*.txt comes from
-    the wrappers' stdout and is NOT fingerprinted, so print-only drift is invisible to
-    regression.py — this has already caught one.
-  * ~4 min: $QC/plot_regression.py — diffs what the plotters draw between two trees.
-  * ~15 min: $QC/regression.py, then check_imports.py.
-- **Show the FULL regression output — all 9 sessions, both trial_data and metrics lines.
-  Do not truncate the gate.**
-- GREEN → commit. Unexpected RED → STOP and diagnose. Never regenerate fixtures to make
-  red go away.
+- Before each change, tell me what you're doing and what gate result you expect.
+- Work in small commits, a few checklist items each, gated as above.
+- **Show the FULL regression output — all 9 sessions, both trial_data and metrics
+  lines. Do not truncate the gate.**
 - **Commit messages: subject + 2-3 short sentences MAX**, then gate results, then
   `Co-Authored-By: Claude Opus 5` (no email). Rationale goes in the chat or the audit.
-- Tick items off the audit as you go. At the end: update the Progress table in the plan,
-  commit it with the work, and write the Phase 5 handoff prompt.
+- Tick items off the audit's completion checklist as you go.
+- **At the end, only once the checklist is empty:** verify the "Done when" criterion
+  in the audit, update the Progress table in the plan to mark 4a genuinely complete,
+  commit that with the work, and THEN write the Phase 4b handoff prompt.
+  If you run out of room before the checklist is empty, say so plainly and leave an
+  accurate status — do not write a 4b handoff for an unfinished 4a.
 
 Ask me rather than guessing if a decision isn't settled in the audit.
 ```
