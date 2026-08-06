@@ -210,7 +210,7 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         print("\n--- Decision Accuracy ---")
         metrics['decision_accuracy'] = decision_accuracy_session(results)
         print("\n--- Decision Accuracy by Odor ---")
-        accuracy_by_odor = decision_accuracy_by_odor(results)
+        accuracy_by_odor = decision_accuracy_by_odor_session(results)
         metrics['decision_accuracy_by_odor'] = accuracy_by_odor.to_dict() if len(accuracy_by_odor) > 0 else {}
         print("\n--- Global Choice Accuracy ---")
         metrics['global_choice_accuracy'] = global_choice_accuracy_session(results)
@@ -221,10 +221,10 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         print("\n--- Global False Alarm Rate ---")
         metrics['global_FA_rate'] = global_FA_rate_session(results)
         print("\n--- FA Odor Bias ---")
-        fa_odor = FA_odor_bias(results)
+        fa_odor = FA_odor_bias_session(results)
         metrics['FA_odor_bias'] = fa_odor.to_dict() if hasattr(fa_odor, 'to_dict') else fa_odor
         print("\n--- FA Position Bias ---")
-        fa_pos = FA_position_bias(results)
+        fa_pos = FA_position_bias_session(results)
         metrics['FA_position_bias'] = fa_pos.to_dict() if hasattr(fa_pos, 'to_dict') else fa_pos
         print("\n--- Sequence Completion Rate ---")
         metrics['sequence_completion_rate'] = sequence_completion_rate_session(results)
@@ -252,9 +252,9 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         abrt_pos = abortion_rate_positionX(results)
         metrics['abortion_rate_positionX'] = abrt_pos.to_dict() if hasattr(abrt_pos, 'to_dict') else abrt_pos
         print("\n--- Average Response Time ---")
-        metrics['avg_response_time'] = avg_response_time(results)
+        metrics['avg_response_time'] = avg_response_time_session(results)
         print("\n--- FA Average Response Times ---")
-        metrics['FA_avg_response_times'] = FA_avg_response_times(results)
+        metrics['FA_avg_response_times'] = FA_avg_response_times_session(results)
         print("\n--- Response Rate ---")
         metrics['response_rate'] = response_rate_session(results)
         print("\n--- Manual vs Auto Stop Preference ---")
@@ -265,7 +265,7 @@ def run_all_metrics(results, save_txt=True, save_json=True):
         noninit_odor = non_initiation_odor_bias(results)
         metrics['non_initiation_odor_bias'] = noninit_odor.to_dict() if hasattr(noninit_odor, 'to_dict') else noninit_odor
         print("\n--- Odor Initiation Bias ---")
-        odor_init = odor_initiation_bias(results)
+        odor_init = odor_initiation_bias_session(results)
         metrics['odor_initiation_bias'] = odor_init.to_dict() if hasattr(odor_init, 'to_dict') else odor_init
         print("\n--- FA Abortion Stats ---")
         fa_ab_stats = fa_abortion_stats(results, return_df=True)
@@ -814,10 +814,9 @@ def global_choice_accuracy_session(results):
     print(f"  - False alarms (FA Time In): {n_fa_time_in}")
     return n_correct, n_total, accuracy
 
-def decision_accuracy_by_odor(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "response_time_category" not in df.columns or "last_odor" not in df.columns:
-        print("Decision Accuracy by Odor: no trial_data with response_time_category/last_odor")
+def decision_accuracy_by_odor(trials):
+    """Per-odor `decision_accuracy`, plus a `_total` variant including timeouts."""
+    if trials.empty or "response_time_category" not in trials.columns or "last_odor" not in trials.columns:
         return pd.DataFrame()
 
     def extract_odor_letter(odor_str):
@@ -827,41 +826,51 @@ def decision_accuracy_by_odor(results):
             return odor_str.replace("Odor", "")
         return odor_str
 
-    df_local = df.copy()
+    df_local = trials.copy()
     df_local["odor_letter"] = df_local["last_odor"].apply(extract_odor_letter)
 
     rows = []
-    odors = sorted(df_local["odor_letter"].dropna().unique())
-
-    print("Decision Accuracy by Odor:")
-    for odor in odors:
+    for odor in sorted(df_local["odor_letter"].dropna().unique()):
         odor_trials = df_local[df_local["odor_letter"] == odor]
         n_rew = int((odor_trials["response_time_category"] == "rewarded").sum())
         n_unr = int((odor_trials["response_time_category"] == "unrewarded").sum())
         n_tmo = int((odor_trials["response_time_category"] == "timeout_delayed").sum())
         denom_ab = n_rew + n_unr
         denom_total = denom_ab + n_tmo
-        acc_ab = n_rew / denom_ab if denom_ab > 0 else np.nan
-        acc_total = n_rew / denom_total if denom_total > 0 else np.nan
-
-        def _fmt(v):
-            return f"{v:.3f}" if not np.isnan(v) else "nan"
-
-        print(f"  Odor {odor}: {n_rew} rewarded, {n_unr} unrewarded, {n_tmo} timeout")
-        print(f"       Decision Accuracy AB: {n_rew}/{denom_ab} = {_fmt(acc_ab)}, Total: {n_rew}/{denom_total} = {_fmt(acc_total)}")
-
         rows.append({
             'odor': odor,
             'rewarded': n_rew,
             'unrewarded': n_unr,
             'timeout': n_tmo,
-            'decision_accuracy_ab': acc_ab,
-            'decision_accuracy_total': acc_total,
+            'decision_accuracy_ab': n_rew / denom_ab if denom_ab > 0 else np.nan,
+            'decision_accuracy_total': n_rew / denom_total if denom_total > 0 else np.nan,
             'denominator_ab': denom_ab,
             'denominator_total': denom_total,
         })
 
     return pd.DataFrame(rows).set_index('odor').sort_index()
+
+
+def decision_accuracy_by_odor_session(results):
+    df = results.get("trial_data", pd.DataFrame())
+    if df.empty or "response_time_category" not in df.columns or "last_odor" not in df.columns:
+        print("Decision Accuracy by Odor: no trial_data with response_time_category/last_odor")
+        return pd.DataFrame()
+    out = decision_accuracy_by_odor(df)
+
+    def _fmt(v):
+        return f"{v:.3f}" if not np.isnan(v) else "nan"
+
+    print("Decision Accuracy by Odor:")
+    for odor, r in out.iterrows():
+        # int(): a row Series takes one common dtype, so these counts arrive as
+        # floats and would render as "65.0 rewarded" in metrics_*.txt.
+        n_rew, n_unr, n_tmo = int(r['rewarded']), int(r['unrewarded']), int(r['timeout'])
+        d_ab, d_total = int(r['denominator_ab']), int(r['denominator_total'])
+        print(f"  Odor {odor}: {n_rew} rewarded, {n_unr} unrewarded, {n_tmo} timeout")
+        print(f"       Decision Accuracy AB: {n_rew}/{d_ab} = {_fmt(r['decision_accuracy_ab'])}, "
+              f"Total: {n_rew}/{d_total} = {_fmt(r['decision_accuracy_total'])}")
+    return out
 
 def premature_response_rate_contributions(trials):
     ab = _aborted_mask(trials)
@@ -930,67 +939,88 @@ def global_FA_rate_session(results):
     print(f"Global False Alarm Rate: {n_fa}/{n_ini} = {rate:.3f}")
     return n_fa, n_ini, rate
 
-def FA_odor_bias(results):
-    print("FA Odor Bias for FA Time In:")
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "fa_label" not in df.columns:
-        return {'bias': {}, 'n_fa': {}, 'n_ab': {}, 'total_fa': 0, 'total_ab': 0}
+def FA_odor_bias(trials, *, reference=None):
+    """Per-odor FA rate normalised by a baseline FA rate.
 
-    odor_col = "last_odor_name" if "last_odor_name" in df.columns else "last_odor"
-    if odor_col not in df.columns:
-        return {'bias': {}, 'n_fa': {}, 'n_ab': {}, 'total_fa': 0, 'total_ab': 0}
-
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    aborted = df[aborted_mask]
+    `bias[odor] = (n_fa@odor / n_ab@odor) / reference`, with `reference`
+    defaulting to this frame's own `total_fa / total_ab`. Passing it explicitly
+    is what lets a rolling call keep a fixed session baseline instead of
+    normalising each window by itself -- the plotters' `baseline="session"` vs
+    `"window"` option, without any metric math moving back into `visualization/`.
+    """
+    empty = {'bias': {}, 'n_fa': {}, 'n_ab': {}, 'total_fa': 0, 'total_ab': 0}
+    if trials.empty or "fa_label" not in trials.columns:
+        return empty
+    odor_col = "last_odor_name" if "last_odor_name" in trials.columns else "last_odor"
+    if odor_col not in trials.columns:
+        return empty
+    aborted = trials[_aborted_mask(trials)]
     if aborted.empty:
-        return {'bias': {}, 'n_fa': {}, 'n_ab': {}, 'total_fa': 0, 'total_ab': 0}
+        return empty
 
     fa_mask = aborted["fa_label"] == "FA_time_in"
-    odors = sorted(aborted[odor_col].dropna().unique())
-    bias = {}
-    n_fa = {}
-    n_ab = {}
     total_fa = int(fa_mask.sum())
     total_ab = len(aborted)
-    for od in odors:
+    ref = reference if reference is not None else (
+        (total_fa / total_ab) if total_ab > 0 and total_fa > 0 else None)
+
+    bias, n_fa, n_ab = {}, {}, {}
+    for od in sorted(aborted[odor_col].dropna().unique()):
         at_od = aborted[odor_col] == od
-        fa_at_od = fa_mask & at_od
-        n_fa_od = int(fa_at_od.sum())
+        n_fa_od = int((fa_mask & at_od).sum())
         n_ab_od = int(at_od.sum())
-        n_fa[od] = n_fa_od
-        n_ab[od] = n_ab_od
-        bias[od] = (n_fa_od / n_ab_od) / (total_fa / total_ab) if n_ab_od > 0 and total_ab > 0 and total_fa > 0 else np.nan
-        print(f"{od}: {n_fa_od}/{n_ab_od} FA, Bias: {bias[od]:.3f}")
-    return {'bias': bias, 'n_fa': n_fa, 'n_ab': n_ab, 'total_fa': total_fa, 'total_ab': total_ab}
+        n_fa[od], n_ab[od] = n_fa_od, n_ab_od
+        bias[od] = (n_fa_od / n_ab_od) / ref if n_ab_od > 0 and ref else np.nan
+    return {'bias': bias, 'n_fa': n_fa, 'n_ab': n_ab,
+            'total_fa': total_fa, 'total_ab': total_ab}
 
-def FA_position_bias(results):
-    print("FA Position Bias for FA Time In:")
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "fa_label" not in df.columns:
-        return pd.Series(dtype=float)
 
-    position_col = "last_odor_position" if "last_odor_position" in df.columns else "last_event_index"
-    if position_col not in df.columns:
-        return pd.Series(dtype=float)
+def FA_odor_bias_session(results):
+    print("FA Odor Bias for FA Time In:")
+    out = FA_odor_bias(results.get("trial_data", pd.DataFrame()))
+    for od, bias in out['bias'].items():
+        print(f"{od}: {out['n_fa'][od]}/{out['n_ab'][od]} FA, Bias: {bias:.3f}")
+    return out
 
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    aborted = df[aborted_mask]
+def FA_position_bias(trials, *, reference=None, with_counts=False):
+    """`FA_odor_bias` by `last_odor_position`. See it for the `reference` rule."""
+    if trials.empty or "fa_label" not in trials.columns:
+        return ({}, {}, {}) if with_counts else pd.Series(dtype=float)
+    position_col = "last_odor_position" if "last_odor_position" in trials.columns else "last_event_index"
+    if position_col not in trials.columns:
+        return ({}, {}, {}) if with_counts else pd.Series(dtype=float)
+    aborted = trials[_aborted_mask(trials)]
     if aborted.empty:
-        return pd.Series(dtype=float)
+        return ({}, {}, {}) if with_counts else pd.Series(dtype=float)
 
     fa_mask = aborted["fa_label"] == "FA_time_in"
-    positions = sorted(aborted[position_col].dropna().unique())
-    bias = {}
     total_fa = int(fa_mask.sum())
     total_ab = len(aborted)
-    for pos in positions:
+    ref = reference if reference is not None else (
+        (total_fa / total_ab) if total_ab > 0 and total_fa > 0 else None)
+
+    bias, n_fa, n_ab = {}, {}, {}
+    for pos in sorted(aborted[position_col].dropna().unique()):
         at_pos = aborted[position_col] == pos
-        fa_at_pos = fa_mask & at_pos
-        n_fa_pos = int(fa_at_pos.sum())
+        n_fa_pos = int((fa_mask & at_pos).sum())
         n_ab_pos = int(at_pos.sum())
-        pos_report = int(pos) + 1 if position_col == "last_event_index" else int(pos)
-        bias[pos_report] = (n_fa_pos / n_ab_pos) / (total_fa / total_ab) if n_ab_pos > 0 and total_ab > 0 and total_fa > 0 else np.nan
-        print(f"Position {pos_report}: {n_fa_pos}/{n_ab_pos} FA, Bias: {bias[pos_report]:.3f}")
+        key = int(pos) + 1 if position_col == "last_event_index" else int(pos)
+        n_fa[key], n_ab[key] = n_fa_pos, n_ab_pos
+        bias[key] = (n_fa_pos / n_ab_pos) / ref if n_ab_pos > 0 and ref else np.nan
+    if with_counts:
+        return bias, n_fa, n_ab
+    return pd.Series(bias).sort_index()
+
+
+def FA_position_bias_session(results):
+    print("FA Position Bias for FA Time In:")
+    trials = results.get("trial_data", pd.DataFrame())
+    parts = FA_position_bias(trials, with_counts=True)
+    if not isinstance(parts, tuple):
+        return parts
+    bias, n_fa, n_ab = parts
+    for pos in sorted(bias):
+        print(f"Position {pos}: {n_fa[pos]}/{n_ab[pos]} FA, Bias: {bias[pos]:.3f}")
     return pd.Series(bias).sort_index()
 
 def sequence_completion_rate_contributions(trials):
@@ -1479,45 +1509,66 @@ def abortion_rate_positionX(results):
         print(f"Position {pos}: {n_ab}/{n_reached} abortions, Rate: {rates[pos]:.3f}")
     return pd.Series(rates).sort_index()
 
-def avg_response_time(results):
+def avg_response_time(trials):
+    """Mean `response_time_ms` by category, plus the pooled rewarded+unrewarded."""
+    if (trials.empty or "response_time_category" not in trials.columns
+            or "response_time_ms" not in trials.columns):
+        return {}
+    vals = pd.to_numeric(trials["response_time_ms"], errors="coerce")
+    out = {}
+    for label, key in [("Rewarded", "rewarded"), ("Unrewarded", "unrewarded"),
+                       ("Reward Timeout", "timeout_delayed")]:
+        s = vals[trials["response_time_category"] == key].dropna()
+        out[label] = float(s.mean()) if not s.empty else np.nan
+    both = vals[trials["response_time_category"].isin(["rewarded", "unrewarded"])].dropna()
+    out["Average Response Time (Rewarded + Unrewarded)"] = float(both.mean()) if not both.empty else np.nan
+    return out
+
+
+def avg_response_time_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns or "response_time_ms" not in df.columns:
         print("No response time data available.")
         return {}
-
-    def avg_for_mask(mask):
-        s = pd.to_numeric(df.loc[mask, "response_time_ms"], errors="coerce").dropna()
-        return float(s.mean()) if not s.empty else np.nan, len(s)
-
-    out = {}
-    for label, key in [("Rewarded", "rewarded"), ("Unrewarded", "unrewarded"), ("Reward Timeout", "timeout_delayed")]:
-        avg, n = avg_for_mask(df["response_time_category"] == key)
+    out = avg_response_time(df)
+    vals = pd.to_numeric(df["response_time_ms"], errors="coerce")
+    for label, key in [("Rewarded", "rewarded"), ("Unrewarded", "unrewarded"),
+                       ("Reward Timeout", "timeout_delayed")]:
+        avg, n = out[label], len(vals[df["response_time_category"] == key].dropna())
         print(f"{label}: {avg:.1f} ms (n={n})" if not np.isnan(avg) else f"{label}: nan (n={n})")
-        out[label] = avg
-
-    mask_both = df["response_time_category"].isin(["rewarded", "unrewarded"])
-    avg_both, n_both = avg_for_mask(mask_both)
-    print(f"Average Response Time (Rewarded + Unrewarded): {avg_both:.1f} ms (n={n_both})" if not np.isnan(avg_both) else f"Average Response Time (Rewarded + Unrewarded): nan (n={n_both})")
-    out["Average Response Time (Rewarded + Unrewarded)"] = avg_both
-
+    key = "Average Response Time (Rewarded + Unrewarded)"
+    avg_both = out[key]
+    n_both = len(vals[df["response_time_category"].isin(["rewarded", "unrewarded"])].dropna())
+    print(f"{key}: {avg_both:.1f} ms (n={n_both})" if not np.isnan(avg_both)
+          else f"{key}: nan (n={n_both})")
     return out
 
-def FA_avg_response_times(results):
+def FA_avg_response_times(trials):
+    """Mean `fa_latency_ms` per FA subtype."""
     out = {}
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "fa_label" not in df.columns or "fa_latency_ms" not in df.columns:
+    if trials.empty or "fa_label" not in trials.columns or "fa_latency_ms" not in trials.columns:
         return out
-
-    fa_df = df[df["fa_label"].notna()]
-    for label, pretty in [
-        ("FA_time_in", "FA Time In"),
-        ("FA_time_out", "FA Time Out"),
-        ("FA_late", "FA Late"),
-    ]:
+    fa_df = trials[trials["fa_label"].notna()]
+    for label, pretty in [("FA_time_in", "FA Time In"), ("FA_time_out", "FA Time Out"),
+                          ("FA_late", "FA Late")]:
         s = pd.to_numeric(fa_df.loc[fa_df["fa_label"] == label, "fa_latency_ms"], errors="coerce").dropna()
         avg = s.mean() if not s.empty else np.nan
-        print(f"{pretty}: avg={avg:.1f} ms (n={len(s)})" if not np.isnan(avg) else f"{pretty}: nan (n={len(s)})")
         out[pretty] = float(avg) if not np.isnan(avg) else np.nan
+    return out
+
+
+def FA_avg_response_times_session(results):
+    df = results.get("trial_data", pd.DataFrame())
+    out = FA_avg_response_times(df)
+    if not out:
+        return out
+    fa_df = df[df["fa_label"].notna()]
+    for label, pretty in [("FA_time_in", "FA Time In"), ("FA_time_out", "FA Time Out"),
+                          ("FA_late", "FA Late")]:
+        n = len(pd.to_numeric(fa_df.loc[fa_df["fa_label"] == label, "fa_latency_ms"],
+                              errors="coerce").dropna())
+        avg = out[pretty]
+        print(f"{pretty}: avg={avg:.1f} ms (n={n})" if not np.isnan(avg) else f"{pretty}: nan (n={n})")
     return out
 
 def response_rate_contributions(trials):
@@ -1638,30 +1689,43 @@ def non_initiation_odor_bias(results):
 
     return pd.Series(bias).sort_index()
 
-def odor_initiation_bias(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "abortion_type" not in df.columns:
-        return pd.Series(dtype=float)
-
-    odor_col = "last_odor_name" if "last_odor_name" in df.columns else "last_odor"
-    if odor_col not in df.columns:
-        return pd.Series(dtype=float)
-
-    aborted_mask = df["is_aborted"] == True if "is_aborted" in df.columns else pd.Series(False, index=df.index)
-    aborted = df[aborted_mask]
+def odor_initiation_bias(trials, *, reference=None, with_counts=False):
+    """Per-odor initiation-abortion share / the overall share. See `FA_odor_bias`."""
+    empty = ({}, {}, {}) if with_counts else pd.Series(dtype=float)
+    if trials.empty or "abortion_type" not in trials.columns:
+        return empty
+    odor_col = "last_odor_name" if "last_odor_name" in trials.columns else "last_odor"
+    if odor_col not in trials.columns:
+        return empty
+    aborted = trials[_aborted_mask(trials)]
     if aborted.empty:
-        return pd.Series(dtype=float)
+        return empty
 
     init_mask = aborted["abortion_type"] == "initiation_abortion"
-    odors = aborted[odor_col].dropna().unique()
-    bias = {}
     total_init = int(init_mask.sum())
     total_ab = len(aborted)
-    for od in sorted(odors):
-        n_init_od = int(((aborted[odor_col] == od) & init_mask).sum())
-        n_ab_od = int((aborted[odor_col] == od).sum())
-        bias[od] = (n_init_od / n_ab_od) / (total_init / total_ab) if n_ab_od > 0 and total_ab > 0 and total_init > 0 else np.nan
-        print(f"{od}: {n_init_od}/{n_ab_od} initiation abortions, Bias: {bias[od]:.3f}")
+    ref = reference if reference is not None else (
+        (total_init / total_ab) if total_ab > 0 and total_init > 0 else None)
+
+    bias, n_init, n_ab = {}, {}, {}
+    for od in sorted(aborted[odor_col].dropna().unique()):
+        at_od = aborted[odor_col] == od
+        n_init_od = int((at_od & init_mask).sum())
+        n_ab_od = int(at_od.sum())
+        n_init[od], n_ab[od] = n_init_od, n_ab_od
+        bias[od] = (n_init_od / n_ab_od) / ref if n_ab_od > 0 and ref else np.nan
+    if with_counts:
+        return bias, n_init, n_ab
+    return pd.Series(bias).sort_index()
+
+
+def odor_initiation_bias_session(results):
+    parts = odor_initiation_bias(results.get("trial_data", pd.DataFrame()), with_counts=True)
+    if not isinstance(parts, tuple):
+        return parts
+    bias, n_init, n_ab = parts
+    for od in sorted(bias):
+        print(f"{od}: {n_init[od]}/{n_ab[od]} initiation abortions, Bias: {bias[od]:.3f}")
     return pd.Series(bias).sort_index()
 
 def fa_abortion_stats(results, return_df=False):
