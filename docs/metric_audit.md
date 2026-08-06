@@ -973,6 +973,9 @@ Tick items off here as they land, so a later chat sees what remains. Commits are
 | — | **QC re-baseline (not a 4a move)** | `9672f1e` | The gate was RED at HEAD before any 4a work: pyarrow 23.0.1 post-dates the fixtures, so `load_session_results` reads parquet where it used to fall back to CSV, and the CSV round-trip loses up to 1 ULP. Diff was exactly `avg_response_time` (sub-048 20260306) and `FA_avg_response_times` (sub-040 20251124); 7 fixtures untouched, no `trial_data` md5 moved, no keys added/removed. `env_fingerprint` now records pyarrow. |
 | Q5 | **`sequence_depth` / `presented_positions` / `sampled_positions` / `reached_counts`** → `metric_analysis/frames.py` | `0ed296e` | `abortion_rate_positionX` and `fa_abortion_stats` carried byte-identical copies of the reached walk; both now call `reached_counts`. `parse_json_column` moved here too and is re-exported from `metrics_utils`. See the caveat below. |
 | 10-16 | **`compute_speed_analysis` + `run_speed_analysis_batch` + `_binned_speed`** → `metric_analysis/movement.py` | `8b7d09f` | All seven movement metrics. 711 lines verified byte-identical. `_load_tracking_and_behavior` → **`io/tracking.py`**, not the audit's suggested `visualization/io/`, because `metric_analysis` is now a consumer and must not import `visualization`. `visualization/` 16,618 → 15,194 lines. |
+| D0 | **cores + `*_contributions` + `*_session` wrappers, 10 tier-1 rate metrics** | `fd0c7cc` | `decision_accuracy`, `global_choice_accuracy`, `premature_response_rate`, `response_contingent_FA_rate`, `global_FA_rate`, `sequence_completion_rate`, `hidden_rule_performance`, `hidden_rule_detection_rate`, `choice_timeout_rate`, `response_rate`. Values **and printed output** verified identical on all 9 sessions. |
+| D0 | **`by_group` / `over_windows`** → `metric_analysis/resolvers.py` | `9215384`, `634b9c5` | Both evaluate the core on a *slice*, so rates reduce `num.sum()/den.sum()` rather than averaging per-trial values. `by_group`'s parts verified to sum back to the session value exactly. |
+| D0 | **`position_data` derived at load time** | `67d7f29` | `build_position_data` in `frames.py`; `load_session_results` emits `results["position_data"]`. |
 
 ### One deviation from the audit, deliberate — read before touching per-position metrics
 
@@ -1045,92 +1048,19 @@ by behavioural construct rather than by D0 tier.
 
 ### Remaining
 
-1. `position_data` derived at load time (tier 2). Note the row sets differ per blob —
-   `position_valve_times` on a *completed* trial carries positions that
-   `position_poke_times` / `presentations` / `num_odors` all drop (this is Q5 pattern 2
-   seen from the other side), so the long table needs per-blob provenance flags or
-   `manual_vs_auto_stop_preference` will silently gain rows.
-2. The `f(frame)` cores + `f(results)` wrappers for the 28 canonical metrics (D0).
-   Keep them in `metrics_utils.py` — 4b owns the module split and its grouping is gated on
-   Joschua confirming it.
-3. `by_group` / `over_windows` resolvers.
-4. The exact `DEDUP`s, then the `NEW` metrics, then the helper consolidations.
-5. Step 6 (drop non-initiated) — **ask before running `--generate`**.
+1. **D0 for the rest of the catalog.** Done: the 10 tier-1 *rate* metrics. Still on the old
+   `f(results)` shape: `decision_accuracy_by_odor`, `avg_response_time`,
+   `FA_avg_response_times` (tier 1, mean/frame-returning); all 8 tier-2; all 3 tier-3
+   (these take the `reference=` argument, which is what buys plotters
+   `baseline="session"|"window"`); tier 4 is being deleted by step 6, so do **not** port it.
+2. **Port the tier-2 metrics onto `position_data`.** The frame exists and is verified; the
+   metrics still parse blobs inline. **Each must filter on the provenance flag matching the
+   blob it reads today** — `in_poke_times` for `avg_sampling_time_*`, `in_valve_times` for
+   `manual_vs_auto_stop_preference`, `in_presentations` for `odorx_abortion_rate` and
+   `hidden_rule_counts_by_odor`. Skipping the filter changes values: the blobs differ by
+   19 rows on sub-057, 7 on sub-048, 4 on sub-040, 1 on sub-046.
+3. The exact `DEDUP`s, then the `NEW` metrics, then the helper consolidations
+   (poke-time extractors, FA port counting, trajectory prep, `_compute_real_time_offset`).
+4. Step 6 (drop non-initiated) — **ask before running `--generate`**.
 
-
----
-
-## Open questions for Joschua
-
-### Settled decisions
-
-- **D0 — the metric signature.** Settled 2026-08-05: yes, as part of 4a. See "D0 resolution".
-- **Q5 — "reached at position *p*".** Settled 2026-08-05, evidence-led. See "Q5 resolution".
-
-### Local judgement calls — settled 2026-08-05
-
-1. **`_hr_odor_associations` (visualization_utils:705)** → **moves to `metric_analysis` as
-   session metadata.** It infers `{HR odor → reward identity}` by voting over HR-success
-   trials; that is a derived property of the session, not a plotting concern, even though
-   colour selection is its only consumer today.
-
-2. **`speed_analysis.parquet`** → **no question to answer; withdrawn.** The output path is
-   built from the session directory at runtime (`results_dir = ses / "saved_analysis_results"`,
-   `:2154`; `analysis_path = results_dir / "speed_analysis.parquet"`, `:2426`), so moving
-   `compute_speed_analysis` into `metric_analysis` leaves the artifact exactly where it is.
-   Checked for the `__file__`-derived state that broke the Phase 2a `io/paths.py` move — there
-   is none. Clean source-only move.
-
-3. **`_kw_mwu_by_group`** → **`metric_analysis/stats/kw_mwu.py`**, one module per test family
-   rather than a single `stats.py` that accretes.
-
-   **Chosen for consistency with an existing convention, not on architectural grounds.**
-   `modelling/switchpoint/` already holds `permutation.py`, `bootstrap.py` and `autocorr.py`
-   — generic statistics (permutation testing, bootstrap null, autocorrelation with
-   significance bounds) that take plain numpy arrays and import nothing from the modelling
-   package. So the repo's established pattern is **generic stats live next to their consumer,
-   one module per concern**, and `metric_analysis/stats/kw_mwu.py` follows it.
-
-   A top-level `hypnose_behavior/stats/` is defensible and more honest about the code being
-   modality-agnostic, but it breaks that precedent to hold one function. A literal top-level
-   `src/stats/` is the one option to avoid: a second distribution namespace, `pyproject.toml`
-   `packages.find` changes, and `stats` is a collision-prone top-level import name against a
-   family convention of `hypnose_*` packages.
-
-   **The real long-term home is `hypnose_helpers.stats`** — by the 0.2 test `_kw_mwu_by_group`
-   knows only its input's shape, not what the data is. So do `bootstrap_null`, `residual_acf`
-   and `acf_bounds`. When a second repo (eeg, ephys) wants any of them, **graduate the family
-   in one pass** rather than one function at a time; keeping `kw_mwu` in the same shape as its
-   three siblings is what makes that a single clean move.
-
-4. **The 10× outlier rule** (`pred_seq_utils:1052`, `:1249`) → **stays in `visualization/` as
-   a display filter.** Establishes a general principle for the rest of 4a:
-
-   > **Metrics are computed raw. Filtering is a display concern.** Filtering at plot time is
-   > always possible; un-filtering a metric that was saved pre-filtered is not.
-
-   Two consequences to implement rather than discover:
-   - The plotted values will differ from the saved metric values **by design**. That has to be
-     stated where the filter is applied, or someone comparing a figure to `metrics_*.json`
-     will read it as a bug.
-   - The rule is currently written twice. It becomes **one shared display helper** in the
-     `visualization/` prep module, not two copies.
-
-5. **"Reached at position *p*"** → see "Q5 resolution".
-
-6. **`_compute_real_time_offset` (`valve_poke_plots:219`)** → **delete it; call the loaders'
-   offset.** It duplicates `io/loaders.load_all_streams:145-167` step for step — heartbeat
-   load, `'%Y-%m-%dT%H-%M-%S'` folder parse, UTC→UK conversion,
-   `real_time_ref - start_time` — differing only in a parent-directory fallback and a
-   returned heartbeat span. Today every timestamp on `plot_valve_and_poke_events` is shifted
-   by its own copy while the rest of the package uses the loader's, so drift between them
-   would be silent (the consumer is a figure, which the regression never sees).
-
-   Expose the offset computation from `io/loaders.py` and have the plot call it. **No
-   behaviour change intended** — the two implementations agree today, so this is a
-   deduplication, not a fix. If the extracted version turns out *not* to reproduce the
-   plot's current timestamps, that is a finding to report, not to paper over: it would mean
-   the two have already drifted. The parent-directory fallback and the heartbeat span must
-   be preserved (the plot uses the span to preselect overlapping sessions).
-
-**All six settled. Nothing blocks the 4a moves.**
+Then 4b executes the grouping confirmed above.
