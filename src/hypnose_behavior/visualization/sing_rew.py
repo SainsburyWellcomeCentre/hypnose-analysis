@@ -23,6 +23,11 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 
 from hypnose_behavior.io.save import save_figure
+from hypnose_behavior.metric_analysis.frames import build_position_data
+from hypnose_behavior.metric_analysis.metrics_utils import (
+    false_response_ratio_contributions,
+    reward_delivery_latency,
+)
 from hypnose_behavior.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_metrics,
     compute_sing_rew_rates,
@@ -67,24 +72,6 @@ def _port_label(value):
     if port_val == 2:
         return "B"
     return None
-
-
-def _response_time_ms(row):
-    """Response time for a completed trial, computed as in ``pred_seq_utils``:
-    last odor poke_odor_end → first_supply_time, in milliseconds."""
-    pos_dict = _parse_json_value(row.get("position_poke_times"))
-    last_entry = _last_position_entry(pos_dict)
-    if not last_entry:
-        return None
-    poke_end = last_entry.get("poke_odor_end")
-    supply_time = row.get("first_supply_time")
-    if poke_end is None or supply_time is None:
-        return None
-    poke_end_dt = pd.to_datetime(poke_end, errors="coerce")
-    supply_dt = pd.to_datetime(supply_time, errors="coerce")
-    if pd.isna(poke_end_dt) or pd.isna(supply_dt):
-        return None
-    return float((supply_dt - poke_end_dt).total_seconds() * 1000.0)
 
 
 def _subject_color_map(labels):
@@ -222,10 +209,14 @@ def FR_ratio(
                 completed = df[df.get("is_aborted") == False]
                 if not completed.empty and "false_response" in completed.columns:
                     n_sessions_with_fr += 1
-                    fr_mask = _fr_mask(completed, fr_labels)
+                    # The metric's numerator contributions, one per completed
+                    # trial -- the session ratio and the rolling ratio below are
+                    # both means of exactly these.
+                    num, _ = false_response_ratio_contributions(
+                        completed, fr_types=fr_labels)
                     entries = [
-                        (int(idx), 1.0 if is_fr else 0.0)
-                        for idx, is_fr in zip(completed["_trial_idx"], fr_mask)
+                        (int(idx), float(v))
+                        for idx, v in zip(completed["_trial_idx"], num)
                     ]
             sess_entries.append(entries)
         per_subject_sessions[label] = sess_entries
@@ -413,14 +404,21 @@ def _session_fr_latencies(completed, fr_labels):
 
 
 def _session_reward_rts(completed):
-    """Reward response times for one session: (all_values, {"A": [...], "B": [...]})."""
+    """Reward response times for one session: (all_values, {"A": [...], "B": [...]}).
+
+    `reward_delivery_latency` is the same quantity `pred_seq_utils.response_time`
+    draws -- finding 11's duplicate pair, now one definition. It is **not**
+    `trial_data.response_time_ms`, which is measured from the reward-port poke.
+    """
     rew_df = completed[completed.get("response_time_category") == "rewarded"]
+    latencies = reward_delivery_latency(rew_df, build_position_data(rew_df))
     all_vals = []
     by_port = {"A": [], "B": []}
     for _, row in rew_df.iterrows():
-        rt = _response_time_ms(row)
-        if rt is None:
+        rt = latencies.get(row.get("global_trial_id"))
+        if rt is None or pd.isna(rt):
             continue
+        rt = float(rt)
         all_vals.append(rt)
         port = _port_label(row.get("first_supply_port"))
         if port is not None:

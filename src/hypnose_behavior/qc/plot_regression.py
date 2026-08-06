@@ -93,6 +93,10 @@ CASES = [
     # i.e. `over_windows`), and nothing else reaches it.
     ("performance#rolling", [[40]], {"dates": [20251124, 20251229],
                                      "moving_avg": True, "window_size": 10}),
+    # sing_rew (checklist 16-17). sub-057 20260709 is the one single-reward
+    # session in the coverage set; on any other subject these draw nothing.
+    ("FR_ratio", [[57]], {"dates": [20260709]}),
+    ("FR_latency", [[57]], {"dates": [20260709]}),
 ]
 
 # Runs inside the child process, against whichever tree is on sys.path.

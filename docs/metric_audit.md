@@ -1207,10 +1207,17 @@ before the remaining files:
   `values_only=False` gives the `(n, denom, rate)` triple, so the original expression is
   preserved exactly.
 
-#### `sing_rew.py` — 2 items
+#### `sing_rew.py` — 2 items ✅ *(done 2026-08-06)*
 
 `FR_ratio` → `false_response_ratio`; `_response_time_ms` → `reward_delivery_latency` (the same
 `NEW` metric `pred_seq_utils.response_time` computes — finding 11's duplicate pair).
+
+`FR_ratio` needs a value *per trial*, not the session rate, because it also draws a rolling
+ratio — so it takes `false_response_ratio_contributions`' numerator, which is what both the
+session mean and the rolling mean reduce. `FR_ratio` is byte-identical; `FR_latency` moves one
+drawn value by 18.8 ns (max rel 5.4e-9), the same ns recovery as the `pred_seq_utils` items.
+
+`_fr_mask` stays: it *selects* false-response trials, it does not compute anything.
 
 #### `movement_analysis_utils.py` — 2 items (finding 7)
 
