@@ -33,178 +33,54 @@ from hypnose_behavior.metric_analysis.frames import (  # noqa: F401
     sampled_positions,
     sequence_depth,
 )
-# ================== Behavioral Metrics Functions =================================================================================================================================
+# Phase 4b is splitting this module into `metric_analysis/metrics/`, one module
+# per behavioural construct. What is left here has not moved yet; these imports
+# are what the remainder still calls, and they re-export the moved names so
+# importers keep working until the split finishes and this file goes.
+from hypnose_behavior.metric_analysis.metrics.common import (  # noqa: F401
+    _aborted_mask,
+    _flag,
+    _initiated,
+    _is_truthy,
+    _latency_ms,
+    _position_rows,
+    _reduce_rate,
+    _trial_position_frame,
+    _trial_timestamp,
+    _truthy,
+    _tz_naive,
+    reduce_rate,
+)
+from hypnose_behavior.metric_analysis.metrics.accuracy import (  # noqa: F401
+    choice_timeout_rate,
+    choice_timeout_rate_contributions,
+    choice_timeout_rate_session,
+    decision_accuracy,
+    decision_accuracy_by_odor,
+    decision_accuracy_by_odor_session,
+    decision_accuracy_contributions,
+    decision_accuracy_session,
+    global_choice_accuracy,
+    global_choice_accuracy_contributions,
+    global_choice_accuracy_session,
+    response_rate,
+    response_rate_contributions,
+    response_rate_session,
+    rolling_reward_fraction,
+)
+from hypnose_behavior.metric_analysis.metrics.sequence import (  # noqa: F401
+    abortion_rate_positionX,
+    abortion_rate_positionX_session,
+    odor_initiation_bias,
+    odor_initiation_bias_session,
+    odorx_abortion_rate,
+    odorx_abortion_rate_session,
+    presentation_counts_by_odor,
+    sequence_completion_rate,
+    sequence_completion_rate_contributions,
+    sequence_completion_rate_session,
+)
 
-# ================== Metric cores: f(frame) -> value ==============================
-#
-# restructure_2 Phase 4a, decision D0. Every metric gets a pure core taking a
-# *trial frame* plus a thin `_session(results)` wrapper that prints and keeps
-# `run_all_metrics` (and therefore the saved JSON) unchanged.
-#
-# Rate metrics additionally expose their numerator and denominator
-# *contributions* as per-trial Series, because **a rate is not a per-trial
-# quantity**. Storing one value per trial and taking a rolling mean gives
-# `rewarded / window_size` -- a denominator silently containing timeouts and
-# aborts. That is finding 12 of the audit: it is exactly why
-# `pred_seq.performance` and `plot_decision_accuracy_rolling_average` disagree
-# today. Reducing `num.sum() / den.sum()` over any slice is correct at every
-# granularity, and two cumulative sums make a rolling window O(1).
-
-
-def _aborted_mask(trials):
-    """The `df["is_aborted"] == True` mask every metric builds, once."""
-    if "is_aborted" in trials.columns:
-        return trials["is_aborted"] == True  # noqa: E712
-    return pd.Series(False, index=trials.index)
-
-
-def _flag(trials, column, value):
-    """`trials[column] == value` as a boolean Series; all-False when absent."""
-    if column in trials.columns:
-        return trials[column] == value
-    return pd.Series(False, index=trials.index)
-
-
-def _truthy(trials, column):
-    if column in trials.columns:
-        return trials[column].apply(_is_truthy).astype(bool)
-    return pd.Series(False, index=trials.index)
-
-
-def reduce_rate(num, den):
-    """(numerator, denominator) contributions -> (n, denom, rate).
-
-    Public because a plotter that has already collected a metric's per-trial
-    contributions -- `sing_rew.FR_ratio` does, to draw both a session ratio and a
-    rolling one -- must reduce them the same way the metric does, rather than
-    reaching for its own `np.mean`.
-    """
-    n = int(np.asarray(num, dtype=float).sum())
-    d = int(np.asarray(den, dtype=float).sum())
-    return n, d, (n / d if d > 0 else np.nan)
-
-
-# The private spelling every metric in this module already uses.
-_reduce_rate = reduce_rate
-
-
-def _initiated(trials):
-    """Denominator "an initiated trial": a non-null global_trial_id, else all rows."""
-    if "global_trial_id" in trials.columns:
-        return trials["global_trial_id"].notna().astype(int)
-    return pd.Series(1, index=trials.index)
-
-
-def decision_accuracy_contributions(trials):
-    rtc = trials["response_time_category"]
-    return ((rtc == "rewarded").astype(int),
-            rtc.isin(["rewarded", "unrewarded"]).astype(int))
-
-
-def decision_accuracy(trials):
-    """rewarded / (rewarded + unrewarded)."""
-    if trials.empty or "response_time_category" not in trials.columns:
-        return 0, 0, np.nan
-    return _reduce_rate(*decision_accuracy_contributions(trials))
-
-
-def decision_accuracy_session(results):
-    trials = results.get("trial_data", pd.DataFrame())
-    if trials.empty or "response_time_category" not in trials.columns:
-        print("Decision Accuracy: no trial_data with response_time_category")
-        return 0, 0, np.nan
-    n_rew, denom, acc = decision_accuracy(trials)
-    print(f"Decision Accuracy: {n_rew}/{denom} = {acc:.3f}")
-    return n_rew, denom, acc
-
-
-def global_choice_accuracy_contributions(trials):
-    rtc = trials["response_time_category"]
-    # Counts are summed, not or-ed: a trial flagged both ways contributes twice,
-    # as it does today.
-    return ((rtc == "rewarded").astype(int),
-            rtc.isin(["rewarded", "unrewarded"]).astype(int)
-            + _flag(trials, "fa_label", "FA_time_in").astype(int))
-
-
-def global_choice_accuracy(trials):
-    """rewarded / (rewarded + unrewarded + FA_time_in)."""
-    if trials.empty or "response_time_category" not in trials.columns:
-        return 0, 0, np.nan
-    return _reduce_rate(*global_choice_accuracy_contributions(trials))
-
-
-def global_choice_accuracy_session(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "response_time_category" not in df.columns:
-        print("Global Choice Accuracy: no trial_data with response_time_category")
-        return 0, 0, np.nan
-    n_correct, n_total, accuracy = global_choice_accuracy(df)
-    n_incorrect = int((df["response_time_category"] == "unrewarded").sum())
-    n_fa_time_in = int(_flag(df, "fa_label", "FA_time_in").sum())
-    print(f"Global Choice Accuracy: {n_correct}/{n_total} = {accuracy:.3f}")
-    print(f"  - Correct choices: {n_correct}")
-    print(f"  - Incorrect choices: {n_incorrect}")
-    print(f"  - False alarms (FA Time In): {n_fa_time_in}")
-    return n_correct, n_total, accuracy
-
-def decision_accuracy_by_odor(trials):
-    """Per-odor `decision_accuracy`, plus a `_total` variant including timeouts."""
-    if trials.empty or "response_time_category" not in trials.columns or "last_odor" not in trials.columns:
-        return pd.DataFrame()
-
-    def extract_odor_letter(odor_str):
-        if pd.isna(odor_str):
-            return np.nan
-        if isinstance(odor_str, str) and odor_str.startswith("Odor"):
-            return odor_str.replace("Odor", "")
-        return odor_str
-
-    df_local = trials.copy()
-    df_local["odor_letter"] = df_local["last_odor"].apply(extract_odor_letter)
-
-    rows = []
-    for odor in sorted(df_local["odor_letter"].dropna().unique()):
-        odor_trials = df_local[df_local["odor_letter"] == odor]
-        n_rew = int((odor_trials["response_time_category"] == "rewarded").sum())
-        n_unr = int((odor_trials["response_time_category"] == "unrewarded").sum())
-        n_tmo = int((odor_trials["response_time_category"] == "timeout_delayed").sum())
-        denom_ab = n_rew + n_unr
-        denom_total = denom_ab + n_tmo
-        rows.append({
-            'odor': odor,
-            'rewarded': n_rew,
-            'unrewarded': n_unr,
-            'timeout': n_tmo,
-            'decision_accuracy_ab': n_rew / denom_ab if denom_ab > 0 else np.nan,
-            'decision_accuracy_total': n_rew / denom_total if denom_total > 0 else np.nan,
-            'denominator_ab': denom_ab,
-            'denominator_total': denom_total,
-        })
-
-    return pd.DataFrame(rows).set_index('odor').sort_index()
-
-
-def decision_accuracy_by_odor_session(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "response_time_category" not in df.columns or "last_odor" not in df.columns:
-        print("Decision Accuracy by Odor: no trial_data with response_time_category/last_odor")
-        return pd.DataFrame()
-    out = decision_accuracy_by_odor(df)
-
-    def _fmt(v):
-        return f"{v:.3f}" if not np.isnan(v) else "nan"
-
-    print("Decision Accuracy by Odor:")
-    for odor, r in out.iterrows():
-        # int(): a row Series takes one common dtype, so these counts arrive as
-        # floats and would render as "65.0 rewarded" in metrics_*.txt.
-        n_rew, n_unr, n_tmo = int(r['rewarded']), int(r['unrewarded']), int(r['timeout'])
-        d_ab, d_total = int(r['denominator_ab']), int(r['denominator_total'])
-        print(f"  Odor {odor}: {n_rew} rewarded, {n_unr} unrewarded, {n_tmo} timeout")
-        print(f"       Decision Accuracy AB: {n_rew}/{d_ab} = {_fmt(r['decision_accuracy_ab'])}, "
-              f"Total: {n_rew}/{d_total} = {_fmt(r['decision_accuracy_total'])}")
-    return out
 
 def premature_response_rate_contributions(trials):
     ab = _aborted_mask(trials)
@@ -357,25 +233,6 @@ def FA_position_bias_session(results):
         print(f"Position {pos}: {n_fa[pos]}/{n_ab[pos]} FA, Bias: {bias[pos]:.3f}")
     return pd.Series(bias).sort_index()
 
-def sequence_completion_rate_contributions(trials):
-    return ((~_aborted_mask(trials)).astype(int), _initiated(trials))
-
-
-def sequence_completion_rate(trials):
-    """completed / initiated."""
-    if trials.empty:
-        return 0, 0, np.nan
-    return _reduce_rate(*sequence_completion_rate_contributions(trials))
-
-
-def sequence_completion_rate_session(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty:
-        print("Sequence Completion Rate: no trial_data")
-        return 0, 0, np.nan
-    n_completed, denom, rate = sequence_completion_rate(df)
-    print(f"Sequence Completion Rate: {n_completed}/{denom} = {rate:.3f}")
-    return n_completed, denom, rate
 
 # ================== Metric cores: tier 2, grouped inside a position blob =========
 #
@@ -400,22 +257,6 @@ def sequence_completion_rate_session(results):
 # to move the metrics md5, and invisible in any printed output.
 
 
-def _position_rows(position_data, blob, *, aborted=None):
-    """Rows of `position_data` that came from `blob`, optionally by outcome.
-
-    Returns None when the frame is absent or unusable, which every caller treats
-    as "no positions" -- the same answer today's inline blob walk gives.
-    """
-    if position_data is None or len(position_data) == 0:
-        return None
-    if blob not in position_data.columns:
-        return None
-    rows = position_data[position_data[blob].astype(bool)]
-    if aborted is not None:
-        rows = rows[rows["is_aborted"].astype(bool) == aborted]
-    return rows
-
-
 def _sequential_mean(values):
     """Mean by left-to-right accumulation.
 
@@ -430,52 +271,6 @@ def _sequential_mean(values):
         n += 1
     return total / n if n > 0 else np.nan
 
-
-def presentation_counts_by_odor(position_data):
-    """`{odor_name: n presentations}` -- the denominator of `odorx_abortion_rate`.
-
-    Counts `presentations` rows only, so the valve-only positions never enter.
-    """
-    rows = _position_rows(position_data, "in_presentations")
-    if rows is None or rows.empty:
-        return {}
-    rows = rows[rows["odor_name"].notna()]
-    return {od: int(n) for od, n in rows.groupby("odor_name").size().items()}
-
-
-def odorx_abortion_rate(trials, position_data, *, with_counts=False):
-    """aborts@odor / presentations@odor."""
-    empty = ({}, {}, {}) if with_counts else pd.Series(dtype=float)
-    if trials.empty or "presentations" not in trials.columns:
-        return empty
-    odor_col = "last_odor_name" if "last_odor_name" in trials.columns else "last_odor"
-    if odor_col not in trials.columns:
-        return empty
-
-    aborted = trials[_aborted_mask(trials)]
-    abortions = aborted[odor_col].dropna().value_counts().to_dict()
-    presentations = presentation_counts_by_odor(position_data)
-
-    all_odors = set(presentations.keys()).union(abortions.keys())
-    rates = {}
-    for od in sorted(all_odors):
-        n_pres = presentations.get(od, 0)
-        rates[od] = abortions.get(od, 0) / n_pres if n_pres > 0 else np.nan
-    if with_counts:
-        return rates, abortions, presentations
-    return pd.Series(rates, dtype=float).sort_index()
-
-
-def odorx_abortion_rate_session(results):
-    parts = odorx_abortion_rate(results.get("trial_data", pd.DataFrame()),
-                                results.get("position_data"), with_counts=True)
-    if not isinstance(parts, tuple):
-        return parts
-    rates, abortions, presentations = parts
-    for od in sorted(rates):
-        print(f"{od}: {abortions.get(od, 0)}/{presentations.get(od, 0)} abortions, "
-              f"Rate: {rates[od]:.3f}")
-    return pd.Series(rates, dtype=float).sort_index()
 
 def hidden_rule_performance_contributions(trials):
     return (((_truthy(trials, "hidden_rule_success")
@@ -574,19 +369,6 @@ def _extract_hr_config(results):
         except Exception:
             continue
     return hr_odors, hr_pos_clean
-
-
-def _is_truthy(val):
-    if isinstance(val, bool):
-        return val
-    if isinstance(val, (int, float)):
-        try:
-            return not math.isnan(val) and val != 0
-        except Exception:
-            return val != 0
-    if isinstance(val, str):
-        return val.strip().lower() in {"1", "true", "t", "yes", "y"}
-    return False
 
 
 def _infer_hr_odors_from_row(row, hr_odors, hr_positions):
@@ -851,27 +633,6 @@ def hidden_rule_counts_by_odor_session(results):
         )
     return out
 
-def choice_timeout_rate_contributions(trials):
-    completed = ~_aborted_mask(trials)
-    return ((completed & _flag(trials, "response_time_category", "timeout_delayed")).astype(int),
-            completed.astype(int))
-
-
-def choice_timeout_rate(trials):
-    """timeout_delayed / completed."""
-    if trials.empty or "response_time_category" not in trials.columns:
-        return 0, 0, np.nan
-    return _reduce_rate(*choice_timeout_rate_contributions(trials))
-
-
-def choice_timeout_rate_session(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "response_time_category" not in df.columns:
-        print("Choice Timeout Rate: no trial_data/response_time_category")
-        return 0, 0, np.nan
-    n_tmo, denom, rate = choice_timeout_rate(df)
-    print(f"Choice Timeout Rate: {n_tmo}/{denom} = {rate:.3f}")
-    return n_tmo, denom, rate
 
 def avg_sampling_time_odor_x(position_data):
     """Mean `poke_time_ms` per odor over completed trials, from `position_poke_times`."""
@@ -941,43 +702,6 @@ def avg_sampling_time_aborted_sequence_session(results):
     print(f"Average Sampling Time (Aborted Sequences): {avg:.2f} ms")
     return avg
 
-def abortion_rate_positionX(trials, *, with_counts=False):
-    """aborts@position / trials that reached it.
-
-    The denominator is `frames.reached_counts` -- the single definition of
-    "reached" for the package (audit Q5), which is why this core needs only the
-    trial frame even though it is a per-position metric.
-    """
-    empty = ({}, {}, {}) if with_counts else pd.Series(dtype=float)
-    if trials.empty:
-        return empty
-    position_col = "last_odor_position" if "last_odor_position" in trials.columns else "last_event_index"
-    if position_col not in trials.columns:
-        return empty
-
-    aborted = trials[_aborted_mask(trials)]
-    abortions = aborted[position_col].dropna().value_counts().to_dict()
-    reached = _reached_counts(trials)
-
-    rates = {}
-    for pos in sorted(set(list(abortions.keys()) + list(reached.keys()))):
-        n_reached = reached.get(pos, 0)
-        rates[pos] = abortions.get(pos, 0) / n_reached if n_reached > 0 else np.nan
-    if with_counts:
-        return rates, abortions, reached
-    return pd.Series(rates, dtype=float).sort_index()
-
-
-def abortion_rate_positionX_session(results):
-    parts = abortion_rate_positionX(results.get("trial_data", pd.DataFrame()),
-                                    with_counts=True)
-    if not isinstance(parts, tuple):
-        return parts
-    rates, abortions, reached = parts
-    for pos in sorted(rates):
-        print(f"Position {pos}: {abortions.get(pos, 0)}/{reached.get(pos, 0)} abortions, "
-              f"Rate: {rates[pos]:.3f}")
-    return pd.Series(rates, dtype=float).sort_index()
 
 def avg_response_time(trials):
     """Mean `response_time_ms` by category, plus the pooled rewarded+unrewarded."""
@@ -1041,27 +765,6 @@ def FA_avg_response_times_session(results):
         print(f"{pretty}: avg={avg:.1f} ms (n={n})" if not np.isnan(avg) else f"{pretty}: nan (n={n})")
     return out
 
-def response_rate_contributions(trials):
-    rtc = trials["response_time_category"]
-    num = rtc.isin(["rewarded", "unrewarded"]).astype(int)
-    return num, num + (rtc == "timeout_delayed").astype(int)
-
-
-def response_rate(trials):
-    """(rewarded + unrewarded) / (rewarded + unrewarded + timeout)."""
-    if trials.empty or "response_time_category" not in trials.columns:
-        return 0, 0, np.nan
-    return _reduce_rate(*response_rate_contributions(trials))
-
-
-def response_rate_session(results):
-    df = results.get("trial_data", pd.DataFrame())
-    if df.empty or "response_time_category" not in df.columns:
-        print("Response Rate: no trial_data/response_time_category")
-        return 0, 0, np.nan
-    num, denom, rate = response_rate(df)
-    print(f"Response Rate: {num}/{denom} = {rate:.3f}")
-    return num, denom, rate
 
 def manual_vs_auto_stop_preference(position_data):
     """Valve durations on completed trials, split at 1000 ms.
@@ -1090,44 +793,6 @@ def manual_vs_auto_stop_preference_session(results):
     print(f"Manual vs Auto Stop: {out['ratio']:.2f}")
     return out
 
-def odor_initiation_bias(trials, *, reference=None, with_counts=False):
-    """Per-odor initiation-abortion share / the overall share. See `FA_odor_bias`."""
-    empty = ({}, {}, {}) if with_counts else pd.Series(dtype=float)
-    if trials.empty or "abortion_type" not in trials.columns:
-        return empty
-    odor_col = "last_odor_name" if "last_odor_name" in trials.columns else "last_odor"
-    if odor_col not in trials.columns:
-        return empty
-    aborted = trials[_aborted_mask(trials)]
-    if aborted.empty:
-        return empty
-
-    init_mask = aborted["abortion_type"] == "initiation_abortion"
-    total_init = int(init_mask.sum())
-    total_ab = len(aborted)
-    ref = reference if reference is not None else (
-        (total_init / total_ab) if total_ab > 0 and total_init > 0 else None)
-
-    bias, n_init, n_ab = {}, {}, {}
-    for od in sorted(aborted[odor_col].dropna().unique()):
-        at_od = aborted[odor_col] == od
-        n_init_od = int((at_od & init_mask).sum())
-        n_ab_od = int(at_od.sum())
-        n_init[od], n_ab[od] = n_init_od, n_ab_od
-        bias[od] = (n_init_od / n_ab_od) / ref if n_ab_od > 0 and ref else np.nan
-    if with_counts:
-        return bias, n_init, n_ab
-    return pd.Series(bias).sort_index()
-
-
-def odor_initiation_bias_session(results):
-    parts = odor_initiation_bias(results.get("trial_data", pd.DataFrame()), with_counts=True)
-    if not isinstance(parts, tuple):
-        return parts
-    bias, n_init, n_ab = parts
-    for od in sorted(bias):
-        print(f"{od}: {n_init[od]}/{n_ab[od]} initiation abortions, Bias: {bias[od]:.3f}")
-    return pd.Series(bias).sort_index()
 
 def _fa_abortion_frames_missing(trials):
     """The guard `fa_abortion_stats` fails on, or None. Message is the caller's."""
@@ -1340,17 +1005,6 @@ def fa_port_ratio_by_odor_session(results):
 # None of these is reached by `run_all_metrics`, so none enters `metrics_*.json`
 # or the regression fingerprint. Whether to save them is a 4b question (the
 # registry decides), not a 4a one.
-
-
-def _tz_naive(series):
-    """Datetime Series with any timezone dropped, so subtraction is safe."""
-    s = pd.to_datetime(series, errors="coerce")
-    try:
-        if s.dt.tz is not None:
-            s = s.dt.tz_localize(None)
-    except (AttributeError, TypeError):
-        pass
-    return s
 
 
 def _fa_filter_mask(frame, fa_types=None):
@@ -1573,49 +1227,6 @@ def fa_rate_by_position(trials, *, fa_types=None):
     return pd.Series(rates, dtype=float).sort_index()
 
 
-def rolling_reward_fraction(trials, window, *, step=1, include_avg=False, hr_only=False):
-    """Rolling fraction of trials rewarded, divided by the **window**.
-
-    Checklist 2, and deliberately not `over_windows(decision_accuracy, ...)`.
-    The denominator is the window size, so timeouts -- and, unless the caller has
-    already dropped them, aborts -- sit inside it. That is the audit's finding 12:
-    the curve differs visibly from a rolling `decision_accuracy`, which is why
-    this is a separately named metric rather than a granularity of an existing
-    one.
-
-    `include_avg` back-fills the warm-up, completing a not-yet-full window with
-    the frame's overall rate so the series starts at the first trial instead of
-    at trial `window`. `hr_only` narrows the numerator to hidden-rule rewards.
-
-    Returns one value per row of `trials`, NaN where no window ends there.
-    """
-    n = len(trials)
-    out = np.full(n, np.nan)
-    if n == 0:
-        return out
-
-    numerator = _flag(trials, "response_time_category", "rewarded")
-    if hr_only:
-        hr = trials.get("hidden_rule_success")
-        hr = (hr.fillna(False).astype(bool) if isinstance(hr, pd.Series)
-              else pd.Series(False, index=trials.index))
-        numerator = numerator & hr
-    rewards = numerator.astype(int).to_numpy(dtype=float)
-    overall = float(np.mean(rewards))
-
-    if include_avg:
-        for i in range(0, n, step):
-            if i < window:
-                avail = rewards[: i + 1]
-                out[i] = (float(np.sum(avail)) + (window - len(avail)) * overall) / float(window)
-            else:
-                out[i] = float(np.mean(rewards[i - window + 1: i + 1]))
-    else:
-        for end in range(window, n + 1, step):
-            out[end - 1] = float(np.mean(rewards[end - window: end]))
-    return out
-
-
 def rolling_hr_reward_fraction(trials, window, *, with_flags=False):
     """Rolling percentage of rewarded trials that were hidden-rule rewarded.
 
@@ -1821,14 +1432,6 @@ def hr_abort_poke_gap(trials, position_data):
 # `visualization/`, where it can be seen and changed.
 
 
-def _trial_position_frame(position_data, blob):
-    """One blob's rows sorted by position within trial, or None if unusable."""
-    rows = _position_rows(position_data, blob)
-    if rows is None or rows.empty or "global_trial_id" not in rows.columns:
-        return None
-    return rows.sort_values(["global_trial_id", "position"], kind="stable")
-
-
 def _deepest_position_timestamp(position_data, blob, field):
     """`field` at each trial's deepest position, tz-naive, indexed by trial id."""
     rows = _trial_position_frame(position_data, blob)
@@ -1837,31 +1440,6 @@ def _deepest_position_timestamp(position_data, blob, field):
     frame = pd.DataFrame({"gid": rows["global_trial_id"].to_numpy(),
                           "ts": _tz_naive(rows[field]).to_numpy()})
     return frame.groupby("gid", sort=True)["ts"].agg(lambda s: s.iloc[-1])
-
-
-def _trial_timestamp(trials, field):
-    """A trial-level timestamp column, tz-naive, indexed by trial id."""
-    if field not in trials.columns or "global_trial_id" not in trials.columns:
-        return None
-    return pd.Series(_tz_naive(trials[field]).to_numpy(),
-                     index=trials["global_trial_id"].to_numpy())
-
-
-def _latency_ms(later, earlier):
-    """`later - earlier` in ms, dropping pairs where either side is missing.
-
-    Vectorised `.dt.total_seconds()` on purpose. The plotters walk trials one at
-    a time and go through *scalar* `Timedelta.total_seconds()`, which truncates
-    to microseconds, so they silently discard the nanoseconds the blob
-    timestamps carry (`...T13:49:07.507839999`). The timedeltas themselves are
-    bit-identical either way; only the conversion differs. Measured on all 9
-    fixture sessions the two forms agree to **0.999 ns**, on latencies of
-    hundreds to thousands of ms -- so this keeps the exact value rather than
-    reproducing the truncation.
-    """
-    if later is None or earlier is None:
-        return pd.Series(dtype=float)
-    return (later - earlier).dropna().dt.total_seconds() * 1000.0
 
 
 def trial_poke_span(position_data):
