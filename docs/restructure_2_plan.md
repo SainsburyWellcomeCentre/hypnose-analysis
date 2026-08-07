@@ -41,8 +41,12 @@ rest of this document quotes are superseded by these): 54 py files, 31,140 lines
 | ├ `modelling/switchpoint/plots.py` | 638 | (not counted) |
 | └ `movement_analysis/sing_rew_movement.py` | 433 | (not counted) |
 | `trial_classification/classification_utils.py` | 3,703 | 3,703 |
-| `metric_analysis/metrics_utils.py` | 1,817 | 1,839 |
+| `metric_analysis/metrics_utils.py` | 1,817 | ~~2,639~~ **deleted in 4b** |
 | `metric_analysis/sing_rew_metrics.py` | 440 | (not counted) |
+
+Phase 4b replaced `metrics_utils.py` with `io/results.py` + `metric_analysis/{run,merge,summary,registry}.py`
++ `metric_analysis/metrics/{common,accuracy,false_alarm,sequence,hidden_rule,sampling,timing}.py`,
+none over 710 lines.
 
 The `visualization/` total *rose* despite Phase 2 removing code: the original 16,044 omitted
 `modelling/switchpoint/plots.py` and `movement_analysis/sing_rew_movement.py`. **Phase 4a
@@ -139,8 +143,8 @@ Update this table at the end of each phase, in the same commit as the work.
 | 4a strip metrics from visualization | **audit done** 2026-08-05; **moves in progress** (see next row) | `58387ce`..`6aac5de` | Audit written to `docs/metric_audit.md` — all 7 files, ~220 functions. **32 sites of metric math in 4 files**, resolving to **24 metrics with no canonical version** (checklist in the audit is the "lose no metric" gate), 8 exact duplicates, 9 granularity variants. Biggest single item: `compute_speed_analysis` (591 lines, 7 movement metrics, no plotting) moves wholesale. `modelling/switchpoint/plots.py` needs nothing; `movement_analysis/sing_rew_movement.py` needs only dedup — both are files the original count missed. **Both blocking decisions settled 2026-08-05** — see "D0 resolution" and "Q5 resolution" in the audit. **D0 (metric signature):** every metric gets a pure `f(frame) -> value` core + thin `f(results)` wrapper, in 4a; four tiers, not one shape; tier-1 metrics store numerator/denominator contributions separately (storing a single per-trial value reproduces finding 12); `position_data` is derived at **load** time so legacy sessions need no compat branch; tier-3 bias metrics take an optional `reference`, which gives plotters a `baseline="session"|"window"` option for free. **Q5 (reached@p):** two helpers — `sequence_depth` never filtered, `sampled_positions(only_true_pokes=)` filterable — unfiltered by default, definition B deleted; unblocked for filtering by the §7b TODO. **One deliberate output change:** non-initiated trials leave the metric set (`non_initiated_FA_rate`, `fa_port_ratio_by_odor.with_non_initiated`, `avg_sampling_time_initiation_abortion`, `non_initiation_odor_bias`), requiring `--generate` in that commit — confirm first. Everything else in 4a is value-neutral. **All 6 local judgement calls settled too** — `_hr_odor_associations` → `metric_analysis` as session metadata; `speed_analysis.parquet` question withdrawn (path is session-derived, no `__file__` trap, clean source-only move); `_kw_mwu_by_group` → `metric_analysis/stats/kw_mwu.py`, one module per test; the 10× outlier rule stays in `visualization/` as a display filter, establishing the principle **metrics raw, filtering is display**; `_compute_real_time_offset` deleted in favour of the loaders' offset. **Nothing blocks the moves — the next 4a chat implements.** Docs only: regression / check_imports green, no source touched |
 | **4a moves — DONE** | `07182bd`..`aa0355f` 2026-08-06 | | **Phase 4a is complete: `visualization/` fetches and plots, and computes no metrics.** First half (`07182bd`..`bc46378`): all 24 checklist metrics exist in `metric_analysis`, D0 complete for every tier, `by_group`/`over_windows`, both deliberate output changes landed. Second half (`604dd77`..`aa0355f`): the **21 remaining recomputes** deleted — 9 in `visualization_utils`, 6 in `pred_seq_utils`, 2 in `sing_rew`, 2 in `movement_analysis_utils`, plus the 2 judgement-call moves (`hr_odor_associations` → `metrics_utils`, `kw_mwu_by_group` → new `metric_analysis/stats/`). `get_fa_ratio_a_stats` moved wholesale (it was a pure metric sitting in `visualization/`). A closing grep over all 80 aggregation sites in the seven files found **two more** the checklist had missed — a ninth hand-written `fa_port_ratio` in `plot_fa_ratio_by_abort_odor` (printed, not drawn) and an `np.mean` over `FR_ratio`'s own contributions; both fixed, and `_reduce_rate` became public `reduce_rate` for the second. **Gates:** `regression.py` GREEN on all 9 sessions (trial_data + metrics), `check_imports` PASS, `plot_regression.py` green everywhere except the deliberate sub-nanosecond recovery the trial-timing metrics inherit from `e9516e4` (max rel 2.2e-07) and one accepted ULP choice in `plot_sampling_times_analysis`; both recorded in the audit. **`plot_regression.py` grew substantially and is now the tool Phase 5 depends on** — cross-module name resolution (so a *move* is not a false RED), the repo style applied (two plotters were silently raising, i.e. ungated, not green), `PYTHONHASHSEED` pinned (`_ordered_groups` iterates a `set`, so those figures were not reproducible run-to-run — a real pre-existing defect, unfixed), a `name#variant` label so one function can be gated under two argument sets, a diff-magnitude summary, and 12 more cases (19 → 31). `visualization/` 15,194 → **15,101** lines; `metric_analysis/` gained the definitions |
 | ~~4a moves — in progress~~ | `9672f1e`..`8b7d09f` 2026-08-05 | | **Started, not finished — see "Implementation progress" in `docs/metric_audit.md` for the tick-list and what remains.** Landed: the Q5 position helpers + `reached_counts` in new `metric_analysis/frames.py` (the reached walk was written twice identically in `metrics_utils`); `compute_speed_analysis` + batch driver + `_binned_speed` → new `metric_analysis/movement.py` (711 lines byte-identical, checklist 10-16); `_load_tracking_and_behavior` → new `io/tracking.py` (**not** `visualization/io/` as the audit suggested — `metric_analysis` is now a consumer and must not import `visualization`). `visualization/` 16,618 → **15,194** lines. **Prerequisite discovered:** the gate was RED at HEAD before any 4a work — pyarrow 23.0.1 post-dates the fixtures, so `load_session_results` reads parquet where it used to fall back to CSV and the CSV round-trip loses 1 ULP; re-baselined in `9672f1e` with the diff confirmed to be exactly 2 metric keys on 2 sessions, and `env_fingerprint` now records pyarrow. **One deliberate deviation:** `sequence_depth` reproduces today's rule rather than the audit's `presentations`-sourced target, because the two disagree on 10 of 1731 fixture trials and switching would bake the grace artifact into the denominators — it becomes a one-line change once 7b writes `poke_source`. **Regression cadence agreed:** gate on reachability from `run_all_metrics`, skip it for code the metrics pipeline never calls. Remaining: `position_data` at load time, the D0 cores/wrappers, the resolvers, the DEDUPs/NEW/helper consolidations, and step 6 |
-| 4b modularise metric_analysis | **blocked on 4a finishing**; grouping confirmed 2026-08-05, no code moved | `ead894b` | 6 modules under `metric_analysis/metrics/` (`accuracy`, `false_alarm`, `sequence`, `hidden_rule`, `sampling`, `timing`) plus existing `movement.py` / `sing_rew_metrics.py`. Recorded in `docs/metric_audit.md`; the plan's "get it confirmed before moving anything" gate is satisfied. The registry declares each metric's frame via a decorator argument, not by file boundary |
-| 5 visualization primitives | not started | | after 4a only |
+| **4b modularise metric_analysis — DONE** | **done** 2026-08-07 | `604355f`..`cbc7059` | **`metrics_utils.py` (2,639 lines) is gone.** Plumbing: `load_session_results` + the two merged-path helpers → **`io/results.py`**; `run_all_metrics` / `batch_run_all_metrics_with_merge` → **`metric_analysis/run.py`**; `pool_results_dicts` → **`merge.py`**; `save_merged_metrics_txt` → **`summary.py`** — so `metric_analysis/` mirrors `trial_classification/`. Definitions: the 6 confirmed modules under **`metric_analysis/metrics/`** plus **`common.py`** for the 11 helpers more than one construct needs; exactly **one** edge between metric modules (`hidden_rule` imports `presentation_counts_by_odor` from `sequence`). **Registry:** `@metric(frame=…)` on the core, `@session_metric(core)` on the wrapper, **43 registered / 25 reported**; the frame is a decorator argument, not a file boundary, and `run.REPORT` keeps the report order explicit because registration order would make it a function of import order. Re-registration is reload-tolerant, since the notebooks run under `%autoreload 2`. **Every carve was verified structurally**: an ast pass required all **112** pre-4b function bodies to be byte-identical in their new homes — across the phase exactly 2 changed, both deliberately. **Two decisions the 4a handoff asked for:** the two truthiness rules are now one, resolved by widening `_is_truthy` (measured: 0 disagreements on all 9 sessions — both flag columns arrive as native `bool`, so the divergence was latent, reachable only through the CSV fallback); and `parse_json_columns` turned out **not to exist** — 4a had already moved the singular into `frames.py`, where the `build_position_data` decision keeps it. `merged_results_output_dir` / `merged_metrics_filename` have **no callers** and are flagged for deletion in 9/10. **One intended output change — finding 3:** `fa_abortion_stats` is numeric (counts `int`, rates `float`, positions `int`, the duplicate `"Abortion Rate Value"` column dropped), its formatting moved to `summary.py`, and `plot_abortion_and_fa_rates` reads both the numeric and the legacy string form because every `metrics_*.json` on the server still holds the latter. Fixtures regenerated in that commit with the diff confirmed to be exactly `~ fa_abortion_stats` on the 7 sessions that have FA abortion data — nothing added, nothing removed, `trial_data` green throughout — and the txt report unchanged bar positions printing `2` rather than `2.0`. **Gates:** `regression.py` GREEN at every commit (RED only for the deliberate regenerate), `verify_scripts` GREEN, `check_imports` PASS, `plot_regression.py --ref 25dab00` GREEN on all **32** plotters, and a ~7 s metric-parity check (values **and** captured stdout, 9 sessions, against a `git archive` of `25dab00`) GREEN throughout. Details in `docs/metric_audit.md` → "Phase 4b — the split as built" |
+| 5 visualization primitives | **not started — unblocked** | | 4a and 4b are both done. Handoff prompt at the end of the Phase 5 section below |
 | 6 trial classification dedup | not started | | unit tests first |
 | 7a manifest provenance | not started | | |
 | 7b schema & formats | not started | | intended output change |
@@ -822,6 +826,119 @@ sessions — see "State at the end of 2b" §2. `index` selects; it does not posi
 `trial_data` + metrics — visual output needs eyeballing). **Done:** no metric math in
 `visualization/`; primitives used by all plotters; no plot function over ~100 lines; every
 public plotter accepts `dates`/`ses`/`index` and their range forms.
+
+### Handoff prompt — Phase 5 *(written 2026-08-07, 4b complete)*
+
+**Phase 4b is done.** `metrics_utils.py` is gone: `metric_analysis/` is `run` / `merge` /
+`summary` / `registry` / `frames` / `resolvers` plus `metrics/` — one module per behavioural
+construct — and `io/results.py` owns loading a session's saved results. `visualization/`
+computes no metrics and now imports them from those modules.
+
+Paste this into a fresh chat:
+
+```
+I'm continuing a planned restructure of hypnose-behavior-analysis
+(/Users/joschua/repos/harris_lab/hypnose/hypnose-behavior-analysis), on branch
+hypnose-restructure. Use Opus 5 at high effort — this phase is judgement about what a
+figure should look like, on top of moves that must not change one.
+
+This chat: **Phase 5 — visualization primitives, then thin plotters.** Do NOT start Phase 6,
+and do NOT start the Phase 10 `visualization_utils.py` split (it is proposed, not scheduled;
+if Phase 5 makes it unavoidable, say so and stop).
+
+## Read these first, targeted, not cover to cover
+
+1. docs/restructure_2_plan.md → section 1 (QC safety net + operating rules) and the whole
+   Phase 5 section. Two subsections in it are the actual work orders: **"Two defects 4a found
+   and deliberately did not fix"** and **"Thread the session selectors through the plotters"**.
+   Skip the completed-phase narratives.
+2. docs/metric_audit.md → **"The gate the audit said did not exist"** (what
+   `qc/plot_regression.py` is, why Phase 5 depends on it, and the two things it works
+   *around* rather than fixes), and **"Phase 4b — the split as built"** for where every
+   metric now lives.
+3. `src/hypnose_behavior/metric_analysis/metrics/__init__.py` — the map of the metric
+   modules, in one screen.
+
+## What Phase 5 is
+
+`visualization/` is 15,101 lines across 7 files. 4a took the metric math out; what is left is
+data prep, axis construction and styling — and the audit measured the real repetition:
+**53 `.legend(` and 55 `.set_xlabel(`**, i.e. axis decoration, not plotting. The plan's target
+shape is thin primitives (`line`, `scatter`, `boxplot`, `rolling_mean`, `style_axis`) in
+shared helper modules, plus one small explicit function per metric. **Deliberately not** a
+`plot_metric(kind, ses)` dispatcher — the plan rejects it by name as a god-function.
+
+Also in scope, decided 2026-08-04: every public plotter should accept `dates` / `ses` /
+`index` and their range forms and forward them to `find_sessions`, which already takes exactly
+those six keywords. Read the semantics table before implementing — they **combine** (they are
+not "pick one"), and `None` vs `[]` is load-bearing.
+
+## The two defects to fix, both currently worked around in the gate
+
+1. **`_style_log_yaxis` crashes under default rcParams** — `float(plt.rcParams["ytick.labelsize"])`
+   on matplotlib's default `"medium"`. `plot_iti_over_time` and `plot_latency_over_time` are
+   broken in any process that has not called `use_style(...)`. The gate calls `use_style("nature")`
+   so they are testable at all. Fixing it is a canary: how many other plotters assume the style?
+2. **`pred_seq_utils._ordered_groups` iterates a `set`**, so labels outside its hard-coded
+   `preferred` list are drawn in string-hash order — two runs of the *identical* tree disagreed
+   on 340 drawn values. The gate pins `PYTHONHASHSEED=0`, which hides it. Fixing it **reorders
+   series and legends**, so it is an output change: its own commit, and look at the figures.
+
+## Hard constraints
+
+- /Volumes/harris is STRICTLY READ-ONLY. Never write, move, rename, chmod or delete anything
+  under it. Do not explore it — no browsing, no inventorying, no find over the mount. To learn
+  about a session, call the pipeline's own loaders for specific subject/date pairs. If every
+  session fails with FileNotFoundError or "No experiment runs found", that is a dropped or
+  weak mount, not a code regression. CHECK THE MOUNT BEFORE DIAGNOSING. (It also goes *slow*
+  after a heavy gate run — an 85 s `load_session_results` is cache eviction, not your bug.)
+- Run everything with ~/miniconda3/envs/hypnose-analysis-test/bin/python. Do NOT install,
+  upgrade or remove packages in any conda env. If something is missing, tell me.
+- Invoke the QC tools by ABSOLUTE path with -u and no cd. The `cd <repo> && python src/...`
+  form is blocked at the permission layer and looks like a hang.
+- ~/repos/harris_lab is itself a commitless git repo. Always use `git -C /full/path`.
+- hypnose_helpers must import nothing from the other two repos.
+
+## Gates — the opposite balance from 4b
+
+4b was gated by `regression.py`, because it moved code `run_all_metrics` reaches. **Phase 5 is
+the reverse: `regression.py` is blind here.** It fingerprints `trial_data` + the metrics dict
+and never sees a figure, so a plotting refactor can be silently wrong and stay GREEN.
+
+  PY=~/miniconda3/envs/hypnose-analysis-test/bin/python
+  QC=~/repos/harris_lab/hypnose/hypnose-behavior-analysis/src/hypnose_behavior/qc
+
+  $PY -u $QC/plot_regression.py    # ~5 min, 31 cases — THE gate for this phase
+  $PY -u $QC/check_imports.py      # seconds; run after every move
+  $PY -u $QC/regression.py         # ~15 min — only if you touch metric_analysis or io
+  $PY -u $QC/verify_scripts.py     # only if you touch the CLI wiring
+
+`plot_regression.py` diffs a git revision against the working tree: every line's xy data,
+collection offsets, patch geometry, axis decoration and stdout. It resolves each case's
+function across an ordered `MODULES` list, so **moving** a plotter is invisible to it while a
+change in what it draws is not — which is what makes it usable for this phase's moves. If you
+add plotter modules, add them to `MODULES`. Two known non-zero diffs are accepted and
+recorded: a sub-nanosecond recovery in the trial-timing metrics (max rel 2.2e-07) and one ULP
+choice in `plot_sampling_times_analysis`.
+
+**One trap, from Phase 2c:** moving a plotter between modules changes `file`/`chain` in
+saved-figure provenance, and any `save_figure` wrapper needs `skip_modules=(__name__,)`.
+
+**Expected: green everywhere except the `_ordered_groups` commit**, which reorders series on
+purpose. Any other moved curve is a real regression — stop and diagnose.
+
+## Workflow
+
+- Before each change, tell me what you're doing and what gate result you expect.
+- Small commits, a few moves each. `check_imports` after every move, `plot_regression.py`
+  before each commit.
+- **Show the FULL gate output. Do not truncate it.**
+- **Commit messages: subject + 1-2 short sentences MAX**, then gate results, then
+  `Co-Authored-By: Claude Opus 5` (no email). Rationale goes in the chat or the plan.
+- At the end: update the Progress table in the plan in the same commit as the work, then
+  write the Phase 6 handoff prompt. If you run out of room first, say so plainly and leave an
+  accurate status — do not write a Phase 6 handoff for an unfinished Phase 5.
+```
 
 ---
 
