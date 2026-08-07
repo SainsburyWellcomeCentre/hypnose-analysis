@@ -14,29 +14,40 @@ from matplotlib.colors import Normalize
 from matplotlib.ticker import MaxNLocator
 from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
-from hypnose_behavior.metric_analysis.metrics_utils import (
-    FA_avg_response_times,
-    abortion_rate_positionX,
-    avg_response_time,
+from hypnose_behavior.io.results import load_session_results
+from hypnose_behavior.metric_analysis.frames import (
+    build_position_data,
+    odor_letter,
+    parse_json_column,
+)
+from hypnose_behavior.metric_analysis.metrics.accuracy import (
     decision_accuracy,
-    fa_rate_by_odor,
-    fa_rate_by_position,
-    fa_port_counts,
-    hidden_rule_mask,
-    hr_odor_associations,
-    hr_abort_poke_gap,
-    inter_trial_interval,
-    rolling_hr_reward_fraction,
     rolling_reward_fraction,
+)
+from hypnose_behavior.metric_analysis.metrics.false_alarm import (
+    FA_avg_response_times,
+    fa_port_counts,
     fa_port_ratio,
     fa_port_share_a,
+    fa_rate_by_odor,
+    fa_rate_by_position,
+)
+from hypnose_behavior.metric_analysis.metrics.hidden_rule import (
+    hidden_rule_mask,
+    hr_abort_poke_gap,
+    hr_odor_associations,
+    rolling_hr_reward_fraction,
+)
+from hypnose_behavior.metric_analysis.metrics.sampling import (
     poke_duration_by_odor,
     poke_duration_by_position,
     poke_durations,
-    parse_json_column,
 )
-from hypnose_behavior.io.results import load_session_results
-from hypnose_behavior.metric_analysis.frames import build_position_data, odor_letter
+from hypnose_behavior.metric_analysis.metrics.sequence import abortion_rate_positionX
+from hypnose_behavior.metric_analysis.metrics.timing import (
+    avg_response_time,
+    inter_trial_interval,
+)
 from hypnose_behavior.metric_analysis.resolvers import by_group
 from hypnose_behavior.metric_analysis.run import run_all_metrics
 from datetime import timedelta, datetime

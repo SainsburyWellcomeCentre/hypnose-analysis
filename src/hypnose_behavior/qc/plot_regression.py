@@ -50,19 +50,19 @@ MODULES = [
     "hypnose_behavior.visualization.pred_seq_utils",
     "hypnose_behavior.visualization.sing_rew",
     "hypnose_behavior.visualization.movement_analysis_utils",
+    # Phase 4b split `metrics_utils` into the modules below. It is still named
+    # here so the gate can resolve a case against a *pre-split* revision --
+    # `_resolve` swallows the ImportError, so naming a module that no longer
+    # exists (or does not exist yet) costs nothing, and without it every moved
+    # function reads as "not found in this tree", i.e. a RED for a pure move.
     "hypnose_behavior.metric_analysis.metrics_utils",
-    # Phase 4b splits `metrics_utils` into these. Listed ahead of the split so the
-    # gate keeps finding `get_fa_ratio_a_stats` (and anything else 4b relocates)
-    # instead of reporting "function not found in this tree" -- which reads as a
-    # RED for a pure move, the exact false alarm this list exists to prevent.
-    # `_resolve` swallows the ImportError, so naming a module that does not exist
-    # yet costs nothing.
     "hypnose_behavior.metric_analysis.metrics.accuracy",
     "hypnose_behavior.metric_analysis.metrics.false_alarm",
     "hypnose_behavior.metric_analysis.metrics.sequence",
     "hypnose_behavior.metric_analysis.metrics.hidden_rule",
     "hypnose_behavior.metric_analysis.metrics.sampling",
     "hypnose_behavior.metric_analysis.metrics.timing",
+    "hypnose_behavior.metric_analysis.metrics.common",
     "hypnose_behavior.metric_analysis.movement",
     "hypnose_behavior.metric_analysis.sing_rew_metrics",
     "hypnose_behavior.metric_analysis.run",

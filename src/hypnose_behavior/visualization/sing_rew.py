@@ -24,11 +24,11 @@ from matplotlib.ticker import MaxNLocator
 
 from hypnose_behavior.io.save import save_figure
 from hypnose_behavior.metric_analysis.frames import build_position_data
-from hypnose_behavior.metric_analysis.metrics_utils import (
+from hypnose_behavior.metric_analysis.metrics.common import reduce_rate
+from hypnose_behavior.metric_analysis.metrics.false_alarm import (
     false_response_ratio_contributions,
-    reduce_rate,
-    reward_delivery_latency,
 )
+from hypnose_behavior.metric_analysis.metrics.timing import reward_delivery_latency
 from hypnose_behavior.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_metrics,
     compute_sing_rew_rates,

@@ -18,7 +18,9 @@ scripts/                 terminal entry points (thin CLI wrappers; no analysis l
 src/hypnose_behavior/
     io/                  data loading, saving, paths (readers, loaders, save, save_results, paths)
     trial_classification/ trial detection + classification (classification_utils, detect_trials/stage/settings, merge, summary, run)
-    metric_analysis/     behavioural metric calculation (metrics_utils)
+    metric_analysis/     behavioural metric calculation: metrics/ (definitions, one
+                         module per behavioural construct), run/merge/summary
+                         (orchestration), frames, resolvers, registry
     visualization/       figure-making (valve/poke, metrics, pred-seq, movement)
     utils/               small shared helpers
     qc/                  quality control: data validation + golden-master regression tools (see below)
@@ -249,9 +251,9 @@ Single-Reward Protocol / False Response Information
 
 2. Behavioral Metric Calculation
 
-The metrics_analysis notebook runs the behavioral metric calculation. All functions used in this notebook are in the metrics_utils.py file. 
+The metrics_analysis notebook runs the behavioral metric calculation. The definitions live in `metric_analysis/metrics/`, one module per behavioural construct (`accuracy`, `false_alarm`, `sequence`, `hidden_rule`, `sampling`, `timing`), plus `movement.py` and `sing_rew_metrics.py`.
 
-To add another metric calculation, add the definition as an independent function, and call it within run_all_metrics. 
+To add another metric: write a pure `f(frame) -> value` core in the module for its construct, decorate it `@metric(frame="trials" | "position_data" | "trials+position_data")`, and give it a thin `*_session(results)` wrapper decorated `@session_metric(core)` if it should print. To have it saved to `metrics_*.json`, give the core a `title=` and add its name to `REPORT` in `metric_analysis/run.py`. 
 
 batch_run_all_metrics_with_merge can run on any combination of dates and subjids. Further, a protocol filter can be applied to only run on sessions under same protocol (within or across subjects). 
 

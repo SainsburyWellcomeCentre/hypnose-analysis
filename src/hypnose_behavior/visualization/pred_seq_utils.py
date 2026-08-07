@@ -14,14 +14,18 @@ import matplotlib.colors as mcolors
 
 from hypnose_behavior.utils.helpers import _filter_session_dirs, _iter_subject_dirs
 from hypnose_behavior.metric_analysis.frames import build_position_data
-from hypnose_behavior.metric_analysis.metrics_utils import (
-	decision_accuracy,
-	fa_latency_from_pokeout,
-	fa_port_label,
-	reward_delivery_latency,
-	trial_poke_span,
-	trial_poke_total,
-	valve_to_reward_latency,
+from hypnose_behavior.metric_analysis.metrics.accuracy import decision_accuracy
+from hypnose_behavior.metric_analysis.metrics.false_alarm import (
+    fa_latency_from_pokeout,
+    fa_port_label,
+)
+from hypnose_behavior.metric_analysis.metrics.sampling import (
+    trial_poke_span,
+    trial_poke_total,
+)
+from hypnose_behavior.metric_analysis.metrics.timing import (
+    reward_delivery_latency,
+    valve_to_reward_latency,
 )
 from hypnose_behavior.metric_analysis.resolvers import by_group, over_windows
 from hypnose_behavior.io.paths import get_derivatives_root

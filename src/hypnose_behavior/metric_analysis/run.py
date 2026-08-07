@@ -29,33 +29,41 @@ from hypnose_behavior.metric_analysis.sing_rew_metrics import (
 )
 from hypnose_behavior.metric_analysis.summary import save_merged_metrics_txt
 from hypnose_behavior.utils.helpers import _filter_session_dirs
-from hypnose_behavior.metric_analysis.metrics_utils import (
-    FA_avg_response_times_session,
-    FA_odor_bias_session,
-    FA_position_bias_session,
-    abortion_rate_positionX_session,
-    avg_response_time_session,
-    avg_sampling_time_aborted_sequence_session,
-    avg_sampling_time_completed_sequence_session,
-    avg_sampling_time_odor_x_session,
+from hypnose_behavior.metric_analysis.metrics.accuracy import (
     choice_timeout_rate_session,
     decision_accuracy_by_odor_session,
     decision_accuracy_session,
+    global_choice_accuracy_session,
+    response_rate_session,
+)
+from hypnose_behavior.metric_analysis.metrics.false_alarm import (
+    FA_avg_response_times_session,
+    FA_odor_bias_session,
+    FA_position_bias_session,
     fa_abortion_stats_session,
     fa_port_ratio_by_odor_session,
     global_FA_rate_session,
-    global_choice_accuracy_session,
+    premature_response_rate_session,
+    response_contingent_FA_rate_session,
+)
+from hypnose_behavior.metric_analysis.metrics.hidden_rule import (
     hidden_rule_counts_by_odor_session,
     hidden_rule_detection_rate_session,
     hidden_rule_performance_session,
+)
+from hypnose_behavior.metric_analysis.metrics.sampling import (
+    avg_sampling_time_aborted_sequence_session,
+    avg_sampling_time_completed_sequence_session,
+    avg_sampling_time_odor_x_session,
     manual_vs_auto_stop_preference_session,
+)
+from hypnose_behavior.metric_analysis.metrics.sequence import (
+    abortion_rate_positionX_session,
     odor_initiation_bias_session,
     odorx_abortion_rate_session,
-    premature_response_rate_session,
-    response_contingent_FA_rate_session,
-    response_rate_session,
     sequence_completion_rate_session,
 )
+from hypnose_behavior.metric_analysis.metrics.timing import avg_response_time_session
 
 __all__ = ["run_all_metrics", "batch_run_all_metrics_with_merge"]
 
