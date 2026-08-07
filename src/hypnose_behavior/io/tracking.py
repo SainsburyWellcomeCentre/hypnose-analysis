@@ -23,7 +23,7 @@ from hypnose_behavior.io.paths import (
 )
 # Was a function-level import while `load_session_results` lived in
 # `metric_analysis`, to keep `io/` from importing it. Phase 4b moved it here.
-from hypnose_behavior.io.results import load_session_results
+from hypnose_behavior.io.load_results import load_session_results
 from hypnose_behavior.utils.helpers import (
     _get_from_cache,
     _update_cache,

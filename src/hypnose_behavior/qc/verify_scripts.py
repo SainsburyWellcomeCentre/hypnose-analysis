@@ -70,7 +70,7 @@ def _trial_data_md5(deriv: Path, date: str):
 def _metrics_md5_from_derivatives(subjid: str, date: str, deriv: Path):
     """Re-derive the metrics dict from the script-produced derivatives and md5 it."""
     _common._redirect_derivatives(deriv)  # set env + clear cached path lookups
-    from hypnose_behavior.io.results import load_session_results
+    from hypnose_behavior.io.load_results import load_session_results
     from hypnose_behavior.metric_analysis.run import run_all_metrics
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):

@@ -16,7 +16,7 @@ data/rawdata             symlink to the read-only data on the server; all output
 notebooks/               analysis/visualisation notebooks (import from src; no definitions)
 scripts/                 terminal entry points (thin CLI wrappers; no analysis logic)
 src/hypnose_behavior/
-    io/                  data loading, saving, paths (readers, loaders, save, save_results, paths)
+    io/                  data loading, saving, paths (readers, loaders, load_results, save, save_results, paths)
     trial_classification/ trial detection + classification (classification_utils, detect_trials/stage/settings, merge, summary, run)
     metric_analysis/     behavioural metric calculation: metrics/ (definitions, one
                          module per behavioural construct), run/merge/summary

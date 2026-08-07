@@ -14,7 +14,7 @@ from matplotlib.colors import Normalize
 from matplotlib.ticker import MaxNLocator
 from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
-from hypnose_behavior.io.results import load_session_results
+from hypnose_behavior.io.load_results import load_session_results
 from hypnose_behavior.metric_analysis.frames import (
     build_position_data,
     odor_letter,

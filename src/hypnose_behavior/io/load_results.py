@@ -2,12 +2,21 @@
 # importable on Python 3.9 for repos pinned there (hypnose-eeg-preprocessing).
 from __future__ import annotations
 
-"""Reading a session's saved analysis results, and the merged-output conventions.
+"""Reading a session's saved analysis results.
 
-The read side of `io/save_results.py`: trial classification writes
-`saved_analysis_results/`, this reads it back into the `results` dict every
-metric wrapper consumes. Moved out of `metric_analysis/metrics_utils.py` in
-restructure_2 Phase 4b, which separates plumbing from metric definitions.
+The read side of `io/save_results.py`, which writes them: trial classification
+produces `saved_analysis_results/`, this reads it back into the `results` dict
+every metric wrapper consumes. Moved out of
+`metric_analysis/metrics_utils.py` in restructure_2 Phase 4b, which separates
+plumbing from metric definitions.
+
+**Not** `metrics_*.json` -- that is a different file, written by
+`metric_analysis.run` and read by `visualization._ensure_metrics_json`.
+
+Deliberately its own module rather than part of `io/loaders.py`, which reads the
+same directory via `_load_trial_views`: `loaders` is imported by
+`trial_classification`, and folding this in would make classification depend on
+`metric_analysis` for `build_position_data`.
 
 `load_session_results` calls `metric_analysis.frames.build_position_data`. That
 edge is deliberate and was checked, not assumed: `frames.py` is a leaf (standard
@@ -23,14 +32,9 @@ import json
 import pandas as pd
 
 from hypnose_behavior.io.layout import derivatives
-from hypnose_behavior.io.paths import get_derivatives_root
 from hypnose_behavior.metric_analysis.frames import build_position_data
 
-__all__ = [
-    "load_session_results",
-    "merged_results_output_dir",
-    "merged_metrics_filename",
-]
+__all__ = ["load_session_results"]
 
 
 def load_session_results(subjid, date):
@@ -87,42 +91,3 @@ def load_session_results(subjid, date):
     results["results_dir"] = str(results_dir)
 
     return results
-
-
-# The two helpers below have **no callers**: `batch_run_all_metrics_with_merge`
-# builds its merged paths inline. They are moved here rather than deleted because
-# 4b is a restructuring phase, and the plan's "all derivatives-path conventions in
-# one place" is the right home for them if the batch driver is ever repointed at
-# them. Candidates for deletion in Phase 9/10 otherwise.
-
-def merged_results_output_dir(subjids, dates, protocol):
-    """
-    Determine the output directory for merged results based on subjids, dates, and protocol.
-    """
-    derivatives_dir = get_derivatives_root()
-    subjids = sorted(set(str(s) for s in subjids))
-    dates = sorted(set(str(d) for d in dates))
-    if len(subjids) == 1:
-        subj_dir = derivatives.subject_dir(subjids[0])
-        merged_dir = subj_dir / "merged_results"
-    else:
-        merged_dir = derivatives_dir / "merged"
-        merged_dir = merged_dir / ("protocol_merged" if protocol else "merged")
-    merged_dir.mkdir(parents=True, exist_ok=True)
-    return merged_dir
-
-
-def merged_metrics_filename(subjids, dates, protocol):
-    """
-    Construct merged metrics filename based on subjids, dates, and protocol.
-    """
-    subjids = sorted(set(str(s) for s in subjids))
-    dates = sorted(set(str(d) for d in dates))
-    n_dates = len(dates)
-    if len(subjids) == 1:
-        proto = protocol if protocol else "all"
-        fname = f"merged_{proto}_{n_dates}_dates"
-    else:
-        subj_str = "_".join(subjids)
-        fname = f"merged_subjids_{subj_str}_{n_dates}_dates"
-    return fname

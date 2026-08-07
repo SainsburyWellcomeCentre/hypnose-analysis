@@ -20,7 +20,7 @@ from pathlib import Path
 
 from hypnose_behavior.io.layout import derivatives
 from hypnose_behavior.io.paths import get_derivatives_root
-from hypnose_behavior.io.results import load_session_results
+from hypnose_behavior.io.load_results import load_session_results
 from hypnose_behavior.metric_analysis.merge import pool_results_dicts
 from hypnose_behavior.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_metrics,

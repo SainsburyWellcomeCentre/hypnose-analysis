@@ -1361,7 +1361,7 @@ definition, in `metric_analysis`.
 
 | module | holds | lines |
 |---|---|---|
-| `io/results.py` | `load_session_results`, `merged_results_output_dir`, `merged_metrics_filename` | 127 |
+| `io/load_results.py` | `load_session_results` | 93 |
 | `metric_analysis/run.py` | `run_all_metrics`, `batch_run_all_metrics_with_merge`, `REPORT` | ~520 |
 | `metric_analysis/merge.py` | `pool_results_dicts` | 67 |
 | `metric_analysis/summary.py` | `save_merged_metrics_txt`, `format_fa_abortion_tables` | ~140 |
@@ -1393,10 +1393,20 @@ so print-only drift, which `regression.py` cannot see, was gated too.
 that settled `build_position_data`, it stays there — moving it to `io/` would give one
 function two homes. That plan bullet is stale, not unfinished.
 
-**2. `merged_results_output_dir` / `merged_metrics_filename` have no callers.**
-`batch_run_all_metrics_with_merge` builds its merged paths inline. They moved to
-`io/results.py` as the plan says rather than being deleted, since 4b is a restructuring
-phase — but they are dead code and a Phase 9/10 deletion candidate.
+**2. `merged_results_output_dir` / `merged_metrics_filename` are deleted.**
+`batch_run_all_metrics_with_merge` builds its merged paths inline, so neither had a caller
+anywhere in `src/`, `scripts/` or the notebooks. They were moved to `io/` first, as the plan
+says, and then dropped once the move confirmed nothing reached them — carrying dead code to a
+new home is how it survives a restructuring.
+
+**2b. The module is `io/load_results.py`, not `io/results.py` and not part of `io/loaders.py`.**
+Renamed 2026-08-07 so it pairs by name with `io/save_results.py`, which writes the directory it
+reads. Folding it into `loaders.py` — which reads the same directory via `_load_trial_views` —
+was considered and rejected: `loaders` is imported by `trial_classification`, so that would make
+**classification depend on `metric_analysis`** for `build_position_data`, and `loaders.py` is
+already 765 lines. Keeping it separate confines that one edge to the callers that want it. It is
+deliberately *not* called `load_metric_results`: "metric results" already means `metrics_*.json`,
+a different file written by `metric_analysis.run`.
 
 **3. The two truthiness rules are now one, resolved on `_is_truthy`'s side.**
 `hr_odor_associations` arrived from `visualization/` testing
