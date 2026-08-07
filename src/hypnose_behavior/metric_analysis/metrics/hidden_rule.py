@@ -14,11 +14,11 @@ which has a different numerator *and* denominator.
 colour, but which reward an animal's hidden-rule odor pays out is an analysis
 result.
 
-**Two truthiness rules still live here** -- ``_is_truthy`` (via ``_truthy``, and
-therefore ``hidden_rule_mask``) versus the inline ``isin(["true", "1", "1.0"])``
-in ``hr_odor_associations``, which also accepts the string ``"1.0"``. 4a moved
-the function keeping today's rule rather than silently adopting the other.
-Reconciled separately in this phase; see the commit that does it.
+**One truthiness rule**, as of Phase 4b: ``_truthy`` / ``_is_truthy``, used by
+``hidden_rule_mask``, ``hidden_rule_counts_by_odor`` and
+``hr_odor_associations`` alike. The last of those arrived from
+``visualization/`` in 4a with its own inline test; see ``common._is_truthy``
+for which way that was resolved and why.
 """
 
 import ast
@@ -380,9 +380,9 @@ def hr_odor_associations(subj_dirs) -> dict:
     fact it establishes (which reward an animal's hidden-rule odor pays out) is
     an analysis result. Moved here verbatim.
 
-    One thing 4b should reconcile: the truthiness test below accepts the string
-    ``"1.0"``, which `_is_truthy` -- and therefore `hidden_rule_mask` -- does not.
-    The move keeps today's rule rather than silently adopting the other one.
+    Its truthiness test used to be an inline ``isin(["true", "1", "1.0"])``,
+    which accepted a string `_is_truthy` did not. Phase 4b reconciled the two on
+    `_is_truthy`'s side (see it), so this now uses the package's one rule.
     """
     votes: dict = defaultdict(lambda: {"A": 0, "B": 0})
     for subj_dir in subj_dirs:
@@ -406,7 +406,7 @@ def hr_odor_associations(subj_dirs) -> dict:
             td = _load_trial_views(results_dir)["trial_data"]
             if td.empty or "hidden_rule_success" not in td.columns:
                 continue
-            mask = td["hidden_rule_success"].astype(str).str.lower().isin(["true", "1", "1.0"])
+            mask = _truthy(td, "hidden_rule_success")
             for _, r in td[mask].iterrows():
                 ident = r.get("first_supply_odor_identity")
                 if ident not in ("A", "B"):

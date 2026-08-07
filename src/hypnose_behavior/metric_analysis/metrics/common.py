@@ -35,6 +35,24 @@ __all__ = ["reduce_rate"]
 
 
 def _is_truthy(val):
+    """Is a flag column's cell true, however the round-trip stored it?
+
+    **The one truthiness rule for the package** (reconciled 2026-08-07, Phase
+    4b). `hr_odor_associations` arrived from `visualization/` in 4a testing
+    `isin(["true", "1", "1.0"])`, i.e. accepting the string `"1.0"`, which this
+    rejected -- so the two disagreed on exactly the sessions read through the
+    CSV fallback, where a float flag column renders `True` as `"1.0"`. Measured
+    on all 9 fixture sessions they never actually disagree (both flag columns
+    arrive as native `bool` through parquet), so the divergence was latent
+    rather than active.
+
+    Resolved *here* rather than by narrowing the other, because the
+    inconsistency was this function's own: it already treats the float `1.0` as
+    true and rejected only its string form. The numeric branch below is what the
+    word set was missing -- a string that parses as a non-zero number is as true
+    as the number itself. That strictly widens what is accepted, so no caller
+    can lose a row it used to keep.
+    """
     if isinstance(val, bool):
         return val
     if isinstance(val, (int, float)):
@@ -43,7 +61,13 @@ def _is_truthy(val):
         except Exception:
             return val != 0
     if isinstance(val, str):
-        return val.strip().lower() in {"1", "true", "t", "yes", "y"}
+        s = val.strip().lower()
+        if s in {"1", "true", "t", "yes", "y"}:
+            return True
+        try:
+            return _is_truthy(float(s))
+        except ValueError:
+            return False
     return False
 
 
