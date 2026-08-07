@@ -41,6 +41,7 @@ from hypnose_behavior.metric_analysis.metrics.common import (
     _tz_naive,
 )
 from hypnose_behavior.metric_analysis.metrics.sequence import presentation_counts_by_odor
+from hypnose_behavior.metric_analysis.registry import metric, session_metric
 
 __all__ = [
     "hidden_rule_performance_contributions", "hidden_rule_performance",
@@ -61,6 +62,7 @@ def hidden_rule_performance_contributions(trials):
             _truthy(trials, "hit_hidden_rule").astype(int))
 
 
+@metric(frame="trials", title="Hidden Rule Performance")
 def hidden_rule_performance(trials):
     """(HR success & rewarded) / hit_hidden_rule."""
     if trials.empty:
@@ -68,6 +70,7 @@ def hidden_rule_performance(trials):
     return _reduce_rate(*hidden_rule_performance_contributions(trials))
 
 
+@session_metric(hidden_rule_performance)
 def hidden_rule_performance_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty:
@@ -83,6 +86,7 @@ def hidden_rule_detection_rate_contributions(trials):
             _truthy(trials, "hit_hidden_rule").astype(int))
 
 
+@metric(frame="trials", title="Hidden Rule Detection Rate")
 def hidden_rule_detection_rate(trials):
     """(not aborted & HR success) / hit_hidden_rule."""
     if trials.empty:
@@ -90,6 +94,7 @@ def hidden_rule_detection_rate(trials):
     return _reduce_rate(*hidden_rule_detection_rate_contributions(trials))
 
 
+@session_metric(hidden_rule_detection_rate)
 def hidden_rule_detection_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty:
@@ -100,6 +105,7 @@ def hidden_rule_detection_rate_session(results):
     return n_hr_completed, denom, rate
 
 
+@metric(frame="trials")
 def hidden_rule_mask(trials):
     """Boolean mask of hidden-rule trials -- the grouping key for the HR split.
 
@@ -248,6 +254,8 @@ def _fmt_rate(val):
     return f"{val:.3f}" if isinstance(val, (int, float, np.floating)) and not np.isnan(val) else "nan"
 
 
+@metric(frame="trials+position_data", key="hidden_rule_by_odor",
+        title="Hidden Rule Performance/Detection by Odor")
 def hidden_rule_counts_by_odor(trials, position_data, hr_odors, hr_positions):
     """
     Aggregate HR trials by odor across outcome categories to support per-odor performance/detection.
@@ -340,6 +348,7 @@ def hidden_rule_counts_by_odor(trials, position_data, hr_odors, hr_positions):
     }
 
 
+@session_metric(hidden_rule_counts_by_odor)
 def hidden_rule_counts_by_odor_session(results):
     trials = results.get("trial_data", pd.DataFrame())
     if trials.empty:
@@ -452,6 +461,7 @@ def _first_hr_position(val):
     return None
 
 
+@metric(frame="trials+position_data")
 def hr_abort_poke_gap(trials, position_data):
     """Latency from the hidden-rule poke to the last poke of an aborted trial.
 
@@ -507,6 +517,7 @@ def hr_abort_poke_gap(trials, position_data):
     return pd.DataFrame(rows, columns=cols)
 
 
+@metric(frame="trials")
 def rolling_hr_reward_fraction(trials, window, *, with_flags=False):
     """Rolling percentage of rewarded trials that were hidden-rule rewarded.
 

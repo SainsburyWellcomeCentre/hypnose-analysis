@@ -43,6 +43,11 @@ from hypnose_behavior.metric_analysis.metrics.common import (
     _tz_naive,
 )
 from hypnose_behavior.utils.helpers import _filter_session_dirs, _iter_subject_dirs
+from hypnose_behavior.metric_analysis.registry import (
+    as_dict,
+    metric,
+    session_metric,
+)
 
 __all__ = [
     "premature_response_rate_contributions", "premature_response_rate",
@@ -63,12 +68,27 @@ __all__ = [
 ]
 
 
+def _fa_port_payload(out):
+    """`fa_port_ratio_by_odor`'s saved shape.
+
+    One variant, not two: Phase 4a step 6 removed the non-initiated false
+    alarms, so the `with_`/`without_non_initiated` wrapper this key used to carry
+    no longer distinguishes anything.
+    """
+    return {
+        'by_odor': as_dict(out['by_odor']),
+        'counts': out['counts'],
+        'total_fa_by_odor': out['total_fa_by_odor'],
+    }
+
+
 def premature_response_rate_contributions(trials):
     ab = _aborted_mask(trials)
     return ((ab & _flag(trials, "fa_label", "FA_time_in")).astype(int),
             ab.astype(int))
 
 
+@metric(frame="trials", title="Premature Response Rate")
 def premature_response_rate(trials):
     """FA_time_in among aborted / n aborted."""
     if trials.empty:
@@ -76,6 +96,7 @@ def premature_response_rate(trials):
     return _reduce_rate(*premature_response_rate_contributions(trials))
 
 
+@session_metric(premature_response_rate)
 def premature_response_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty:
@@ -95,6 +116,7 @@ def response_contingent_FA_rate_contributions(trials):
     return num, num + rtc.isin(["rewarded", "unrewarded"]).astype(int)
 
 
+@metric(frame="trials", title="Response-Contingent False Alarm Rate")
 def response_contingent_FA_rate(trials):
     """FA_time_in / (FA_time_in + rewarded + unrewarded)."""
     if trials.empty or "response_time_category" not in trials.columns:
@@ -102,6 +124,7 @@ def response_contingent_FA_rate(trials):
     return _reduce_rate(*response_contingent_FA_rate_contributions(trials))
 
 
+@session_metric(response_contingent_FA_rate)
 def response_contingent_FA_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns:
@@ -116,6 +139,7 @@ def global_FA_rate_contributions(trials):
     return (_flag(trials, "fa_label", "FA_time_in").astype(int), _initiated(trials))
 
 
+@metric(frame="trials", title="Global False Alarm Rate")
 def global_FA_rate(trials):
     """FA_time_in / n initiated."""
     if trials.empty:
@@ -123,6 +147,7 @@ def global_FA_rate(trials):
     return _reduce_rate(*global_FA_rate_contributions(trials))
 
 
+@session_metric(global_FA_rate)
 def global_FA_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty:
@@ -133,6 +158,7 @@ def global_FA_rate_session(results):
     return n_fa, n_ini, rate
 
 
+@metric(frame="trials", title="FA Odor Bias", adapter=as_dict)
 def FA_odor_bias(trials, *, reference=None):
     """Per-odor FA rate normalised by a baseline FA rate.
 
@@ -169,6 +195,7 @@ def FA_odor_bias(trials, *, reference=None):
             'total_fa': total_fa, 'total_ab': total_ab}
 
 
+@session_metric(FA_odor_bias)
 def FA_odor_bias_session(results):
     print("FA Odor Bias for FA Time In:")
     out = FA_odor_bias(results.get("trial_data", pd.DataFrame()))
@@ -177,6 +204,7 @@ def FA_odor_bias_session(results):
     return out
 
 
+@metric(frame="trials", title="FA Position Bias", adapter=as_dict)
 def FA_position_bias(trials, *, reference=None, with_counts=False):
     """`FA_odor_bias` by `last_odor_position`. See it for the `reference` rule."""
     if trials.empty or "fa_label" not in trials.columns:
@@ -207,6 +235,7 @@ def FA_position_bias(trials, *, reference=None, with_counts=False):
     return pd.Series(bias).sort_index()
 
 
+@session_metric(FA_position_bias)
 def FA_position_bias_session(results):
     print("FA Position Bias for FA Time In:")
     trials = results.get("trial_data", pd.DataFrame())
@@ -219,6 +248,7 @@ def FA_position_bias_session(results):
     return pd.Series(bias).sort_index()
 
 
+@metric(frame="trials", title="FA Average Response Times")
 def FA_avg_response_times(trials):
     """Mean `fa_latency_ms` per FA subtype."""
     out = {}
@@ -233,6 +263,7 @@ def FA_avg_response_times(trials):
     return out
 
 
+@session_metric(FA_avg_response_times)
 def FA_avg_response_times_session(results):
     df = results.get("trial_data", pd.DataFrame())
     out = FA_avg_response_times(df)
@@ -262,6 +293,7 @@ def _fa_abortion_frames_missing(trials):
     return None
 
 
+@metric(frame="trials", title="FA Abortion Stats")
 def fa_abortion_stats(trials):
     """FA abortion breakdown by odor / position / odor x position.
 
@@ -366,6 +398,7 @@ def fa_abortion_stats(trials):
     return df_odor, df_pos, df_out
 
 
+@session_metric(fa_abortion_stats)
 def fa_abortion_stats_session(results, return_df=False):
     trials = results.get("trial_data", pd.DataFrame())
     missing = _fa_abortion_frames_missing(trials)
@@ -402,6 +435,7 @@ def _fa_type_mask(trials, fa_type):
     return labels.isin({str(t) for t in fa_type})
 
 
+@metric(frame="trials", title="FA Port Ratio by Odor", adapter=_fa_port_payload)
 def fa_port_ratio_by_odor(trials, *, fa_type="FA_time_in"):
     """Signed FA port bias per odor: `(port A - port B) / (port A + port B)`.
 
@@ -435,6 +469,7 @@ def fa_port_ratio_by_odor(trials, *, fa_type="FA_time_in"):
             'total_fa_by_odor': total_fa_by_odor}
 
 
+@session_metric(fa_port_ratio_by_odor)
 def fa_port_ratio_by_odor_session(results):
     out = fa_port_ratio_by_odor(results.get("trial_data", pd.DataFrame()))
     print("FA Port Ratio by Odor (FA_time_in):")
@@ -477,6 +512,7 @@ def fa_port_label(frame):
     return port.map({1: "A", 2: "B"}).where(port.isin([1, 2]))
 
 
+@metric(frame="trials")
 def fa_port_counts(frame):
     """`(n_port_a, n_port_b)` over `fa_port` -- 1 is port A, 2 is port B.
 
@@ -589,6 +625,7 @@ def get_fa_ratio_a_stats(subjid, dates=None, odors=['C', 'F']):
     return df
 
 
+@metric(frame="trials")
 def fa_rate_by_odor(trials, *, fa_types=None, odors=None):
     """FA aborts at an odor / (its passes in completed sequences + those aborts).
 
@@ -635,6 +672,7 @@ def fa_rate_by_odor(trials, *, fa_types=None, odors=None):
     return pd.Series(rates, dtype=float)
 
 
+@metric(frame="trials")
 def fa_rate_by_position(trials, *, fa_types=None):
     """FA aborts at position *p* / trials that reached *p*.
 
@@ -657,6 +695,7 @@ def fa_rate_by_position(trials, *, fa_types=None):
     return pd.Series(rates, dtype=float).sort_index()
 
 
+@metric(frame="trials+position_data")
 def fa_latency_from_pokeout(trials, position_data, *, fa_types=None):
     """`fa_time` minus the poke-out of the trial's last odor, in ms. Checklist 19.
 
@@ -695,6 +734,7 @@ def false_response_ratio_contributions(trials, *, fr_types=None):
     return (completed & fr).astype(int), completed.astype(int)
 
 
+@metric(frame="trials")
 def false_response_ratio(trials, *, fr_types=None):
     """False-response trials / completed trials. Checklist 22.
 

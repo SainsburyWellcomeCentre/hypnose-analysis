@@ -28,6 +28,7 @@ from hypnose_behavior.metric_analysis.metrics.common import (
     _trial_timestamp,
     _tz_naive,
 )
+from hypnose_behavior.metric_analysis.registry import metric, session_metric
 
 __all__ = [
     "avg_response_time", "avg_response_time_session",
@@ -36,6 +37,7 @@ __all__ = [
 ]
 
 
+@metric(frame="trials", title="Average Response Time")
 def avg_response_time(trials):
     """Mean `response_time_ms` by category, plus the pooled rewarded+unrewarded."""
     if (trials.empty or "response_time_category" not in trials.columns
@@ -52,6 +54,7 @@ def avg_response_time(trials):
     return out
 
 
+@session_metric(avg_response_time)
 def avg_response_time_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns or "response_time_ms" not in df.columns:
@@ -71,6 +74,7 @@ def avg_response_time_session(results):
     return out
 
 
+@metric(frame="trials")
 def inter_trial_interval(trials):
     """Seconds from one trial ending to the next starting. Checklist 6.
 
@@ -96,6 +100,7 @@ def _deepest_position_timestamp(position_data, blob, field):
     return frame.groupby("gid", sort=True)["ts"].agg(lambda s: s.iloc[-1])
 
 
+@metric(frame="trials+position_data")
 def reward_delivery_latency(trials, position_data):
     """`first_supply_time` minus the last odor poke-out, in ms. Checklist 18.
 
@@ -109,6 +114,7 @@ def reward_delivery_latency(trials, position_data):
                                                    "poke_odor_end"))
 
 
+@metric(frame="trials+position_data")
 def valve_to_reward_latency(trials, position_data):
     """`first_supply_time` minus the last position's `valve_start`, in ms.
 

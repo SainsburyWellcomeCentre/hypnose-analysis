@@ -18,6 +18,7 @@ from hypnose_behavior.metric_analysis.metrics.common import (
     _flag,
     _reduce_rate,
 )
+from hypnose_behavior.metric_analysis.registry import metric, session_metric
 
 __all__ = [
     "decision_accuracy_contributions", "decision_accuracy", "decision_accuracy_session",
@@ -30,12 +31,22 @@ __all__ = [
 ]
 
 
+def _by_odor_payload(out):
+    """`decision_accuracy_by_odor`'s saved shape: `{}` when there are no rows.
+
+    Not `as_dict`: a frame with columns but no rows would serialise as
+    `{column: {}}`, which is not what this key has ever held.
+    """
+    return out.to_dict() if len(out) > 0 else {}
+
+
 def decision_accuracy_contributions(trials):
     rtc = trials["response_time_category"]
     return ((rtc == "rewarded").astype(int),
             rtc.isin(["rewarded", "unrewarded"]).astype(int))
 
 
+@metric(frame="trials", title="Decision Accuracy")
 def decision_accuracy(trials):
     """rewarded / (rewarded + unrewarded)."""
     if trials.empty or "response_time_category" not in trials.columns:
@@ -43,6 +54,7 @@ def decision_accuracy(trials):
     return _reduce_rate(*decision_accuracy_contributions(trials))
 
 
+@session_metric(decision_accuracy)
 def decision_accuracy_session(results):
     trials = results.get("trial_data", pd.DataFrame())
     if trials.empty or "response_time_category" not in trials.columns:
@@ -62,6 +74,7 @@ def global_choice_accuracy_contributions(trials):
             + _flag(trials, "fa_label", "FA_time_in").astype(int))
 
 
+@metric(frame="trials", title="Global Choice Accuracy")
 def global_choice_accuracy(trials):
     """rewarded / (rewarded + unrewarded + FA_time_in)."""
     if trials.empty or "response_time_category" not in trials.columns:
@@ -69,6 +82,7 @@ def global_choice_accuracy(trials):
     return _reduce_rate(*global_choice_accuracy_contributions(trials))
 
 
+@session_metric(global_choice_accuracy)
 def global_choice_accuracy_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns:
@@ -84,6 +98,7 @@ def global_choice_accuracy_session(results):
     return n_correct, n_total, accuracy
 
 
+@metric(frame="trials", title="Decision Accuracy by Odor", adapter=_by_odor_payload)
 def decision_accuracy_by_odor(trials):
     """Per-odor `decision_accuracy`, plus a `_total` variant including timeouts."""
     if trials.empty or "response_time_category" not in trials.columns or "last_odor" not in trials.columns:
@@ -121,6 +136,7 @@ def decision_accuracy_by_odor(trials):
     return pd.DataFrame(rows).set_index('odor').sort_index()
 
 
+@session_metric(decision_accuracy_by_odor)
 def decision_accuracy_by_odor_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns or "last_odor" not in df.columns:
@@ -149,6 +165,7 @@ def choice_timeout_rate_contributions(trials):
             completed.astype(int))
 
 
+@metric(frame="trials", title="Choice Timeout Rate")
 def choice_timeout_rate(trials):
     """timeout_delayed / completed."""
     if trials.empty or "response_time_category" not in trials.columns:
@@ -156,6 +173,7 @@ def choice_timeout_rate(trials):
     return _reduce_rate(*choice_timeout_rate_contributions(trials))
 
 
+@session_metric(choice_timeout_rate)
 def choice_timeout_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns:
@@ -172,6 +190,7 @@ def response_rate_contributions(trials):
     return num, num + (rtc == "timeout_delayed").astype(int)
 
 
+@metric(frame="trials", title="Response Rate")
 def response_rate(trials):
     """(rewarded + unrewarded) / (rewarded + unrewarded + timeout)."""
     if trials.empty or "response_time_category" not in trials.columns:
@@ -179,6 +198,7 @@ def response_rate(trials):
     return _reduce_rate(*response_rate_contributions(trials))
 
 
+@session_metric(response_rate)
 def response_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty or "response_time_category" not in df.columns:
@@ -189,6 +209,7 @@ def response_rate_session(results):
     return num, denom, rate
 
 
+@metric(frame="trials")
 def rolling_reward_fraction(trials, window, *, step=1, include_avg=False, hr_only=False):
     """Rolling fraction of trials rewarded, divided by the **window**.
 

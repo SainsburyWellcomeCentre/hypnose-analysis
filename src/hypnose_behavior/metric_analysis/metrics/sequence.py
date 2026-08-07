@@ -26,6 +26,11 @@ from hypnose_behavior.metric_analysis.metrics.common import (
     _position_rows,
     _reduce_rate,
 )
+from hypnose_behavior.metric_analysis.registry import (
+    as_dict,
+    metric,
+    session_metric,
+)
 
 __all__ = [
     "sequence_completion_rate_contributions", "sequence_completion_rate",
@@ -41,6 +46,7 @@ def sequence_completion_rate_contributions(trials):
     return ((~_aborted_mask(trials)).astype(int), _initiated(trials))
 
 
+@metric(frame="trials", title="Sequence Completion Rate")
 def sequence_completion_rate(trials):
     """completed / initiated."""
     if trials.empty:
@@ -48,6 +54,7 @@ def sequence_completion_rate(trials):
     return _reduce_rate(*sequence_completion_rate_contributions(trials))
 
 
+@session_metric(sequence_completion_rate)
 def sequence_completion_rate_session(results):
     df = results.get("trial_data", pd.DataFrame())
     if df.empty:
@@ -58,6 +65,7 @@ def sequence_completion_rate_session(results):
     return n_completed, denom, rate
 
 
+@metric(frame="position_data")
 def presentation_counts_by_odor(position_data):
     """`{odor_name: n presentations}` -- the denominator of `odorx_abortion_rate`.
 
@@ -70,6 +78,7 @@ def presentation_counts_by_odor(position_data):
     return {od: int(n) for od, n in rows.groupby("odor_name").size().items()}
 
 
+@metric(frame="trials+position_data", title="Odor Abortion Rate", adapter=as_dict)
 def odorx_abortion_rate(trials, position_data, *, with_counts=False):
     """aborts@odor / presentations@odor."""
     empty = ({}, {}, {}) if with_counts else pd.Series(dtype=float)
@@ -93,6 +102,7 @@ def odorx_abortion_rate(trials, position_data, *, with_counts=False):
     return pd.Series(rates, dtype=float).sort_index()
 
 
+@session_metric(odorx_abortion_rate)
 def odorx_abortion_rate_session(results):
     parts = odorx_abortion_rate(results.get("trial_data", pd.DataFrame()),
                                 results.get("position_data"), with_counts=True)
@@ -105,6 +115,7 @@ def odorx_abortion_rate_session(results):
     return pd.Series(rates, dtype=float).sort_index()
 
 
+@metric(frame="trials", title="Abortion Rate by Position", adapter=as_dict)
 def abortion_rate_positionX(trials, *, with_counts=False):
     """aborts@position / trials that reached it.
 
@@ -132,6 +143,7 @@ def abortion_rate_positionX(trials, *, with_counts=False):
     return pd.Series(rates, dtype=float).sort_index()
 
 
+@session_metric(abortion_rate_positionX)
 def abortion_rate_positionX_session(results):
     parts = abortion_rate_positionX(results.get("trial_data", pd.DataFrame()),
                                     with_counts=True)
@@ -144,6 +156,7 @@ def abortion_rate_positionX_session(results):
     return pd.Series(rates, dtype=float).sort_index()
 
 
+@metric(frame="trials", title="Odor Initiation Bias", adapter=as_dict)
 def odor_initiation_bias(trials, *, reference=None, with_counts=False):
     """Per-odor initiation-abortion share / the overall share. See `FA_odor_bias`."""
     empty = ({}, {}, {}) if with_counts else pd.Series(dtype=float)
@@ -174,6 +187,7 @@ def odor_initiation_bias(trials, *, reference=None, with_counts=False):
     return pd.Series(bias).sort_index()
 
 
+@session_metric(odor_initiation_bias)
 def odor_initiation_bias_session(results):
     parts = odor_initiation_bias(results.get("trial_data", pd.DataFrame()), with_counts=True)
     if not isinstance(parts, tuple):

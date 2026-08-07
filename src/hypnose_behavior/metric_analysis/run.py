@@ -27,43 +27,80 @@ from hypnose_behavior.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_rates,
     is_singrew_session,
 )
+from hypnose_behavior.metric_analysis.registry import REGISTRY
 from hypnose_behavior.metric_analysis.summary import save_merged_metrics_txt
 from hypnose_behavior.utils.helpers import _filter_session_dirs
-from hypnose_behavior.metric_analysis.metrics.accuracy import (
-    choice_timeout_rate_session,
-    decision_accuracy_by_odor_session,
-    decision_accuracy_session,
-    global_choice_accuracy_session,
-    response_rate_session,
+# Imported for their **registrations**: a metric declares itself where it is
+# defined, so every definition module must be imported before REGISTRY is read.
+from hypnose_behavior.metric_analysis.metrics import (  # noqa: F401
+    accuracy,
+    false_alarm,
+    hidden_rule,
+    sampling,
+    sequence,
+    timing,
 )
-from hypnose_behavior.metric_analysis.metrics.false_alarm import (
-    FA_avg_response_times_session,
-    FA_odor_bias_session,
-    FA_position_bias_session,
-    fa_abortion_stats_session,
-    fa_port_ratio_by_odor_session,
-    global_FA_rate_session,
-    premature_response_rate_session,
-    response_contingent_FA_rate_session,
-)
-from hypnose_behavior.metric_analysis.metrics.hidden_rule import (
-    hidden_rule_counts_by_odor_session,
-    hidden_rule_detection_rate_session,
-    hidden_rule_performance_session,
-)
-from hypnose_behavior.metric_analysis.metrics.sampling import (
-    avg_sampling_time_aborted_sequence_session,
-    avg_sampling_time_completed_sequence_session,
-    avg_sampling_time_odor_x_session,
-    manual_vs_auto_stop_preference_session,
-)
-from hypnose_behavior.metric_analysis.metrics.sequence import (
-    abortion_rate_positionX_session,
-    odor_initiation_bias_session,
-    odorx_abortion_rate_session,
-    sequence_completion_rate_session,
-)
-from hypnose_behavior.metric_analysis.metrics.timing import avg_response_time_session
+from hypnose_behavior.metric_analysis.metrics.false_alarm import fa_abortion_stats_session
+
+__all__ = ["run_all_metrics", "batch_run_all_metrics_with_merge", "REPORT"]
+
+# The order metrics are reported in, and therefore the order of every
+# `metrics_<subj>_<date>.txt` on disk. Deliberately **not** derived from
+# registration order, which would make it a function of import order -- i.e. of
+# a file layout that has just changed twice. Being in REGISTRY makes a metric
+# discoverable; being here is the separate decision to report and save it, which
+# is why the metrics 4a recovered from `visualization/` are registered and
+# absent below.
+REPORT = [
+    "decision_accuracy",
+    "decision_accuracy_by_odor",
+    "global_choice_accuracy",
+    "premature_response_rate",
+    "response_contingent_FA_rate",
+    "global_FA_rate",
+    "FA_odor_bias",
+    "FA_position_bias",
+    "sequence_completion_rate",
+    "odorx_abortion_rate",
+    "hidden_rule_performance",
+    "hidden_rule_detection_rate",
+    "hidden_rule_counts_by_odor",
+    "choice_timeout_rate",
+    "avg_sampling_time_odor_x",
+    "avg_sampling_time_completed_sequence",
+    "avg_sampling_time_aborted_sequence",
+    "abortion_rate_positionX",
+    "avg_response_time",
+    "FA_avg_response_times",
+    "response_rate",
+    "manual_vs_auto_stop_preference",
+    "odor_initiation_bias",
+    "fa_abortion_stats",
+    "fa_port_ratio_by_odor",
+]
+
+
+def _report_fa_abortion_stats(results):
+    """`fa_abortion_stats`' saved shape, printing its three tables on the way.
+
+    The one reported metric whose report is tables rather than a value, so it
+    does not fit the loop's `wrapper -> adapter` shape.
+    """
+    fa_ab_stats = fa_abortion_stats_session(results, return_df=True)
+    if fa_ab_stats is None:
+        return None
+    payload = {
+        'by_odor': fa_ab_stats[0].to_dict(orient='records') if hasattr(fa_ab_stats[0], 'to_dict') else None,
+        'by_position': fa_ab_stats[1].to_dict(orient='records') if hasattr(fa_ab_stats[1], 'to_dict') else None,
+        'by_odor_position': fa_ab_stats[2].to_dict(orient='records') if hasattr(fa_ab_stats[2], 'to_dict') else None,
+    }
+    print("\nFA Abortion Stats by Odor:")
+    print(fa_ab_stats[0].to_string(index=False) if hasattr(fa_ab_stats[0], 'to_string') else fa_ab_stats[0])
+    print("\nFA Abortion Stats by Position:")
+    print(fa_ab_stats[1].to_string(index=False) if hasattr(fa_ab_stats[1], 'to_string') else fa_ab_stats[1])
+    print("\nFA Abortion Stats by Odor and Position:")
+    print(fa_ab_stats[2].to_string(index=False) if hasattr(fa_ab_stats[2], 'to_string') else fa_ab_stats[2])
+    return payload
 
 __all__ = ["run_all_metrics", "batch_run_all_metrics_with_merge"]
 
@@ -181,84 +218,14 @@ def run_all_metrics(results, save_txt=True, save_json=True):
     metrics = {}
     buffer = io.StringIO()
     with contextlib.redirect_stdout(buffer):
-        print("\n--- Decision Accuracy ---")
-        metrics['decision_accuracy'] = decision_accuracy_session(results)
-        print("\n--- Decision Accuracy by Odor ---")
-        accuracy_by_odor = decision_accuracy_by_odor_session(results)
-        metrics['decision_accuracy_by_odor'] = accuracy_by_odor.to_dict() if len(accuracy_by_odor) > 0 else {}
-        print("\n--- Global Choice Accuracy ---")
-        metrics['global_choice_accuracy'] = global_choice_accuracy_session(results)
-        print("\n--- Premature Response Rate ---")
-        metrics['premature_response_rate'] = premature_response_rate_session(results)
-        print("\n--- Response-Contingent False Alarm Rate ---")
-        metrics['response_contingent_FA_rate'] = response_contingent_FA_rate_session(results)
-        print("\n--- Global False Alarm Rate ---")
-        metrics['global_FA_rate'] = global_FA_rate_session(results)
-        print("\n--- FA Odor Bias ---")
-        fa_odor = FA_odor_bias_session(results)
-        metrics['FA_odor_bias'] = fa_odor.to_dict() if hasattr(fa_odor, 'to_dict') else fa_odor
-        print("\n--- FA Position Bias ---")
-        fa_pos = FA_position_bias_session(results)
-        metrics['FA_position_bias'] = fa_pos.to_dict() if hasattr(fa_pos, 'to_dict') else fa_pos
-        print("\n--- Sequence Completion Rate ---")
-        metrics['sequence_completion_rate'] = sequence_completion_rate_session(results)
-        print("\n--- Odor Abortion Rate ---")
-        odor_ab = odorx_abortion_rate_session(results)
-        metrics['odorx_abortion_rate'] = odor_ab.to_dict() if hasattr(odor_ab, 'to_dict') else odor_ab
-        print("\n--- Hidden Rule Performance ---")
-        metrics['hidden_rule_performance'] = hidden_rule_performance_session(results)
-        print("\n--- Hidden Rule Detection Rate ---")
-        metrics['hidden_rule_detection_rate'] = hidden_rule_detection_rate_session(results)
-        print("\n--- Hidden Rule Performance/Detection by Odor ---")
-        metrics['hidden_rule_by_odor'] = hidden_rule_counts_by_odor_session(results)
-        print("\n--- Choice Timeout Rate ---")
-        metrics['choice_timeout_rate'] = choice_timeout_rate_session(results)
-        print("\n--- Average Sampling Time per Odor (Completed) ---")
-        avg_samp_odor = avg_sampling_time_odor_x_session(results)
-        metrics['avg_sampling_time_odor_x'] = avg_samp_odor.to_dict() if hasattr(avg_samp_odor, 'to_dict') else avg_samp_odor
-        print("\n--- Average Sampling Time (Completed Sequences) ---")
-        metrics['avg_sampling_time_completed_sequence'] = avg_sampling_time_completed_sequence_session(results)
-        print("\n--- Average Sampling Time (Aborted Sequences) ---")
-        metrics['avg_sampling_time_aborted_sequence'] = avg_sampling_time_aborted_sequence_session(results)
-        print("\n--- Abortion Rate by Position ---")
-        abrt_pos = abortion_rate_positionX_session(results)
-        metrics['abortion_rate_positionX'] = abrt_pos.to_dict() if hasattr(abrt_pos, 'to_dict') else abrt_pos
-        print("\n--- Average Response Time ---")
-        metrics['avg_response_time'] = avg_response_time_session(results)
-        print("\n--- FA Average Response Times ---")
-        metrics['FA_avg_response_times'] = FA_avg_response_times_session(results)
-        print("\n--- Response Rate ---")
-        metrics['response_rate'] = response_rate_session(results)
-        print("\n--- Manual vs Auto Stop Preference ---")
-        metrics['manual_vs_auto_stop_preference'] = manual_vs_auto_stop_preference_session(results)
-        print("\n--- Odor Initiation Bias ---")
-        odor_init = odor_initiation_bias_session(results)
-        metrics['odor_initiation_bias'] = odor_init.to_dict() if hasattr(odor_init, 'to_dict') else odor_init
-        print("\n--- FA Abortion Stats ---")
-        fa_ab_stats = fa_abortion_stats_session(results, return_df=True)
-        if fa_ab_stats is not None:
-            metrics['fa_abortion_stats'] = {
-                'by_odor': fa_ab_stats[0].to_dict(orient='records') if hasattr(fa_ab_stats[0], 'to_dict') else None,
-                'by_position': fa_ab_stats[1].to_dict(orient='records') if hasattr(fa_ab_stats[1], 'to_dict') else None,
-                'by_odor_position': fa_ab_stats[2].to_dict(orient='records') if hasattr(fa_ab_stats[2], 'to_dict') else None,
-            }
-            print("\nFA Abortion Stats by Odor:")
-            print(fa_ab_stats[0].to_string(index=False) if hasattr(fa_ab_stats[0], 'to_string') else fa_ab_stats[0])
-            print("\nFA Abortion Stats by Position:")
-            print(fa_ab_stats[1].to_string(index=False) if hasattr(fa_ab_stats[1], 'to_string') else fa_ab_stats[1])
-            print("\nFA Abortion Stats by Odor and Position:")
-            print(fa_ab_stats[2].to_string(index=False) if hasattr(fa_ab_stats[2], 'to_string') else fa_ab_stats[2])
-        else:
-            metrics['fa_abortion_stats'] = None
-        print("\n--- FA Port Ratio by Odor ---")
-        # One variant, not two: step 6 removed the non-initiated FAs, so the
-        # `with_`/`without_non_initiated` wrapper no longer distinguishes anything.
-        fa_port = fa_port_ratio_by_odor_session(results)
-        metrics['fa_port_ratio_by_odor'] = {
-            'by_odor': fa_port['by_odor'].to_dict() if hasattr(fa_port['by_odor'], 'to_dict') else fa_port['by_odor'],
-            'counts': fa_port['counts'],
-            'total_fa_by_odor': fa_port['total_fa_by_odor'],
-        }
+        for name in REPORT:
+            spec = REGISTRY[name]
+            print(f"\n--- {spec.title} ---")
+            if name == "fa_abortion_stats":
+                metrics[spec.key] = _report_fa_abortion_stats(results)
+                continue
+            value = spec.session(results)
+            metrics[spec.key] = spec.adapter(value) if spec.adapter else value
 
         # Single-reward protocol only: outcome-category metrics (Hit / Miss / FA / CR)
         # built from the singrew trial_data columns. Only computed when the session's

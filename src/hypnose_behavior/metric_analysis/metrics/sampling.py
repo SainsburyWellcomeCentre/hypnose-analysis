@@ -35,6 +35,11 @@ from hypnose_behavior.metric_analysis.metrics.common import (
     _trial_position_frame,
     _tz_naive,
 )
+from hypnose_behavior.metric_analysis.registry import (
+    as_dict,
+    metric,
+    session_metric,
+)
 
 __all__ = [
     "avg_sampling_time_odor_x", "avg_sampling_time_odor_x_session",
@@ -61,6 +66,8 @@ def _sequential_mean(values):
     return total / n if n > 0 else np.nan
 
 
+@metric(frame="position_data", title="Average Sampling Time per Odor (Completed)",
+        adapter=as_dict)
 def avg_sampling_time_odor_x(position_data):
     """Mean `poke_time_ms` per odor over completed trials, from `position_poke_times`."""
     rows = _position_rows(position_data, "in_poke_times", aborted=False)
@@ -79,6 +86,7 @@ def avg_sampling_time_odor_x(position_data):
     return avg_times
 
 
+@session_metric(avg_sampling_time_odor_x)
 def avg_sampling_time_odor_x_session(results):
     avg_times = avg_sampling_time_odor_x(results.get("position_data"))
     for odor, avg_time in avg_times.items():
@@ -86,6 +94,7 @@ def avg_sampling_time_odor_x_session(results):
     return avg_times
 
 
+@metric(frame="position_data", title="Average Sampling Time (Completed Sequences)")
 def avg_sampling_time_completed_sequence(position_data):
     """Pooled mean `poke_time_ms` over completed trials' `position_poke_times`."""
     rows = _position_rows(position_data, "in_poke_times", aborted=False)
@@ -94,6 +103,7 @@ def avg_sampling_time_completed_sequence(position_data):
     return _sequential_mean(rows.loc[rows["poke_time_ms"].notna(), "poke_time_ms"])
 
 
+@session_metric(avg_sampling_time_completed_sequence)
 def avg_sampling_time_completed_sequence_session(results):
     if results.get("trial_data", pd.DataFrame()).empty:
         return np.nan
@@ -102,6 +112,7 @@ def avg_sampling_time_completed_sequence_session(results):
     return avg
 
 
+@metric(frame="position_data", title="Average Sampling Time (Aborted Sequences)")
 def avg_sampling_time_aborted_sequence(position_data):
     """Pooled mean `poke_time_ms` over aborted trials' `presentations`.
 
@@ -118,6 +129,7 @@ def avg_sampling_time_aborted_sequence(position_data):
     return _sequential_mean(rows.loc[keep, "poke_time_ms"])
 
 
+@session_metric(avg_sampling_time_aborted_sequence)
 def avg_sampling_time_aborted_sequence_session(results):
     # Silent on an empty trial table and on a session with no aborted trials --
     # both bail before the print today, where a session that aborted but
@@ -130,6 +142,7 @@ def avg_sampling_time_aborted_sequence_session(results):
     return avg
 
 
+@metric(frame="position_data", title="Manual vs Auto Stop Preference")
 def manual_vs_auto_stop_preference(position_data):
     """Valve durations on completed trials, split at 1000 ms.
 
@@ -148,6 +161,7 @@ def manual_vs_auto_stop_preference(position_data):
             "ratio": short / long if long > 0 else float('nan')}
 
 
+@session_metric(manual_vs_auto_stop_preference)
 def manual_vs_auto_stop_preference_session(results):
     if results.get("trial_data", pd.DataFrame()).empty:
         return {"short_valve": 0, "long_valve": 0, "ratio": np.nan}
@@ -158,6 +172,7 @@ def manual_vs_auto_stop_preference_session(results):
     return out
 
 
+@metric(frame="position_data")
 def poke_durations(position_data, *, aborted=False):
     """Per-position poke durations for one outcome class, as a tidy frame.
 
@@ -210,11 +225,13 @@ def _mean_sd_by(frame, key):
     return out
 
 
+@metric(frame="position_data")
 def poke_duration_by_position(position_data, *, aborted=False):
     """Mean and population SD of `poke_time_ms` per position. Checklist 3."""
     return _mean_sd_by(poke_durations(position_data, aborted=aborted), "position")
 
 
+@metric(frame="position_data")
 def poke_duration_by_odor(position_data, *, aborted=False):
     """Mean and population SD of `poke_time_ms` per odor.
 
@@ -227,6 +244,7 @@ def poke_duration_by_odor(position_data, *, aborted=False):
     return _mean_sd_by(poke_durations(position_data, aborted=aborted), "odor_name")
 
 
+@metric(frame="position_data")
 def trial_poke_span(position_data):
     """Wall-clock span of a trial's odor-sampling phase, in ms. Checklist 17.
 
@@ -248,6 +266,7 @@ def trial_poke_span(position_data):
     return span.dropna().dt.total_seconds() * 1000.0
 
 
+@metric(frame="position_data")
 def trial_poke_total(position_data):
     """Sum of `poke_time_ms` across a trial's positions, in ms. Checklist 21.
 
