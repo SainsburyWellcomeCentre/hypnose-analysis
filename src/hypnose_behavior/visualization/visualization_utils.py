@@ -30,7 +30,6 @@ from hypnose_behavior.metric_analysis.metrics_utils import (
     rolling_reward_fraction,
     fa_port_ratio,
     fa_port_share_a,
-    run_all_metrics,
     poke_duration_by_odor,
     poke_duration_by_position,
     poke_durations,
@@ -39,6 +38,7 @@ from hypnose_behavior.metric_analysis.metrics_utils import (
 from hypnose_behavior.io.results import load_session_results
 from hypnose_behavior.metric_analysis.frames import build_position_data, odor_letter
 from hypnose_behavior.metric_analysis.resolvers import by_group
+from hypnose_behavior.metric_analysis.run import run_all_metrics
 from datetime import timedelta, datetime
 from hypnose_behavior.trial_classification.classification_utils import load_all_streams, load_experiment
 from hypnose_behavior.utils.helpers import (

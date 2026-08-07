@@ -17,7 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from hypnose_behavior.trial_classification.run import batch_analyze_sessions
-from hypnose_behavior.metric_analysis.metrics_utils import batch_run_all_metrics_with_merge
+from hypnose_behavior.metric_analysis.run import batch_run_all_metrics_with_merge
 from hypnose_behavior.qc.validate import validate_subject
 
 

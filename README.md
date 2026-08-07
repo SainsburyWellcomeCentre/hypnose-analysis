@@ -116,7 +116,7 @@ python scripts/run_metrics_analysis.py     --subjids 53 --dates 20260528
 python scripts/batch_process.py            --subjids 53 --date-range 20260501 20260531
 ```
 
-`--subjids` and `--dates` are optional (omit to run all); use `--date-range START END` for an inclusive range. Run trial classification before metric analysis (metrics read the saved classification results). The scripts validate that data exists first (`hypnose_behavior.io.validate.validate_subject`) and are thin wrappers over `hypnose_behavior.trial_classification.run.batch_analyze_sessions` and `hypnose_behavior.metric_analysis.metrics_utils.batch_run_all_metrics_with_merge`.
+`--subjids` and `--dates` are optional (omit to run all); use `--date-range START END` for an inclusive range. Run trial classification before metric analysis (metrics read the saved classification results). The scripts validate that data exists first (`hypnose_behavior.io.validate.validate_subject`) and are thin wrappers over `hypnose_behavior.trial_classification.run.batch_analyze_sessions` and `hypnose_behavior.metric_analysis.run.batch_run_all_metrics_with_merge`.
 
 1. Trial Classification
 
