@@ -1,3 +1,34 @@
+> ## ARCHIVED — closed working document, Phase 4 (4a + 4b)
+>
+> **Archived 2026-08-07, when Phase 4 completed. Nothing in the live documentation points
+> here, and nothing in a later phase needs to read it.**
+>
+> This was the working document for Phase 4: the function-by-function audit of all seven
+> `visualization/` files (~220 functions, 16,627 lines) that decided which of them computed a
+> metric, where each canonical version should live, and how every duplicate and variant
+> resolved — followed by the implementation log for 4a's moves and 4b's split.
+>
+> **It is retained as the evidence for why the metric values are what they are.** When a number
+> looks wrong, or someone proposes "tidying" a definition, this is where the measurement behind
+> the current form is recorded: the three "reached at position *p*" definitions and why one
+> survived, the eight FA-port-ratio implementations, the ULP-level summation choices, the
+> discrepancy patterns with trial IDs.
+>
+> **Do not work from it.** Its line numbers are from `f72d201` and predate ~1,500 lines of
+> deletions, and several of its proposed destinations were overruled during implementation
+> (`visualization/io/` chief among them). What is still load-bearing was extracted before
+> archiving, into:
+>
+> - **`docs/DECISIONS.md`** — the decisions and traps that outlive Phase 4
+> - **`docs/phase5_brief.md`** — the `FETCH` / `PREP` / `DISPLAY-AGG` work list, re-measured
+>   against `cbc7059`
+> - **`docs/restructure_2_plan.md`** — the remaining phases
+>
+> A handful of source docstrings still cite `docs/metric_audit.md` by its old path; they mean
+> this file. Correcting them is a source change and was out of scope for the docs pass.
+
+---
+
 # Phase 4a — metric audit of `visualization/`
 
 Working document for restructure_2 Phase 4a (see `docs/restructure_2_plan.md`).

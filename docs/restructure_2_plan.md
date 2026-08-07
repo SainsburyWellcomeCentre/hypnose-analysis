@@ -1,13 +1,21 @@
 # restructure_2 — consolidation & reuse plan (target: v2.0.0)
 
-Hand-off plan for the next round of work on `hypnose-analysis`.
-
-**The restructure is planned on the new branch `hypnose-restructure`.** 
+Hand-off plan for the next round of work on `hypnose-behavior-analysis`, on branch
+**`hypnose-restructure`**.
 
 Goal: make the code tidier, faster and reusable across the growing repo family — **without
 accidentally changing analysis output**.
 
-All measurements in this document were taken **2026-07-31**. .
+**Three live documents, and nothing else:**
+
+| document | what it is |
+|---|---|
+| `docs/restructure_2_plan.md` (this) | the spine: remaining phases and the operating rules |
+| `docs/DECISIONS.md` | settled rules and standing traps — **read at the start of every phase** |
+| `docs/phase5_brief.md` | Phase 5's work list, extracted from the closed Phase 4 audit |
+
+`docs/archive/` holds closed working documents. **Nothing live points into it**, and no phase
+needs to read it.
 
 ---
 
@@ -21,63 +29,59 @@ terminal entry points in `scripts/`; no back-compat shims, all imports canonical
 
 | repo | package | role |
 |---|---|---|
-| hypnose-analysis → **hypnose-behavior-analysis** | `hypnose` → `hypnose_behavior` | behavioural analysis (this repo) |
+| **hypnose-behavior-analysis** | `hypnose_behavior` | behavioural analysis (this repo) |
 | hypnose-somnotate | `hypnose_somnotate` | EEG sleep scoring (done, v1.0.0) |
 | hypnose-eeg-analysis | `hypnose_eeg` | EEG analysis (coming) |
 | neuropixel analysis | `hypnose_ephys` | ephys (planned) |
-| **hypnose-helpers** | `hypnose_helpers` | shared, modality-agnostic utilities (to create) |
+| **hypnose-helpers** | `hypnose_helpers` | shared, modality-agnostic utilities (exists, local only) |
 
-**Current scale** — re-measured **2026-08-04**, after Phase 2 (the 2026-07-31 figures the
-rest of this document quotes are superseded by these): 54 py files, 31,140 lines.
+**Current scale** — measured 2026-08-07, after Phase 4b:
 
-| file | lines | 2026-07-31 |
-|---|---|---|
-| `visualization/` **total** | **16,627** | 16,044 |
-| ├ `visualization_utils.py` | 7,264 | 7,283 |
-| ├ `movement_analysis_utils.py` | 4,460 | 4,497 |
-| ├ `pred_seq_utils.py` | 1,886 | 1,886 |
-| ├ `sing_rew.py` | 1,291 | 1,291 |
-| ├ `valve_poke_plots.py` | 646 | 646 |
-| ├ `modelling/switchpoint/plots.py` | 638 | (not counted) |
-| └ `movement_analysis/sing_rew_movement.py` | 433 | (not counted) |
-| `trial_classification/classification_utils.py` | 3,703 | 3,703 |
-| `metric_analysis/metrics_utils.py` | 1,817 | ~~2,639~~ **deleted in 4b** |
-| `metric_analysis/sing_rew_metrics.py` | 440 | (not counted) |
+| area | lines |
+|---|---|
+| `visualization/` **total** | **15,124** |
+| ├ `visualization_utils.py` | 6,690 |
+| ├ `movement_analysis_utils.py` | 3,583 |
+| ├ `pred_seq_utils.py` | 1,849 |
+| ├ `sing_rew.py` | 1,287 |
+| ├ `modelling/switchpoint/plots.py` | 638 |
+| ├ `valve_poke_plots.py` | 635 |
+| └ `movement_analysis/sing_rew_movement.py` | 433 |
+| `trial_classification/classification_utils.py` | 3,703 |
+| `metric_analysis/` | `run` / `merge` / `summary` / `registry` / `frames` / `resolvers` / `movement` / `stats/` + 7 modules under `metrics/`, none over 710 lines |
 
-Phase 4b replaced `metrics_utils.py` with `io/load_results.py` + `metric_analysis/{run,merge,summary,registry}.py`
-+ `metric_analysis/metrics/{common,accuracy,false_alarm,sequence,hidden_rule,sampling,timing}.py`,
-none over 710 lines.
+`metric_analysis/metrics/__init__.py` is the map of where every metric lives, in one screen.
 
-The `visualization/` total *rose* despite Phase 2 removing code: the original 16,044 omitted
-`modelling/switchpoint/plots.py` and `movement_analysis/sing_rew_movement.py`. **Phase 4a
-must audit those two as well** — they were invisible in the original count.
+**Out of scope (explicit):** do NOT change protocol detection — the
+`"odourdiscrimination" in name` string matching stays as-is.
 
 ---
 
 ## 1. The QC safety net — use it after every change
 
-`src/hypnose/qc/`, see `qc/README.md`:
+`src/hypnose_behavior/qc/`, see `qc/README.md`:
 
-- **`regression.py`** — golden-master. Fingerprints `trial_data` + metrics dict for the 6
+- **`regression.py`** — golden-master. Fingerprints `trial_data` + metrics dict for the 9
   coverage sessions in `sessions.yml`, md5-compares to `fixtures/`. On mismatch it reports
   **added/removed/changed columns and metric keys**, so an intended change is easy to confirm.
-  `--generate` writes baselines; optional `subjid:date` args limit scope.
-- **`verify_scripts.py`** — the same, through the actual CLI scripts (covers arg wiring).
-- **`check_imports.py`** — static check for referenced-but-not-imported globals.
-- **`plot_regression.py`** — old-vs-new diff of what the **plotters draw** (added 2026-08-06).
-  `regression.py` fingerprints `trial_data` + the metrics dict and never sees a figure, so
-  everything in `visualization/` is invisible to it. This runs 19 plotters under Agg against a
-  git revision and the working tree and diffs every line's xy data, collection offsets, patch
-  geometry, axis decoration and stdout. Deliberately a two-tree diff, not a golden master:
-  figures are meant to change, and the question is always whether *this* change moved a curve.
-  **Phase 5 depends on it** — it is the only guard a plotting refactor has.
+  `--generate` writes baselines; optional `subjid:date` args limit scope. ~15 min.
+- **`plot_regression.py`** — old-vs-new diff of what the **plotters draw**. `regression.py`
+  never sees a figure, so everything in `visualization/` is invisible to it. Runs 32 plotter
+  cases under Agg against a git revision and the working tree and diffs every line's xy data,
+  collection offsets, patch geometry, axis decoration and stdout. Deliberately a two-tree diff,
+  not a golden master: figures are meant to change, and the question is always whether *this*
+  change moved a curve. ~5 min. **Phases 5 and 10 depend on it** — see `DECISIONS.md` §7 for
+  the three things it works around.
+- **`verify_scripts.py`** — regression through the actual CLI scripts (covers arg wiring).
+- **`check_imports.py`** — static check for referenced-but-not-imported globals. Seconds.
 - **`validate.py`** — `validate_subject()`, used by the scripts.
 
 **Operating rules**
 
 - Run everything with `~/miniconda3/envs/hypnose-analysis-test/bin/python`. Fixtures are only
-  valid in the env recorded in `fixtures/env.json` — as of 2026-07-31 that is
-  `py3.12.13 / pandas 3.0.1 / numpy 1.26.4`, and the test env still matches.
+  valid in the env recorded in `fixtures/env.json` — `py3.12.13 / pandas 3.0.1 / numpy 1.26.4`,
+  plus pyarrow, which `env_fingerprint` now records because a pyarrow upgrade silently switched
+  `load_session_results` from the CSV fallback to parquet and moved a ULP.
 
 - **Invoke the QC tools by absolute path, with no `cd`** (learned the hard way, 2026-08-04):
 
@@ -86,6 +90,7 @@ must audit those two as well** — they were invisible in the original count.
   QC=~/repos/harris_lab/hypnose/hypnose-behavior-analysis/src/hypnose_behavior/qc
 
   $PY -u $QC/regression.py            # optional: subjid:date ... to limit scope
+  $PY -u $QC/plot_regression.py       # optional: --ref <rev>, --only <name>
   $PY -u $QC/check_imports.py
   $PY -u $QC/verify_scripts.py
   ```
@@ -94,19 +99,32 @@ must audit those two as well** — they were invisible in the original count.
 
   - The `cd <repo> && $PY src/...` form gets stopped at the agent permission layer, and
     the tool reports it as a rejected call — indistinguishable from a hung or slow run.
-    None of the three tools needs a working directory: `regression.py` derives
-    `HERE`/`REPO` from `__file__` and puts `src/` on `sys.path` itself.
+    None of the tools needs a working directory: each derives `HERE`/`REPO` from `__file__`
+    and puts `src/` on `sys.path` itself.
   - `-u` matters when the output is redirected (backgrounded runs, tee to a log). Without
     it Python block-buffers stdout, so a 5-minute run shows nothing at all until it exits
     and there is no way to tell progress from a stall.
+
+- **Gate on reachability, not on how large the change looks.** Run `regression.py` for any edit
+  inside a function `run_all_metrics` reaches, or anything touching `load_session_results`. Skip
+  it for code the metrics pipeline never calls — the fingerprint cannot see it and a 15-minute
+  run proves nothing; verify those by byte-identity against `git show HEAD:...` plus
+  `check_imports`.
+
+- **Check printed output, not just values.** `metrics_*.txt` is written from the wrappers'
+  stdout and is **not** in the fingerprint, so a print-only drift is invisible to
+  `regression.py`. The old-vs-new parity harness used through Phase 4 — export the pre-change
+  tree with `git archive`, compare both the return value and captured stdout across all 9
+  sessions — runs in ~7 s and has caught exactly that. **Copy the repo's git-ignored
+  `configs/data_locations.local.yml` into the exported tree**, or it resolves its own absent
+  config and silently reads a wrong derivatives root.
+
 - **Byte-identical philosophy.** Pure refactors and moves must keep regression GREEN.
   Intended output changes (schema, vectorisation numerics) get fixtures **regenerated
   deliberately in the same commit**, with the column/metric diff confirming only the
   intended fields changed.
-- Commit per logical step; keep the tree GREEN between commits where possible.
 
-**Out of scope (explicit):** do NOT change protocol detection — the
-`"odourdiscrimination" in name` string matching stays as-is.
+- Commit per logical step; keep the tree GREEN between commits where possible.
 
 ---
 
@@ -129,28 +147,26 @@ Commit at every phase boundary so each new chat starts from a green, known state
 
 Update this table at the end of each phase, in the same commit as the work.
 
-| phase | status | commit | notes |
+| phase | status | commit | what it delivered / what still constrains later phases |
 |---|---|---|---|
-| Step 0 — re-baseline QC fixtures | **done** 2026-08-03 | `481110b` | 9 sessions (8 re-run + sub-053 20260520 kept for seqLen 2 & the singrew-name guard). Old sub-040 20251124 fixture was **stale, not drifted** — cb724d5's own code reproduces the new md5. regression / verify_scripts / check_imports all green |
-| 0.1 package name decision | **done** 2026-08-03 | `9aad717` | Decided `hypnose_behavior` (dist `hypnose-behavior-analysis`); realised in Phase 1 |
-| 0.2 helpers boundary decision | **done** 2026-08-03 | `9793cbc`..`b840ba1` | Decided by the "knows the data vs knows the layout" test; realised in 2a/2b/2c |
-| 0.3 collapse loaders/readers | **done** 2026-08-03 | `5d9c14a` | `readers.py` is now the single definition site for the 8 primitives (tolerant bodies); `loaders.py` re-exports them. Kept as two files: deleting `readers.py` would make `loaders → detect_settings → loaders` a cycle. Dead `create_unique_series` / `find_session_roots` deleted. regression GREEN |
-| 1 rename | **done** 2026-08-03 | `9aad717` | `hypnose` → `hypnose_behavior`, dist/repo → `hypnose-behavior-analysis`. 210 anchored replacements + `git mv`. No reinstall needed (editable install is a static-path `.pth` onto `src/`). `HYPNOSE_*` env vars, ceph data paths, Jupyter kernel names and this doc deliberately untouched. GitHub repo renamed, remote URL updated, local folder renamed to `hypnose-behavior-analysis`. That move invalidated the editable-install `.pth` in 6 conda envs; only `hypnose-analysis-test` was repointed — **`hypnose`, `hypnose-analysis`, `hypnose-somnotate`, `sleap`, `sleap-2` still need `pip install -e .`** |
-| 2a helpers extraction | **done** 2026-08-03 | `9793cbc`..`b840ba1` (+ helpers `1333955`..`d11d0dc`, somnotate `9e3c155`..`7de20a5`) | `hypnose-helpers` created (local only, no remote yet). Moved: `io/paths` → `DataLocations(config_dir=…)` (could NOT move whole — `__file__`-derived repo root), `io/save` → `viz/styles` + `viz/save` (`save_figure` takes `fig_dir`), `io/save_results` serialisation → `io/serialize`, somnotate `io/selectors` + `ensure_style`. rcParams no longer mutated at import. Behaviour repo −1226 lines. Regression GREEN at each step |
-| 2b canonical session discovery | **done** 2026-08-04 | `312854d`..`2fbd5f5` (+ helpers `8dadcf8`, somnotate `80afbda`) | `hypnose_helpers.io.layout` owns the walking; each repo binds its own roots. All 17 session lookups and ~30 subject globs repointed. **`session_index` ships but is deliberately unused by the plotters** — see "State at the end of 2b". regression / verify_scripts / check_imports all green |
-| 2c figure provenance | **done** 2026-08-04 | `7d117b8` (+ helpers `059c652`, somnotate `892e56c`) | `hypnose_helpers.provenance` + `viz/metadata`. Every `save_figure` PDF carries commit/version/caller/params; `read_figure_metadata` reads it back **without pypdf**. Phase 7a can call `provenance()` directly. regression / verify_scripts / check_imports all green |
-| 3 re-baseline QC | **done** — superseded by Step 0 | `481110b` | Step 0 did it first: 9 sessions re-baselined 2026-08-03. Nothing further to do; do NOT re-run `--generate` |
-| 4a strip metrics from visualization | **audit done** 2026-08-05; **moves in progress** (see next row) | `58387ce`..`6aac5de` | Audit written to `docs/metric_audit.md` — all 7 files, ~220 functions. **32 sites of metric math in 4 files**, resolving to **24 metrics with no canonical version** (checklist in the audit is the "lose no metric" gate), 8 exact duplicates, 9 granularity variants. Biggest single item: `compute_speed_analysis` (591 lines, 7 movement metrics, no plotting) moves wholesale. `modelling/switchpoint/plots.py` needs nothing; `movement_analysis/sing_rew_movement.py` needs only dedup — both are files the original count missed. **Both blocking decisions settled 2026-08-05** — see "D0 resolution" and "Q5 resolution" in the audit. **D0 (metric signature):** every metric gets a pure `f(frame) -> value` core + thin `f(results)` wrapper, in 4a; four tiers, not one shape; tier-1 metrics store numerator/denominator contributions separately (storing a single per-trial value reproduces finding 12); `position_data` is derived at **load** time so legacy sessions need no compat branch; tier-3 bias metrics take an optional `reference`, which gives plotters a `baseline="session"|"window"` option for free. **Q5 (reached@p):** two helpers — `sequence_depth` never filtered, `sampled_positions(only_true_pokes=)` filterable — unfiltered by default, definition B deleted; unblocked for filtering by the §7b TODO. **One deliberate output change:** non-initiated trials leave the metric set (`non_initiated_FA_rate`, `fa_port_ratio_by_odor.with_non_initiated`, `avg_sampling_time_initiation_abortion`, `non_initiation_odor_bias`), requiring `--generate` in that commit — confirm first. Everything else in 4a is value-neutral. **All 6 local judgement calls settled too** — `_hr_odor_associations` → `metric_analysis` as session metadata; `speed_analysis.parquet` question withdrawn (path is session-derived, no `__file__` trap, clean source-only move); `_kw_mwu_by_group` → `metric_analysis/stats/kw_mwu.py`, one module per test; the 10× outlier rule stays in `visualization/` as a display filter, establishing the principle **metrics raw, filtering is display**; `_compute_real_time_offset` deleted in favour of the loaders' offset. **Nothing blocks the moves — the next 4a chat implements.** Docs only: regression / check_imports green, no source touched |
-| **4a moves — DONE** | `07182bd`..`aa0355f` 2026-08-06 | | **Phase 4a is complete: `visualization/` fetches and plots, and computes no metrics.** First half (`07182bd`..`bc46378`): all 24 checklist metrics exist in `metric_analysis`, D0 complete for every tier, `by_group`/`over_windows`, both deliberate output changes landed. Second half (`604dd77`..`aa0355f`): the **21 remaining recomputes** deleted — 9 in `visualization_utils`, 6 in `pred_seq_utils`, 2 in `sing_rew`, 2 in `movement_analysis_utils`, plus the 2 judgement-call moves (`hr_odor_associations` → `metrics_utils`, `kw_mwu_by_group` → new `metric_analysis/stats/`). `get_fa_ratio_a_stats` moved wholesale (it was a pure metric sitting in `visualization/`). A closing grep over all 80 aggregation sites in the seven files found **two more** the checklist had missed — a ninth hand-written `fa_port_ratio` in `plot_fa_ratio_by_abort_odor` (printed, not drawn) and an `np.mean` over `FR_ratio`'s own contributions; both fixed, and `_reduce_rate` became public `reduce_rate` for the second. **Gates:** `regression.py` GREEN on all 9 sessions (trial_data + metrics), `check_imports` PASS, `plot_regression.py` green everywhere except the deliberate sub-nanosecond recovery the trial-timing metrics inherit from `e9516e4` (max rel 2.2e-07) and one accepted ULP choice in `plot_sampling_times_analysis`; both recorded in the audit. **`plot_regression.py` grew substantially and is now the tool Phase 5 depends on** — cross-module name resolution (so a *move* is not a false RED), the repo style applied (two plotters were silently raising, i.e. ungated, not green), `PYTHONHASHSEED` pinned (`_ordered_groups` iterates a `set`, so those figures were not reproducible run-to-run — a real pre-existing defect, unfixed), a `name#variant` label so one function can be gated under two argument sets, a diff-magnitude summary, and 12 more cases (19 → 31). `visualization/` 15,194 → **15,101** lines; `metric_analysis/` gained the definitions |
-| ~~4a moves — in progress~~ | `9672f1e`..`8b7d09f` 2026-08-05 | | **Started, not finished — see "Implementation progress" in `docs/metric_audit.md` for the tick-list and what remains.** Landed: the Q5 position helpers + `reached_counts` in new `metric_analysis/frames.py` (the reached walk was written twice identically in `metrics_utils`); `compute_speed_analysis` + batch driver + `_binned_speed` → new `metric_analysis/movement.py` (711 lines byte-identical, checklist 10-16); `_load_tracking_and_behavior` → new `io/tracking.py` (**not** `visualization/io/` as the audit suggested — `metric_analysis` is now a consumer and must not import `visualization`). `visualization/` 16,618 → **15,194** lines. **Prerequisite discovered:** the gate was RED at HEAD before any 4a work — pyarrow 23.0.1 post-dates the fixtures, so `load_session_results` reads parquet where it used to fall back to CSV and the CSV round-trip loses 1 ULP; re-baselined in `9672f1e` with the diff confirmed to be exactly 2 metric keys on 2 sessions, and `env_fingerprint` now records pyarrow. **One deliberate deviation:** `sequence_depth` reproduces today's rule rather than the audit's `presentations`-sourced target, because the two disagree on 10 of 1731 fixture trials and switching would bake the grace artifact into the denominators — it becomes a one-line change once 7b writes `poke_source`. **Regression cadence agreed:** gate on reachability from `run_all_metrics`, skip it for code the metrics pipeline never calls. Remaining: `position_data` at load time, the D0 cores/wrappers, the resolvers, the DEDUPs/NEW/helper consolidations, and step 6 |
-| **4b modularise metric_analysis — DONE** | **done** 2026-08-07 | `604355f`..`cbc7059` | **`metrics_utils.py` (2,639 lines) is gone.** Plumbing: `load_session_results` → **`io/load_results.py`** (named to pair with `io/save_results.py`, which writes what it reads; kept out of `loaders.py` so `trial_classification` does not end up importing `metric_analysis`), and the two merged-path helpers moved there and were then **deleted** — nothing called them; `run_all_metrics` / `batch_run_all_metrics_with_merge` → **`metric_analysis/run.py`**; `pool_results_dicts` → **`merge.py`**; `save_merged_metrics_txt` → **`summary.py`** — so `metric_analysis/` mirrors `trial_classification/`. Definitions: the 6 confirmed modules under **`metric_analysis/metrics/`** plus **`common.py`** for the 11 helpers more than one construct needs; exactly **one** edge between metric modules (`hidden_rule` imports `presentation_counts_by_odor` from `sequence`). **Registry:** `@metric(frame=…)` on the core, `@session_metric(core)` on the wrapper, **43 registered / 25 reported**; the frame is a decorator argument, not a file boundary, and `run.REPORT` keeps the report order explicit because registration order would make it a function of import order. Re-registration is reload-tolerant, since the notebooks run under `%autoreload 2`. **Every carve was verified structurally**: an ast pass required all **112** pre-4b function bodies to be byte-identical in their new homes — across the phase exactly 2 changed, both deliberately. **Two decisions the 4a handoff asked for:** the two truthiness rules are now one, resolved by widening `_is_truthy` (measured: 0 disagreements on all 9 sessions — both flag columns arrive as native `bool`, so the divergence was latent, reachable only through the CSV fallback); and `parse_json_columns` turned out **not to exist** — 4a had already moved the singular into `frames.py`, where the `build_position_data` decision keeps it. `merged_results_output_dir` / `merged_metrics_filename` had **no callers** and are gone. **One intended output change — finding 3:** `fa_abortion_stats` is numeric (counts `int`, rates `float`, positions `int`, the duplicate `"Abortion Rate Value"` column dropped), its formatting moved to `summary.py`, and `plot_abortion_and_fa_rates` reads both the numeric and the legacy string form because every `metrics_*.json` on the server still holds the latter. Fixtures regenerated in that commit with the diff confirmed to be exactly `~ fa_abortion_stats` on the 7 sessions that have FA abortion data — nothing added, nothing removed, `trial_data` green throughout — and the txt report unchanged bar positions printing `2` rather than `2.0`. **Gates:** `regression.py` GREEN at every commit (RED only for the deliberate regenerate), `verify_scripts` GREEN, `check_imports` PASS, `plot_regression.py --ref 25dab00` GREEN on all **32** plotters, and a ~7 s metric-parity check (values **and** captured stdout, 9 sessions, against a `git archive` of `25dab00`) GREEN throughout. Details in `docs/metric_audit.md` → "Phase 4b — the split as built" |
-| 5 visualization primitives | **not started — unblocked** | | 4a and 4b are both done. Handoff prompt at the end of the Phase 5 section below |
+| 0 — re-baseline QC fixtures | **done** 2026-08-03 | `481110b` | 9 sessions baselined. Supersedes Phase 3 — do NOT re-run `--generate` |
+| 0.1 package name | **done** 2026-08-03 | `9aad717` | `hypnose_behavior`, dist `hypnose-behavior-analysis` |
+| 0.2 helpers boundary | **done** 2026-08-03 | `9793cbc`..`b840ba1` | Decided by the "knows the data vs knows the layout" test |
+| 0.3 collapse loaders/readers | **done** 2026-08-03 | `5d9c14a` | `readers.py` is the single definition site for the 8 primitives; `loaders.py` re-exports. Kept as two files — deleting `readers.py` makes `loaders → detect_settings → loaders` a cycle |
+| 1 rename | **done** 2026-08-03 | `9aad717` | `hypnose` → `hypnose_behavior`. **Outstanding:** the folder move invalidated the editable-install `.pth`; `hypnose`, `hypnose-analysis`, `hypnose-somnotate`, `sleap`, `sleap-2` still need `pip install -e .` (user action) |
+| 2a helpers extraction | **done** 2026-08-03 | `9793cbc`..`b840ba1` (helpers `1333955`..`d11d0dc`, somnotate `9e3c155`..`7de20a5`) | `hypnose-helpers` created (local only, no remote). Behaviour repo −1226 lines. rcParams no longer mutated at import. **Trap for any later "move whole": check for `__file__`-derived state first** — `io/paths.py` could not move because everything derived from `Path(__file__).parents[3]`, and relocating it silently repointed the config with no error |
+| 2b canonical session discovery | **done** 2026-08-04 | `312854d`..`2fbd5f5` (helpers `8dadcf8`, somnotate `80afbda`) | `hypnose_helpers.io.layout` owns the walking; each repo binds its own roots. All 17 lookups and ~30 subject globs repointed. Ambiguity raises `DuplicateSessionError`. **`session_index` selects, never positions — `DECISIONS.md` §8** |
+| 2c figure provenance | **done** 2026-08-04 | `7d117b8` (helpers `059c652`, somnotate `892e56c`) | Every `save_figure` PDF carries commit/version/caller/params; `read_figure_metadata` reads it back without pypdf. Phase 7a can call `provenance()` directly. **Wrapper hazard — `DECISIONS.md` §9** |
+| 3 re-baseline QC | **done** — superseded by 0 | `481110b` | Nothing further to do |
+| 4a strip metrics from visualization | **done** 2026-08-06 | audit `58387ce`..`6aac5de`; moves `9672f1e`..`aa0355f` | **`visualization/` fetches and plots, and computes no metrics.** 32 sites of metric math resolved: 24 metrics added to `metric_analysis`, 8 exact dedups, 9 variants collapsed onto `by_group`/`over_windows`. D0 complete for every tier. `compute_speed_analysis` (711 lines, 7 movement metrics) moved wholesale to `metric_analysis/movement.py`. Two deliberate output changes landed (non-initiated trials left the metric set; `ambiguous_rate`/`correct_rejection_rate` added). `qc/plot_regression.py` written and grown to 32 cases. **Deviation that outranks the audit: `_load_tracking_and_behavior` → `io/tracking.py`, not `visualization/io/`** |
+| 4b modularise metric_analysis | **done** 2026-08-07 | `604355f`..`cbc7059` | **`metrics_utils.py` (2,639 lines) is gone.** Plumbing to `io/load_results.py` + `run`/`merge`/`summary`; definitions to 7 modules under `metrics/`. Registry: 43 registered / 25 reported. Every carve verified by an ast pass requiring all 112 pre-4b function bodies byte-identical. One intended output change (`fa_abortion_stats` numeric). **Registry contract, `frames.py`-as-leaf and the legacy-reader trap — `DECISIONS.md` §3-5** |
+| 5 visualization primitives | **not started — unblocked** | | 4a and 4b are both done. See the Phase 5 section and `docs/phase5_brief.md` |
 | 6 trial classification dedup | not started | | unit tests first |
-| 7a manifest provenance | not started | | |
+| 7a manifest provenance | not started | | ~40% done in advance by 2c |
 | 7b schema & formats | not started | | intended output change |
 | 8 profile, then vectorise | not started | | |
 | 9 validation | not started | | |
-| 10 modularise `visualization_utils.py` | **proposed** 2026-08-06, after the restructure | | 4a did **not** de-bloat `visualization/`: measured, it went 16,627 → 15,040 lines, and almost all of that is one wholesale move (`compute_speed_analysis`). `visualization_utils.py` itself lost **137 lines, 1.9%**, and `metrics_utils.py` gained 635 — the metrics moved, they did not vanish. 4a's value is one definition per metric, not line count; the plan overpromised a de-bloat here. So `visualization_utils.py` needs the same split 4b gives `metrics_utils.py`: plumbing apart from plotters, then per-plot-family modules. Pure function moves, so low risk — and `qc/plot_regression.py` gates it exactly. **One trap:** moving a plotter between modules changes `file`/`chain` in saved-figure provenance, and any `save_figure` wrapper needs `skip_modules=(__name__,)` (see "State at the end of 2c" §1) |
+| 10 modularise `visualization_utils.py` | **proposed**, after the restructure | | not scheduled |
 | ∥ time-base audit | not started, deferred | | parallelisable |
 
 ### Model and reasoning effort
@@ -160,577 +176,110 @@ throughput. Vary the effort by phase:
 
 | phase | effort | why |
 |---|---|---|
-| 0.3 collapse loaders/readers | **max** | judging which of 4 diverged functions is correct; a wrong pick is invisible and regression may not catch it |
-| 1 rename | standard | mechanical over ~265 references; needs care, not reasoning |
-| 2a extraction | standard–high | the inventory is already decided; mostly execution |
-| 2b session API | high | new API, **17** lookup sites (re-measured), duplicate-`ses` semantics |
-| 2c figure provenance | high | value summariser has the edge cases |
-| 4a metrics audit | **max** | mapping ~27 recomputes to canonical metrics across 16k lines without losing one |
-| 4b, 5 | standard–high | mostly moves once 4a has decided what goes where |
+| 5 | high | judgement about what a figure should look like, on top of moves that must not change one |
 | **6 classification dedup** | **max** | riskiest item in the plan — 3 divergent implementations of one rule, ~1000-line function |
-| 7–9 | high | schema is deliberate-change territory; profiling is evidence-led |
+| 7-9 | high | schema is deliberate-change territory; profiling is evidence-led |
+| 10 | standard–high | pure moves, gated exactly by `plot_regression.py` |
 | any unexpected RED | **max** | always — diagnose before touching anything |
 
-Max effort on the rename is just slow. Standard effort on Phase 6 is how a subtle
-behaviour change passes regression on 8 sessions and breaks on the 9th.
-
-### Context strategy for the large audits
-
-Phase 4a spans **16,044 lines** of `visualization/`. That is a context-capacity problem,
-not a reasoning one — no effort setting fixes files that do not fit.
-
-Work file by file and **write the audit into the repo as you go**, e.g.
-`docs/metric_audit.md`: every function, whether it computes a metric or only plots, and
-where the canonical version lives. The moves then happen in a later chat reading that
-file instead of re-reading 16k lines — and you get something reviewable before any code
-changes. The same approach suits any phase whose inputs exceed one context.
+Standard effort on Phase 6 is how a subtle behaviour change passes regression on 8 sessions
+and breaks on the 9th.
 
 ### Handoff prompt for each new chat
 
 Adapt the phase name and paste:
 
 ```
-I'm continuing a planned restructure of this repo, on branch `hypnose-restructure`.
+I'm continuing a planned restructure of hypnose-behavior-analysis
+(/Users/joschua/repos/harris_lab/hypnose/hypnose-behavior-analysis), on branch
+`hypnose-restructure`. Use Opus 5 at <EFFORT> effort.
 
-FIRST: read `docs/restructure_2_plan.md` in full before doing anything. It is the
-authoritative plan. Check the Progress table in section 2 for what is already done —
-do not redo completed phases.
+FIRST, read these two, in this order:
+1. `docs/DECISIONS.md` in full — the settled rules and standing traps. Every one of them
+   prevents a silently wrong number or constrains a choice you would otherwise make freely.
+2. `docs/restructure_2_plan.md` — section 1 (QC safety net + operating rules), section 2
+   (Progress table — do not redo completed phases), and the whole <PHASE> section.
+
+Do NOT read anything in `docs/archive/`. It is closed working material, its line numbers are
+stale, and several of its proposed destinations were overruled during implementation.
 
 This chat covers exactly one phase: <PHASE>. Do not start any other phase.
 
 Hard constraints:
 1. The ceph mount `/Volumes/harris` is STRICTLY READ-ONLY. Never write, move, rename,
-   chmod or delete anything under it. The only thing that may read it is the QC
-   regression harness. If you think you need to write there, stop and ask me.
+   chmod or delete anything under it. If you think you need to write there, stop and ask me.
 2. Do not explore ceph — no browsing subject folders, no inventorying sessions, no
-   `find` over the mount. If it is unavailable, stop and tell me.
+   `find` over the mount. To learn about a session, call the pipeline's own loaders for
+   specific subject/date pairs. If every session fails with FileNotFoundError or "No
+   experiment runs found", that is a dropped or weak mount, not a code regression — CHECK
+   THE MOUNT BEFORE DIAGNOSING. It also goes slow after a heavy gate run; an 85 s
+   `load_session_results` is cache eviction, not your bug.
 3. Run everything with `~/miniconda3/envs/hypnose-analysis-test/bin/python`. Do not
    install, upgrade or remove packages in any conda env — fixtures are only valid in
    the env recorded in `qc/fixtures/env.json`. If something is missing, tell me.
-4. All work is in the repo: edit files, run the QC tools, commit.
-5. Invoke the QC tools by ABSOLUTE path with `-u` and no `cd` — see "Operating rules"
+4. Invoke the QC tools by ABSOLUTE path with `-u` and no `cd` — see "Operating rules"
    in section 1. The `cd <repo> && python src/...` form is blocked at the permission
    layer and surfaces as a rejected call that looks like a hang.
+5. `~/repos/harris_lab` is itself a commitless git repo. Always use `git -C /full/path`.
+6. `hypnose_helpers` must import nothing from the other two repos.
 
 Workflow:
-- Tell me what you are about to do and what regression result you expect, before doing it.
-- After the change, run `qc/regression.py` (plus `check_imports.py`) and show me the result.
+- Tell me what you are about to do and what gate result you expect, before doing it.
+- After the change, run the gate that can see it and SHOW ME THE FULL OUTPUT — do not
+  truncate it.
 - GREEN → commit. Unexpected RED → stop and diagnose, do not regenerate fixtures to
   make it pass.
 - An intended output change gets fixtures regenerated in the same commit, with the
   +/-/~ diff confirming only the intended fields moved — and ask me first.
-- At the end: update the Progress table in the plan, and commit that with the work.
+- Commit messages: subject + 2-3 short sentences MAX, then gate results, then
+  `Co-Authored-By: Claude Opus 5` (no email). Rationale goes in the chat or the plan.
+- At the end: update the Progress table in the plan, and commit that with the work. Add
+  anything newly settled to `docs/DECISIONS.md`. If you run out of room first, say so
+  plainly and leave an accurate status.
 
 Ask me rather than guessing if a decision is not settled in the plan.
 ```
 
----
+### Context strategy for large phases
 
-## Phase 0 — Decisions to make before touching code
-
-### 0.1 Package name
-
-Repo and distribution become `hypnose-behavior-analysis`; the import
-package becomes **`hypnose_behavior`** (not `hypnose_behavior_analysis` — you type it
-constantly and "analysis" adds nothing inside an import). Repo name and package name need
-not match; `pyproject` already does this today (dist `hypnose-analysis`, package `hypnose`).
-
-### 0.2 What goes in hypnose-helpers
-
-Decide the boundary before extracting, using one test:
-
-> **Would this need to change if you added a third modality?** If yes, it is not a helper.
-
-| belongs in helpers | stays in the modality repo |
-|---|---|
-| figure styles + `save_figure` | metric definitions |
-| data-location resolution *mechanism* | knowledge of what a "session" contains |
-| subject/date selector parsing | harp/aeon readers, EDF readers |
-| session/subject iteration; `sub-XXX/ses-YY_date-…` path conventions | anything importing a modality repo |
-| generic parquet/JSON read-write | |
-
-**Hard constraint: `hypnose_helpers` imports nothing from the family.** Strictly one-way, or
-you get cycles the first time someone is lazy.
-
-**A sharper form of the test**, easier to apply per function:
-
-> **Does it know what the data *is*, or only where it lives and what format it's in?**
-> Knows the data (harp streams, odors, EDF channels, sleep stages, trials) → **stays**.
-> Knows only layout/format (`sub-XXX/` dirs, parquet-vs-CSV, JSON serialisation) → **helper**.
-
-### 0.3 Collapse `io/loaders.py` vs `io/readers.py`  *(blocks Phase 2)*
-
-These two files **both define the same 8 names**, and they have already diverged
-(measured 2026-07-31):
-
-```
-identical   SessionData, TimestampedCsvReader, Video, concat_digi_events
-DIFFERENT   load, load_csv, load_json, load_video
-readers-only: create_unique_series, find_session_roots
-imported by:  loaders.py ×8    readers.py ×2
-```
-
-Four functions sharing a name with different bodies in the same package. This must be
-resolved **before** deciding what moves to helpers — extracting from the wrong copy would
-silently freeze the wrong behaviour.
-
-Work out which `load*` variant is canonical, collapse to one file, delete the other, repoint
-the imports. Regression will tell you whether the two behaved differently. This is a latent
-bug in its own right, independent of the helpers work.
-
-**Risk:** med (two live code paths). **Done:** one definition per name in `io/`; regression
-GREEN (or an understood, deliberate diff).
+If a phase's inputs exceed one context, work file by file and **write the working notes into
+the repo as you go**, then have the implementing chat read those notes instead of the source.
+That is how Phase 4 was done. When the phase closes, extract what is still load-bearing into
+`DECISIONS.md` and archive the rest — a 1,500-line working document is a tax on every
+subsequent chat.
 
 ---
 
-## Phase 1 — Rename  *(~½ day)*
-
-`hypnose-analysis` → `hypnose-behavior-analysis`, `hypnose` → `hypnose_behavior`.
-
-Scope measured 2026-07-31: `hypnose.` ×161, `from hypnose` ×104, `import hypnose` ×8,
-`hypnose-analysis` ×14. Mechanical, but do it **before** the helpers split so the new repo is
-extracted from correctly-named source, and **before** the big refactors so v2.0.0 isn't
-tagged straddling a rename.
-
-Also update: `pyproject.toml` (name, packages.find, scripts), `environment.yml`, README,
-notebooks, `qc/fixtures/env.json` if it records the dist name, and the GitHub repo name.
-
-**Risk:** low (mechanical). **Done:** regression GREEN, `check_imports` clean, no
-`hypnose.`/`from hypnose ` references remain outside historical notes.
-
----
-
-## Phase 2 — Extract `hypnose-helpers`  *(3–4 days total)*
-
-### 2a. The extraction  *(1–2 days)*
-
-New repo, minimal dependencies (roughly `matplotlib`, `pyyaml`, `pandas`), installable on any
-Python the family uses.
-
-**Extract functions, not files.** Almost nothing moves whole — every candidate file splits
-along the 0.2 test. Both repos keep a thinner `io/paths.py` and `io/loading.py` holding only
-what knows the data.
-
-**Inventory — `hypnose-analysis`** (line counts 2026-07-31):
-
-| file | verdict |
-|---|---|
-| `io/paths.py` (165) | **moves whole.** Profile mechanism — `load_profiles`, `get_active`, `set_active`, `get_rawdata_root`, `get_server_root`, `get_derivatives_root`. Pure layout; the cleanest win in either repo. |
-| `io/save.py` (570) | **splits ~90/10.** → helpers: `nature_style`, `poster_style`, `presentation_style`, `use_style`, `_resolve_style`, `_presentation_active`, `nice_x_locator`, `set_size`, `strip_legends`, `_format_span`, `_coerce_list`, `_unique_sorted`, `save_figure`. **Stays:** `_resolve_subject_dir`, `_resolve_session_dir`, `resolve_figure_dir` — they glob `sub-{id:03d}_id-*`, i.e. the behaviour layout. |
-| `io/save_results.py` (491) | **splits.** → helpers: `_json_safe`, `_json_default`, `_normalize_df_for_io` (generic serialisation). **Stays:** `save_session_analysis_results` (takes a classification dict + data/events). `resolve_derivatives_output_dir` / `_find_rawdata_root` are a judgement call — probably helpers if the derivatives convention is family-wide. |
-| `io/loaders.py` (906) | **stays.** `load_all_streams`, `load_experiment_events`, `load_odor_mapping` are harp/aeon and know about odors. |
-| `io/readers.py` (145) | **stays** — after the 0.3 collapse. `find_session_roots` may be generic enough to move. |
-
-**Inventory — `hypnose-somnotate`:**
-
-| file | verdict |
-|---|---|
-| `io/selectors.py` (100) | **moves whole.** Pure parsing, already unit-tested. Supersedes this repo's `_parse_date_input`. |
-| `io/style.py` (62) | **moves whole.** `ensure_style` / `active_style` — this *is* the lazy-application pattern helpers should own (see correction 2 below). |
-| `io/paths.py` (260) | **splits.** → helpers: `normalize_subjid`, `_iter_subject_dirs`, `_find_subject_dir`, `_parse_session_dir`, `_date_in_filter` (generic `sub-XXX` / `ses-YY_date-…` walking). **Stays:** `RecordingRef`, `find_recordings` (globs `.edf`), `get_eeg_root`. |
-| `io/loading.py` (579) | **mostly stays.** → helpers: `load_signal_table` (parquet/CSV dispatch), `list_csv_files`. Everything else is somnotate predictions, stage vectors, `ScoredRef`. |
-| `io/save.py` (113) | **mostly disappears.** `resolve_eeg_figure_dir` stays; the `save_figure` wrapper and `_register_resolver` evaporate once helpers' `save_figure` takes `fig_dir` (correction 1). |
-
-**Two more decisions:**
-
-- **`scripts/set_data_location.py`** moves with `io/paths.py` — it is the CLI for that
-  mechanism, and becomes `hypnose-helpers`' own entry point, usable from any repo.
-- **`configs/data_locations.yml` stays per-repo; only the loader moves.** The mechanism
-  (format, precedence, `set_active`) is shared; the *contents* are per-dataset. Note
-  hypnose-somnotate currently derives its EEG root from the behaviour profile's `server_root`
-  — a coupling worth loosening rather than enshrining in helpers.
-- **Canonical session discovery** — see 2b below. This is the single biggest de-duplication
-  in the whole plan.
-- **Figure provenance** — new capability, see 2c below.
-
-**Two design corrections to make during the move** (both learned from the somnotate integration):
-
-1. **Drop `set_figure_dir_resolver`.** It exists only because `save_figure` hardcodes one
-   dataset's layout, so consumers need a hook to escape it. A helpers library owned by no
-   dataset should take `fig_dir` as a plain argument and let each consumer resolve its own.
-   Keep the hook deprecated during the transition, remove it once both consumers pass `fig_dir`.
-2. **Never mutate `rcParams` at import.** `io/save.py` currently runs
-   `mpl.rcParams.update(nature_style())` at module scope, which collides with somnotate's
-   vendored `configuration.py` writing the same four keys at *its* import — whoever lands last
-   wins. Export the styles and an explicit `use_style()`; let consumers apply it at
-   figure-creation time (hypnose-somnotate's `io/style.ensure_style()` is the pattern).
-
-**Cost note:** 17 files inside this repo import `io/paths` or `io/save`, plus 4 sites in
-hypnose-somnotate. The move is mechanical but touches all of them.
-
-**Risk:** low–med (pure moves + import rewiring). **Done:** regression GREEN in this repo;
-hypnose-somnotate green against helpers; helpers has no family dependencies.
-
-### State at the end of 2a *(2026-08-03)* — read this before starting 2b
-
-Five things differ from what this document assumed when it was written. All are done and
-committed; they change the ground 2b starts from.
-
-1. **`io/paths.py` did NOT "move whole".** Everything in it derived from `get_repo_root()`
-   = `Path(__file__).parents[3]`, so relocating the file silently repointed the config at
-   `hypnose-helpers/configs` (absent) and fell through to a wrong rawdata root — no error.
-   The mechanism moved as `DataLocations(config_dir=…, data_root=…, env_prefix=…)`; each
-   repo instantiates one and re-exports the bound methods. **Any later "move whole" in this
-   plan deserves the same suspicion: check for `__file__`-derived state first.**
-2. **hypnose-somnotate no longer imports the behaviour repo at all.** It owns
-   `configs/data_locations.yml` (EEG profiles, `env_prefix: HYPNOSE_EEG`) and installs with
-   hypnose-helpers alone. The plan's "4 sites in hypnose-somnotate" was correct at the time;
-   it is now genuinely 0.
-3. **`rcParams` are no longer mutated at import**, and `set_figure_dir_resolver` is gone —
-   both design corrections from 2a are complete. Two notebooks (`sing_rew_visualization`,
-   `trial_classification`) still rely on the old implicit styling and need a `use_style()`
-   call; deliberately deferred.
-4. **hypnose-helpers exists** at `hypnose/hypnose-helpers` with `io/{paths,selectors,
-   serialize}`, `viz/{styles,save}`, `cli/set_data_location`. It imports nothing from the
-   family — verify that still holds after every 2b move.
-
-**Environment:** hypnose-helpers must be `pip install -e`'d into any env that runs either
-repo. As of 2026-08-03 only `hypnose-analysis-test` has it; `hypnose`, `hypnose-somnotate`,
-`sleap` and `sleap-2` might still need it. To be done by user. 
-
-### 2b. Canonical session discovery  *(~1 day — the biggest single de-duplication)*
-
-**Re-measured 2026-08-03** (the counts below supersede the pre-rename figures further down —
-those line numbers are stale after the rename and the 2a extractions):
-
-| | plan said | actually, now |
-|---|---|---|
-| session-directory lookups | 11 | **17** (16 in the behaviour repo, 1 in somnotate) |
-| `sub-NNN` zero-pad formatting | "4+ implementations" | **66 sites** |
-| files touched by a full repoint | — | **15** |
-
-The `sub-NNN` figure is the surprising one: `f"sub-{str(subjid).zfill(3)}"` appears 66 times,
-mostly in `visualization/`. Most are *label* formatting rather than directory discovery, so
-they do not all become `find_sessions()` calls — but they do all want the same
-`normalize_subjid()` helper, and deciding which is which is part of the phase.
-
-**The layout contract is identical everywhere** — behaviour and EEG both use
-`sub-0XX_id-XXX/ses-0XX_date-YYYYMMDD/<modality>/`. Yet "find the session directory for this
-subject + date" is currently implemented **11 times independently** (measured 2026-07-31):
-
-```
-HA visualization_utils.py:121      HA metric_analysis/metrics_utils.py:50
-HA movement_analysis_utils.py:116  HA metric_analysis/metrics_utils.py:189
-HA movement_analysis_utils.py:241  HA qc/verify_scripts.py:66
-HA io/save.py:379                  HA qc/_common.py:130
-HA io/loaders.py:218               HA debug/debug.py:44
-HS io/save.py:37
-```
-
-Plus **4+ separate implementations** of `sub-*_id-*` subject discovery (`io/save.py:371`,
-`utils/helpers.py:82`, `metrics_utils.py:516`, `trial_classification/run.py:460`) and
-`sub-{n:03d}` formatting scattered throughout both repos.
-
-**One function replaces all of them:**
-
-```python
-find_sessions(subjid, *, ses=None, date=None,
-              ses_range=None, date_range=None) -> list[SessionRef]
-```
-
-`SessionRef` carries `subject`, `subject_dir`, `ses` (int), `date` (str), `path`, and
-`session_index`. Selection is forgiving in the same way the CLI already is —
-`66` / `"066"` / `"sub-066"`, single values, lists, `"66,67"`.
-
-**`ses` and `date` are interchangeable selectors.** Both resolve to the same session, because
-the directory name carries both. `find_sessions(66, ses="03-09")` works; so does
-`find_sessions(66, date_range="20260707-20260718")`. This is what makes
-`sub 66 ses 03-09` usable across every function in the family.
-
-**Duplicate `ses` within a subject raises**, naming both candidate directories. Silently
-taking the first is exactly the failure that surfaces months later as an unexplained result.
-Only `sub-036` (`ses-60` twice, known human error) triggers this today; once fixed it never
-fires.
-
-#### `session_index` — the plotting ordinal
-
-`ses` is a good *identifier* but **not** a gap-free ordinal. Measured across all 48 subjects /
-2045 sessions:
-
-| | subjid ≤ 35 | subjid ≥ 36 |
-|---|---|---|
-| duplicates / out-of-order | 8 subjects | **1** (`sub-036`, known) |
-| **gaps in `ses` numbers** | 6 subjects | **8 subjects (29%)** |
-
-Gaps are irrelevant for selection — `ses-38` is still unique whether or not `ses-37` exists —
-but they break `ses` as an x-axis. `sub-038, 045, 046, 047, 048, 057, 058, 062` all have holes,
-and these are *current* subjects, not legacy.
-
-So helpers also provides:
-
-```python
-session_index(subjid, date_or_ses) -> int   # rank by date within subject: 1..N, gap-free
-```
-
-Use `ses`/`date` to *select*, `session_index` to *plot*. They answer different questions and
-neither replaces the other. Add `session_index` as a column at load time so plotters never
-recompute it.
-
-**Do this in the same pass as collapsing the 11 sites.** Adding a second lookup key to one
-resolver costs about an hour; retrofitting it to 11 call sites later costs days.
-
-**Done:** one session-discovery function in helpers; all 11 date-lookup sites and all subject-
-discovery sites repointed; `ses`, `date`, and both range forms accepted; duplicate `ses`
-raises with both paths named; `session_index` available and gap-free; regression GREEN.
-
-### State at the end of 2b *(2026-08-04)* — read this before starting 2c or 5
-
-1. **The API is bound, not free-floating.** `hypnose_helpers.io.layout.SessionLayout` takes
-   the root as a **callable**, and each repo binds its own:
-   `hypnose_behavior.io.layout` exposes `rawdata` and `derivatives`; there is deliberately
-   **no bare `find_sessions()`** defaulting to one tree, because rawdata holds every
-   recorded session and derivatives only the analysed ones. Passing a resolved `Path`
-   would freeze the root and break `qc/_common`'s per-session redirect — the same
-   `__file__` trap as 2a, one layer along.
-
-2. **`session_index` is a selector, never a plot axis.** It is on every `SessionRef`,
-   gap-free and correct, and since 2026-08-04 it is also a **selector**:
-   `find_sessions(62, index_range=(1, 9))` — "this animal's first nine sessions",
-   comparable across cohorts recorded months apart, which `ses` cannot express (see
-   Phase 5). Use it for that.
-
-   The 8 plotters were *not* retrofitted onto it as an **x-axis**, by decision: they
-   count `enumerate(ses_dirs, 1)` **within the filtered selection**, so every plot's x
-   starts at 1 no matter which sessions were requested. `session_index` is the animal's
-   full-history rank, so a filtered call would plot at x=12,27,33 with a mostly empty
-   axis. The plan's original premise — that gaps in `ses` break the x-axis — did not
-   apply: no plotter ever used `ses` as x. **Do not "finish the retrofit" in Phase 5.**
-
-   *Selection and positioning are different jobs.* `index` answers "which sessions";
-   `enumerate` answers "where on the axis". Conflating them is what would make the plots
-   look wrong.
-
-   **A caveat on the gap statistics quoted in this document.** The "29% of current
-   subjects have gaps in `ses`" figure was measured 2026-08-03 and is already dated: the
-   gaps are mostly in retired subjids, and recent subjects are contiguous bar one. So
-   `ses` and `index` usually agree — which is precisely why the difference must stay
-   explicit rather than being papered over. Re-measure before relying on that number.
-
-3. **The two central helpers absorbed most of the work.** `utils/helpers._iter_subject_dirs`
-   (21 call sites) and `_filter_session_dirs` (36) became thin wrappers, so 57 sites needed
-   no edit; only the ~22 that bypassed them were touched. `_filter_sessions` is the new
-   `SessionRef`-returning form — prefer it in new code.
-
-4. **Ambiguity now raises.** Duplicate `ses`, duplicate date, or two `sub-NNN_id-*` dirs
-   raise `DuplicateSessionError` naming both paths. Consequence: a batch run over *all*
-   subjects hard-fails on `sub-036` (duplicate `ses-060`) instead of skipping it. Tolerant
-   callers pass `missing_ok=True` or catch.
-
-5. **`qc/_common.py` and `qc/verify_scripts.py` keep their own `**/ses-*_date-*` glob**,
-   deliberately: a harness must not share an implementation with the code it validates.
-   They are the only remaining hand-rolled session lookups, and that is correct.
-
-6. **Of the 66 `sub-NNN` sites, ~26 were directory tokens** (now `normalize_subjid`); the
-   other ~40 are display labels (`Subject 040`, `Sub 040`) and QC fixture filenames, left
-   alone. The count was never 66 lookups.
-
-**Testing note:** regression cannot see any of this — it fingerprints `trial_data` and the
-metrics dict, not session ordering, selectors, or `session_index`. The real guards are
-`hypnose-helpers/tests/test_layout.py` (20 tests, mount-free, runs without pytest) and a
-throwaway old-vs-new parity harness (93 comparisons) that caught two silent divergences
-before they landed: `dates=[]` flipping from "no sessions" to "all sessions", and
-`iter_subjects` widening `sub-*_id-*` to `sub-*`.
-
-### 2c. Embedded figure provenance  *(~½–1 day, new capability)*
-
-Goal: open any saved PDF months later and recover **what it shows and how it was made**, from
-the file itself — no sidecar, still one PDF.
-
-**Metadata to embed:** creation timestamp · git commit (+ dirty flag) · package version ·
-subjids · dates/session ids · the function that made the figure and the file it is defined in ·
-the parameters it was called with.
-
-**Verified constraints** (tested 2026-07-31, matplotlib PDF backend):
-
-- The PDF info dictionary accepts **only** `Title`, `Author`, `Subject`, `Keywords`, `Creator`,
-  `Producer`, `CreationDate`, `ModDate`, `Trapped`. Custom keys are **silently dropped** with
-  `UserWarning: Unknown infodict keyword`. `CreationDate` wants a `datetime`, not a string.
-- So: put a **JSON blob in `Subject`**, and a short human-readable summary in `Title`
-  (e.g. `"accuracy sub-040,045,066 20251124–20260203"`). A 244-char blob wrote fine and
-  survived round-trip; a realistic provenance record serialises to ~200 chars.
-
-**Auto-capture works** — `inspect.stack()` + `inspect.getargvalues(frame)` recovers the calling
-function, its file/lineno, its named arguments *and* its `**kwargs` extras, with no effort at
-the call site. Prototyped output:
-
-```json
-{"function": "plot_accuracy", "file": "visualization_utils.py", "lineno": 28,
- "params": {"df": "<DataFrame 50x2>", "subjids": [40,45,66],
-            "dates": ["20251124","20260203"], "window": 30,
-            "kind": "line", "ax": null, "color": "red", "alpha": 0.5}}
-```
-
-**Where the work actually is:** not the plumbing — the **value summariser**. Arguments must
-become JSON-safe without exploding: scalars/str pass through (truncated), list/tuple/set/dict
-truncate at ~10 items, DataFrame/Series/ndarray become descriptors (`<DataFrame 50x2>`,
-`<ndarray (100,3) float64>`), anything else becomes `<TypeName>`. Expect a few more cases from
-real call sites; budget most of the day here.
-
-**Three design points:**
-
-1. **Frame-walking is fragile.** It takes the first frame not on a skip-list — but after
-   Phase 5 introduces thin plotter primitives the real function may be several frames up.
-   Give `save_figure` an explicit `provenance=` argument that overrides introspection, and
-   treat auto-capture as the fallback.
-2. **Record dirty state.** A bare commit hash on a dirty tree points at code that is not what
-   ran. Append `-dirty` when `git status --porcelain` is non-empty.
-3. **Ship the reader too.** Writing needs no new dependency; reading the info dict needs
-   `pypdf` or `pikepdf`. Provide `read_figure_metadata(path) -> dict` with that dependency
-   **optional**, or the metadata is write-only in practice.
-
-**Share one provenance helper with the manifest work.** Phase 7's manifest also wants git
-commit + package version — write `provenance()` once in helpers and call it from both, rather
-than two implementations that drift.
-
-**Done:** every `save_figure` PDF carries recoverable provenance; `read_figure_metadata`
-round-trips it; the same helper feeds the manifest.
-
-### State at the end of 2c *(2026-08-04)* — read this before Phase 5 or 7a
-
-0. **`function` is only ever "the nearest frame we did not skip".** In real plotting code
-   that is frequently a *local closure* — `movement_analysis_utils` has four nested
-   `_save_fig` helpers, and a figure saved through one reports `function: _save_fig`
-   rather than the analysis that made it. Found by reading an actual saved figure, not
-   by testing. The record therefore also carries **`chain`**, the enclosing function
-   names, which is what makes the real caller recoverable. Read `chain` before `function`.
-
-1. **A thin `save_figure` wrapper must skip its own module, or it names itself.** Both
-   consumer repos wrap helpers' `save_figure`; the frame walk stops at the *first*
-   non-helpers frame, which is the wrapper. Capturing inside the wrapper does not fix
-   this — `capture_call()` still returns the wrapper's own frame. The fix is
-   `provenance(skip_modules=(__name__,))`, which both wrappers now pass. **Phase 5's
-   plotting primitives will reintroduce this**: once `plot_accuracy` calls `line(ax, …)`
-   which calls `save_figure`, the primitive's module needs skipping too, or pass
-   `provenance=` explicitly. There is a regression test for the wrapper case.
-
-2. **The record is ASCII-only, deliberately.** matplotlib writes a PDF string containing
-   any non-ASCII character as UTF-16BE with a BOM. The truncation markers were `…`,
-   which silently switched the encoding and broke the reader for exactly the records
-   large enough to need truncating. Markers are now `...`, `json.dumps` uses
-   `ensure_ascii=True`, and the reader honours a BOM anyway.
-
-3. **Reading needs no dependency.** The plan expected `pypdf` and worried the metadata
-   would be "write-only in practice". matplotlib writes the info dictionary
-   uncompressed, so a ~15-line stdlib parser recovers it; `pypdf` is used when present
-   but is not required. The `pdf` extra remains for PDFs written by other tools.
-
-4. **`package_version` needs `packages_distributions()`.** The import package and the
-   distribution differ here (`hypnose_behavior` ← `hypnose-behavior-analysis`), so
-   guessing by swapping `_` for `-` returns None. Worth remembering in Phase 7a, which
-   wants the same version string in `manifest.json`.
-
-5. **Cost is ~40 ms per saved figure**, almost all of it the two `git` calls. Not cached:
-   a stale commit hash in a provenance record is worse than the milliseconds.
-
-6. **`read_figure_metadata` returns `{}` for a figure with no provenance**, so
-   `if not read_figure_metadata(p)` is meaningful. matplotlib stamps its own `Creator` on
-   every PDF, and returning that alone would have made the emptiness test useless.
-
-**Phase 7a is now mostly done in advance:** call
-`hypnose_helpers.provenance.provenance()` and put `commit`/`version` in the manifest.
-
----
-
-## Phase 3 — Re-baseline QC  *(~1 hour, do not skip)*
-
-41 commits landed between the previous plan being written and 2026-07-31; fixtures date from
-3 July. Run `qc/regression.py` **before any refactor**. If it is already RED from accumulated
-drift, regenerate deliberately and commit that separately — otherwise every subsequent diff is
-measured against a stale baseline and you lose the signal the whole plan depends on.
-
----
-
-## Phase 4 — Metrics: single source of truth  *(the big de-bloat — do this before trial classification)*
-
-### 4a. Strip `visualization/` of all metric calculation
-
-`visualization_utils.py` both **imports** `metric_analysis.metrics_utils` **and
-re-defines/recomputes metrics** (~27 metric/accuracy/rate-ish functions).
-
-1. Audit every function in `visualization/` — **all 16,044 lines, not just
-   `visualization_utils.py`**; `movement_analysis_utils.py` (4,497) needs identical treatment.
-   Does it *compute a metric* or only *plot*?
-2. Any metric computed inside `visualization/` **moves into `metric_analysis`** (the
-   appropriate definitions file from 4b) — add it if it doesn't exist yet (lose no metric); if
-   it recomputes something `metric_analysis` already has, delete the recompute and call the
-   canonical one.
-3. `visualization/` then only **fetches** (reads the saved metric, or calls the
-   `metric_analysis` function) and **plots**. No metric math remains.
-
-**Why this comes first:** `visualization_utils.py` has **88 functions, median 17 lines** — it
-is not uniformly bloated. The mass is **16 functions over 200 lines** (longest 483), and they
-are long because they do data prep *and* metric computation *and* plotting in one. Stripping
-the metric math is what actually shortens them. It is also lower-risk than the trial-classification
-work and a bigger line win, so it proves the QC loop before the risky phase.
-
-### 4b. Modularise `metric_analysis` — plumbing apart from definitions
-
-`metrics_utils.py` (1,839 lines) mixes I/O, orchestration, merging, saving and definitions.
-Split so `metric_analysis/` mirrors `trial_classification/`:
-
-- **Plumbing out:**
-  - `load_session_results`, `parse_json_columns` → **`io/`** (pairs with `save_results.py`).
-    *Coordinate with Phase 7* — `parse_json_columns` shrinks or disappears once blob columns
-    are flattened.
-  - `run_all_metrics`, `batch_run_all_metrics_with_merge` → **`metric_analysis/run.py`**.
-  - `pool_results_dicts` → **`metric_analysis/merge.py`**.
-  - `save_merged_metrics_txt` → **`metric_analysis/summary.py`**;
-    `merged_results_output_dir`, `merged_metrics_filename` → **`io/`** (all derivatives-path
-    conventions in one place).
-- **Definitions split by type** into `metric_analysis/metrics/`. **Propose a grouping and get
-  it confirmed before moving anything.** Each file holds short, single-purpose functions. Add
-  a small **registry** (list, or a `@metric` decorator) so `run_all_metrics` discovers them —
-  then adding a metric is a one-file change.
-
-**The registry's precondition is settled — 4a delivers it.** All 28 canonical metrics were
-`f(results) -> one session-level number` printing to stdout; a registry over that shape does
-not work, and it was also why `visualization/` re-derived the same formulas at other
-granularities (the audit's `VARIANT` class). **Decision 2026-08-05: every metric gets a pure
-`f(frame) -> value` core plus a thin `f(results)` wrapper, done in 4a** — see "D0 resolution"
-in `docs/metric_audit.md`. The registry can therefore assume that shape, with one
-qualification: the signature is **not uniform**, it has four tiers (trial-reducible;
-`position_data`-grouped; `reference`-normalised; and the non-initiated set, which is being
-removed). The registry needs to declare which frame each metric consumes.
-
-**Risk:** med for 4a (map every recompute to a canonical metric), low for 4b (pure moves →
-metric values unchanged, regression GREEN). **Done:** no metric math in `visualization/`;
-`metrics_utils.py` split; regression + a metrics-parity check GREEN.
+## Phases 0-4 — done
+
+Summarised in the Progress table above, with commit ranges. What they decided that still
+binds later work is in `docs/DECISIONS.md`, with the measurements it rests on; the narrative
+is in `git log`.
+
+- **Phase 0** — package name, helpers boundary, `loaders`/`readers` collapse, QC re-baseline.
+- **Phase 1** — the rename.
+- **Phase 2** — `hypnose-helpers` extracted (2a), canonical session discovery (2b), embedded
+  figure provenance (2c).
+- **Phase 3** — superseded by Phase 0.
+- **Phase 4** — metrics single source of truth: 4a stripped all metric math out of
+  `visualization/`, 4b split `metrics_utils.py` into `metric_analysis/` proper with a registry.
+
+**Still open from Phase 1, needing the user:** five conda envs still need `pip install -e .`
+after the folder rename (`hypnose`, `hypnose-analysis`, `hypnose-somnotate`, `sleap`,
+`sleap-2`). Only `hypnose-analysis-test` was repointed. `hypnose-helpers` must also be
+`pip install -e`'d into any env that runs either repo.
 
 ---
 
 ## Phase 5 — Visualization: primitives, then thin plotters
 
-Only meaningful **after 4a**, since the metric math has to be out before real plotting
-duplication is visible.
+**Work list: `docs/phase5_brief.md`** — the `FETCH`, `PREP` and `DISPLAY-AGG` inventory
+extracted from the Phase 4 audit and re-measured against `cbc7059`.
 
-### Two defects 4a found and deliberately did not fix — carry them into this phase
+`visualization/` is 15,124 lines across 7 files. 4a took the metric math out; what is left is
+data prep, axis construction and styling.
 
-Both surfaced while wiring `qc/plot_regression.py` up to the remaining plotters (2026-08-06).
-Neither is metric math, so neither belonged in 4a; both are exactly Phase 5's subject matter,
-and both are currently worked *around* in the gate rather than fixed in the source.
-
-1. **`_style_log_yaxis` crashes under default rcParams.** It does
-   `float(plt.rcParams.get("ytick.labelsize", 12))`, and matplotlib's default for that key is
-   the **string `"medium"`** — so it raises `ValueError: could not convert string to float`
-   unless the repo style has been applied first. `plot_iti_over_time` and
-   `plot_latency_over_time` are therefore broken in any process that has not called
-   `use_style(...)`, which includes a plain notebook or script. The gate now calls
-   `use_style("nature")` in its child so the two are testable at all; before that they raised
-   identically in both trees and read as *ungated*, not as green. **Fix in Phase 5:** resolve
-   the tick size through matplotlib's own font-size machinery rather than `float()`, or make
-   the style a precondition the plotters assert. This is a good canary for the wider issue —
-   how many other plotters silently assume the style?
-
-2. **`pred_seq_utils._ordered_groups` iterates a `set`.** It is fed `all_groups = set()`
-   (three sites), so any group label outside the hard-coded `preferred` list is drawn in
-   **string-hash order** — which varies between processes. Those figures are not reproducible
-   run to run: measured, two runs of the *identical* tree disagreed on 340 drawn values. The
-   gate pins `PYTHONHASHSEED=0` to make its diff meaningful; that hides the defect, it does not
-   fix it. **Fix in Phase 5:** order the residual labels deterministically (sorted, or
-   first-seen). Note this *is* an output change — it reorders series and legends — so it wants
-   its own commit and a look at the affected figures.
-
-**Measured primitive usage across `visualization/` (2026-07-31):**
+**Measured primitive usage across `visualization/`:**
 
 ```
 .plot(  64     .scatter( 69     .errorbar( 20     rolling( 20
@@ -738,7 +287,8 @@ and both are currently worked *around* in the gate rather than fixed in the sour
 .boxplot( 0    .hist( 0    .barh( 0    .bar( 1
 ```
 
-One thing follows. The largest real repetition is **axis decoration**: 53 legends and 55 axis labels.
+One thing follows. The largest real repetition is **axis decoration**: 53 legends and 55 axis
+labels — not plotting.
 
 **Target shape:**
 
@@ -751,22 +301,62 @@ rolling_mean(series, window)          # + SEM/CI band helper
 style_axis(ax, xlabel=…, ylabel=…, legend=…, title=…)
 
 # per-metric plotters stay thin and explicit
-plot_accuracy(ses, kind="line")   ->  load_metric(...) + primitives
+plot_accuracy(ses, kind="line")   ->  registry call + primitives
 ```
-These thin helpers should live in extra visualization helper py files, so they are shared across
-visualization code and can be re-imported in different files. 
+
+These thin helpers live in extra `visualization/` helper modules, so they are shared across
+files and can be re-imported.
 
 **Deliberately avoid** a single `plot_metric(kind, ses)` dispatcher — it accumulates kwargs
 for every plot type it supports and becomes a god-function. Thin primitives plus one small
 function per metric give the same ergonomics without that.
 
-#### Thread the session selectors through the plotters *(decided 2026-08-04)*
+### Two defects 4a found and deliberately did not fix
+
+Both surfaced while wiring `qc/plot_regression.py` up to the remaining plotters. Neither is
+metric math, so neither belonged in 4a; both are exactly Phase 5's subject matter, and **both
+are currently worked *around* in the gate rather than fixed in the source.**
+
+1. **`_style_log_yaxis` crashes under default rcParams.** It does
+   `float(plt.rcParams.get("ytick.labelsize", 12))`, and matplotlib's default for that key is
+   the **string `"medium"`** — so it raises `ValueError: could not convert string to float`
+   unless the repo style has been applied first. `plot_iti_over_time` and
+   `plot_latency_over_time` are therefore broken in any process that has not called
+   `use_style(...)`, which includes a plain notebook or script. The gate now calls
+   `use_style("nature")` in its child so the two are testable at all; before that they raised
+   identically in both trees and read as *ungated*, not as green. **Fix:** resolve the tick size
+   through matplotlib's own font-size machinery rather than `float()`, or make the style a
+   precondition the plotters assert. Good canary for the wider issue — how many other plotters
+   silently assume the style?
+
+2. **`pred_seq_utils._ordered_groups` iterates a `set`.** It is fed `all_groups = set()`
+   (three sites), so any group label outside the hard-coded `preferred` list is drawn in
+   **string-hash order**, which varies between processes. Those figures are not reproducible run
+   to run: measured, two runs of the *identical* tree disagreed on 340 drawn values. The gate
+   pins `PYTHONHASHSEED=0` to make its diff meaningful; that hides the defect, it does not fix
+   it. **Fix:** order the residual labels deterministically (sorted, or first-seen). This **is
+   an output change** — it reorders series and legends — so it wants its own commit and a look
+   at the affected figures.
+
+### Load vs compute — plotters stop reading `metrics_*.json`
+
+Decided 2026-08-07, measured before deciding. **The decision, the numbers, why a provenance
+stamp was rejected, and the legacy-reader trap are in `DECISIONS.md` §5.** Items 1 and 2 of its
+sequencing list are this phase's share:
+
+1. Route the three dual-sourced quantities (`decision_accuracy`, `avg_response_time`,
+   `FA_avg_response_times`) through one path. **Pick compute.**
+2. Make `position_data` lazy, then convert the remaining `_ensure_metrics_json` call sites.
+
+It is settled and measured — do not re-derive it.
+
+### Thread the session selectors through the plotters *(decided 2026-08-04)*
 
 Public plotting functions currently accept **`subjids` and `dates` only**. Phase 2b built
 three interchangeable selectors in `hypnose_helpers.io.layout`; the plotters expose none of
 them. Widening that interface is a Phase 5 job, because `dates` reaches ~36
-`_filter_session_dirs` call sites and changing it earlier would touch files 4a/5 rewrite
-anyway.
+`_filter_session_dirs` call sites and changing it earlier would touch files this phase
+rewrites anyway.
 
 **Accept all three, and pass them straight through:**
 
@@ -786,7 +376,7 @@ form to build on; `_filter_session_dirs` (paths only) is the legacy shim.
 
 | given | result |
 |---|---|
-| all of `dates` / `ses` / `index` are `None` | **every session for the subject** — unchanged from today's `dates=None` |
+| all of `dates` / `ses` / `index` are `None` | **every session for the subject** — unchanged from today |
 | exactly one | filter on that key |
 | two or more | **intersection** — a session must satisfy *all* of them |
 | `[]` (empty list) rather than `None` | **matches nothing** |
@@ -814,224 +404,19 @@ one with gaps, and one whose numbering carried over from an earlier protocol —
 `index_range=(1, 9)` returns **9 each**, spanning cohorts months apart. A subject numbered
 from `ses-038` yields *nothing* for `ses 1-9` and does not error.
 
-Most current subjects are contiguous (the gaps are mostly in retired subjids — see the note
-in "State at the end of 2b"), so `ses` usually behaves like `index`. That is exactly why the
-distinction has to be explicit: it works until the one animal where it does not.
+Most current subjects are contiguous, so `ses` usually behaves like `index`. That is exactly
+why the distinction has to be explicit: it works until the one animal where it does not.
 
-**Do not make `index` the plotting x-axis.** It is the animal's full-history rank, so a
-filtered call would plot at x=12,27,33. The x-axis stays `enumerate(…, 1)` over the selected
-sessions — see "State at the end of 2b" §2. `index` selects; it does not position.
+**`index` selects; it does not position** — see `DECISIONS.md` §8. Do not make it a plot x-axis.
 
-**Risk:** low–med (plot-only changes don't affect the regression fingerprint, which covers
-`trial_data` + metrics — visual output needs eyeballing). **Done:** no metric math in
-`visualization/`; primitives used by all plotters; no plot function over ~100 lines; every
-public plotter accepts `dates`/`ses`/`index` and their range forms; and no plotter reads
-`metrics_*.json` (see "Load vs compute" immediately below).
-
-### Load vs compute — decided 2026-08-07, measured before deciding
-
-**Question raised after 4b:** only 25 of the 43 registered metrics are reported and saved, so
-some plotters call a metric function instead of reading `metrics_*.json`. Should everything be
-saved, so `visualization/` only ever loads?
-
-**No — that end state is unreachable, and the cache is buying less than it looks.**
-
-**1. It cannot be reached.** Three unreported metrics take a `window`, two take an `fa_types`
-filter. Those are properties of the *figure*, not of the session: there is no value to save,
-and freezing one arbitrary window would be a lie dressed as an artifact. Nine more return
-per-trial or per-poke tables (`poke_durations` is **739 rows for one session**), which do not
-belong in a summary JSON at all — they belong with Phase 7b's `position_data` side-table. What
-is left is one genuinely missing parameter-free scalar, `false_response_ratio`.
-
-**2. The cache saves the cheap part.** Measured warm on sub-040 20251124:
-
-| path | per session |
-|---|---|
-| read `trial_data.parquet` (205 KB) | 6.7 ms |
-| `build_position_data` → 1022 rows | 21.9 ms |
-| **compute total** | **29 ms** |
-| read `metrics_*.json` (17 KB) | 4.2 ms |
-
-7x the time and 12x the bytes — but both paths already paid the expensive part.
-`_ensure_metrics_json` receives an **already-resolved** `results_dir`, so the caller's walk over
-the mount happened either way, and that walk is what costs seconds (measured: 14.6 s for one
-`derivatives.find_session` on a cold mount, against 0.2 s on rawdata). The cache saves one small
-file read and 25 ms of CPU, not the thing that hurts.
-
-**3. The real defect is not the unreported metrics — it is dual sourcing.**
-`decision_accuracy`, `avg_response_time` and `FA_avg_response_times` are each obtained **both**
-ways in `visualization/`: read from the saved JSON at some sites, computed live at others. Two
-plots can therefore show the same quantity and disagree, because one reflects whatever code
-last analysed that session. The lag is real and demonstrable — every `metrics_*.json` on the
-server still holds the **pre-finding-3** encoding, which is why `plot_regression` stayed green
-through the legacy reader. Today it is harmless (finding 3 changed encoding, not values, and no
-plotter reads the keys 4a step 6 deleted), but the mechanism is live and silent.
-
-**4. A provenance stamp was considered and rejected.** Stamping the JSON with the commit that
-wrote it invalidates the cache on every unrelated commit — a docstring fix would force a
-re-analysis of the whole server. The correct key would be a hash of the *metric definitions*
-plus an mtime check against `trial_data.parquet` (re-running classification alone also
-invalidates them). That works, but it is machinery in service of a cache worth 25 ms.
-
-**Decision: `metrics_*.json` / `.txt` stop being a plotting input.** They stay as the export and
-the record of an analysis run — that is what they are good at. Plotters compute. This deletes
-the staleness problem rather than managing it: no stamp, no invalidation rule, no backfill, and
-no way for two plots to disagree.
-
-**What makes this newly practical is 4b's registry.** The reason a plotter read the saved dict
-was that wanting "the metric named X" had no other expression. `REGISTRY[name].call(results)` is
-now exactly that, and returns the same shape the saved key holds.
-
-**Two things keep the cost off the table:**
-
-- **Make `position_data` lazy.** It is 22 of the 29 ms and most metrics never touch it, yet
-  `load_session_results` builds it unconditionally. Build it on first access and the compute
-  path drops to ~8 ms against the cache's 4.2 ms — the same order, not 7x. Small, self-contained,
-  gated by `regression.py`.
-- **If a cold cross-subject figure ever is slow, cache in memory, not on disk.**
-  `utils/helpers._get_from_cache` / `_update_cache` already exist. A process-level cache cannot
-  go stale across code versions because it dies with the process; that is strictly the better
-  cache.
-
-**The caveat, and why this is not a silent cleanup:** switching a plotter from load to compute
-*can* move a curve, for any session whose saved JSON predates a metric change. That is the
-staleness surfacing, which is the point — but it makes this a `plot_regression`-gated change
-with a deliberate look at the diffs.
-
-**Sequencing** *(none of it urgent; Phase 5 is the phase that touches every plotter anyway)*:
-
-1. **Phase 5** — while repointing plotters, route the three dual-sourced quantities through one
-   path. Pick compute.
-2. **Phase 5 or 7b** — lazy `position_data`, then convert the remaining JSON readers
-   (`_ensure_metrics_json`'s 6 call sites).
-3. **Phase 7b** — decide where the nine per-trial tables live; they ride with the `position_data`
-   side-table it already plans to write.
-4. **Anytime** — `false_response_ratio` into `run.REPORT` if it should be saved. It needs a
-   `*_session` wrapper and is a deliberate output change (a new key on every session, so
-   `--generate` in its own commit).
-
-### Handoff prompt — Phase 5 *(written 2026-08-07, 4b complete)*
-
-**Phase 4b is done.** `metrics_utils.py` is gone: `metric_analysis/` is `run` / `merge` /
-`summary` / `registry` / `frames` / `resolvers` plus `metrics/` — one module per behavioural
-construct — and `io/results.py` owns loading a session's saved results. `visualization/`
-computes no metrics and now imports them from those modules.
-
-Paste this into a fresh chat:
-
-```
-I'm continuing a planned restructure of hypnose-behavior-analysis
-(/Users/joschua/repos/harris_lab/hypnose/hypnose-behavior-analysis), on branch
-hypnose-restructure. Use Opus 5 at high effort — this phase is judgement about what a
-figure should look like, on top of moves that must not change one.
-
-This chat: **Phase 5 — visualization primitives, then thin plotters.** Do NOT start Phase 6,
-and do NOT start the Phase 10 `visualization_utils.py` split (it is proposed, not scheduled;
-if Phase 5 makes it unavoidable, say so and stop).
-
-## Read these first, targeted, not cover to cover
-
-1. docs/restructure_2_plan.md → section 1 (QC safety net + operating rules) and the whole
-   Phase 5 section. Three subsections in it are the actual work orders: **"Two defects 4a found
-   and deliberately did not fix"**, **"Thread the session selectors through the plotters"**, and
-   **"Load vs compute — decided 2026-08-07"** (items 1 and 2 of its sequencing list are Phase 5
-   work; it is measured and settled, so do not re-derive it). Skip the completed-phase
-   narratives.
-2. docs/metric_audit.md → **"The gate the audit said did not exist"** (what
-   `qc/plot_regression.py` is, why Phase 5 depends on it, and the two things it works
-   *around* rather than fixes), and **"Phase 4b — the split as built"** for where every
-   metric now lives.
-3. `src/hypnose_behavior/metric_analysis/metrics/__init__.py` — the map of the metric
-   modules, in one screen.
-
-## What Phase 5 is
-
-`visualization/` is 15,101 lines across 7 files. 4a took the metric math out; what is left is
-data prep, axis construction and styling — and the audit measured the real repetition:
-**53 `.legend(` and 55 `.set_xlabel(`**, i.e. axis decoration, not plotting. The plan's target
-shape is thin primitives (`line`, `scatter`, `boxplot`, `rolling_mean`, `style_axis`) in
-shared helper modules, plus one small explicit function per metric. **Deliberately not** a
-`plot_metric(kind, ses)` dispatcher — the plan rejects it by name as a god-function.
-
-Also in scope, decided 2026-08-07: **plotters stop reading `metrics_*.json`** and compute
-through the registry instead. Items 1 and 2 of "Load vs compute" are this phase's share; it is
-measured and settled, including why a provenance stamp was rejected.
-
-Also in scope, decided 2026-08-04: every public plotter should accept `dates` / `ses` /
-`index` and their range forms and forward them to `find_sessions`, which already takes exactly
-those six keywords. Read the semantics table before implementing — they **combine** (they are
-not "pick one"), and `None` vs `[]` is load-bearing.
-
-## The two defects to fix, both currently worked around in the gate
-
-1. **`_style_log_yaxis` crashes under default rcParams** — `float(plt.rcParams["ytick.labelsize"])`
-   on matplotlib's default `"medium"`. `plot_iti_over_time` and `plot_latency_over_time` are
-   broken in any process that has not called `use_style(...)`. The gate calls `use_style("nature")`
-   so they are testable at all. Fixing it is a canary: how many other plotters assume the style?
-2. **`pred_seq_utils._ordered_groups` iterates a `set`**, so labels outside its hard-coded
-   `preferred` list are drawn in string-hash order — two runs of the *identical* tree disagreed
-   on 340 drawn values. The gate pins `PYTHONHASHSEED=0`, which hides it. Fixing it **reorders
-   series and legends**, so it is an output change: its own commit, and look at the figures.
-
-## Hard constraints
-
-- /Volumes/harris is STRICTLY READ-ONLY. Never write, move, rename, chmod or delete anything
-  under it. Do not explore it — no browsing, no inventorying, no find over the mount. To learn
-  about a session, call the pipeline's own loaders for specific subject/date pairs. If every
-  session fails with FileNotFoundError or "No experiment runs found", that is a dropped or
-  weak mount, not a code regression. CHECK THE MOUNT BEFORE DIAGNOSING. (It also goes *slow*
-  after a heavy gate run — an 85 s `load_session_results` is cache eviction, not your bug.)
-- Run everything with ~/miniconda3/envs/hypnose-analysis-test/bin/python. Do NOT install,
-  upgrade or remove packages in any conda env. If something is missing, tell me.
-- Invoke the QC tools by ABSOLUTE path with -u and no cd. The `cd <repo> && python src/...`
-  form is blocked at the permission layer and looks like a hang.
-- ~/repos/harris_lab is itself a commitless git repo. Always use `git -C /full/path`.
-- hypnose_helpers must import nothing from the other two repos.
-
-## Gates — the opposite balance from 4b
-
-4b was gated by `regression.py`, because it moved code `run_all_metrics` reaches. **Phase 5 is
-the reverse: `regression.py` is blind here.** It fingerprints `trial_data` + the metrics dict
-and never sees a figure, so a plotting refactor can be silently wrong and stay GREEN.
-
-  PY=~/miniconda3/envs/hypnose-analysis-test/bin/python
-  QC=~/repos/harris_lab/hypnose/hypnose-behavior-analysis/src/hypnose_behavior/qc
-
-  $PY -u $QC/plot_regression.py    # ~5 min, 31 cases — THE gate for this phase
-  $PY -u $QC/check_imports.py      # seconds; run after every move
-  $PY -u $QC/regression.py         # ~15 min — only if you touch metric_analysis or io
-  $PY -u $QC/verify_scripts.py     # only if you touch the CLI wiring
-
-`plot_regression.py` diffs a git revision against the working tree: every line's xy data,
-collection offsets, patch geometry, axis decoration and stdout. It resolves each case's
-function across an ordered `MODULES` list, so **moving** a plotter is invisible to it while a
-change in what it draws is not — which is what makes it usable for this phase's moves. If you
-add plotter modules, add them to `MODULES`. Two known non-zero diffs are accepted and
-recorded: a sub-nanosecond recovery in the trial-timing metrics (max rel 2.2e-07) and one ULP
-choice in `plot_sampling_times_analysis`.
-
-**One trap, from Phase 2c:** moving a plotter between modules changes `file`/`chain` in
-saved-figure provenance, and any `save_figure` wrapper needs `skip_modules=(__name__,)`.
-
-**Expected: green everywhere except the `_ordered_groups` commit**, which reorders series on
-purpose. Any other moved curve is a real regression — stop and diagnose.
-
-## Workflow
-
-- Before each change, tell me what you're doing and what gate result you expect.
-- Small commits, a few moves each. `check_imports` after every move, `plot_regression.py`
-  before each commit.
-- **Show the FULL gate output. Do not truncate it.**
-- **Commit messages: subject + 1-2 short sentences MAX**, then gate results, then
-  `Co-Authored-By: Claude Opus 5` (no email). Rationale goes in the chat or the plan.
-- At the end: update the Progress table in the plan in the same commit as the work, then
-  write the Phase 6 handoff prompt. If you run out of room first, say so plainly and leave an
-  accurate status — do not write a Phase 6 handoff for an unfinished Phase 5.
-```
+**Risk:** low–med (plot-only changes don't move the `regression.py` fingerprint — which is
+precisely why `plot_regression.py` is the gate that matters here). **Done:** primitives used by
+all plotters; no plot function over ~100 lines; every public plotter accepts `dates`/`ses`/
+`index` and their range forms; no plotter reads `metrics_*.json`; both defects above fixed.
 
 ---
 
-## Phase 6 — Trial classification: dedup + modularise  *(highest risk — do after the QC loop is proven)*
+## Phase 6 — Trial classification: dedup + modularise  *(highest risk)*
 
 **Problem:** rewarded/unrewarded/timeout is derived **three times independently** —
 `classify_trials` (the `completed_sequence_*` frames), `analyze_response_times` (the
@@ -1053,6 +438,10 @@ with deeply nested helpers.
    poke/valve windows, classify the outcome — rather than several at once. Apply to
    `detect_trials`, `merge`, `run` as well.
 
+`plot_choice_history` in `visualization/` re-derives the same *display* category rule from
+`response_time_category` + `hidden_rule_success` + `fa_label`. It computes no rate, so 4a left
+it alone — it belongs to this consolidation.
+
 **On "shorter functions":** length is the symptom, not the goal. Extract at seams that are
 **pure and independently testable**; shortness follows. Splitting purely to reduce line count
 produces functions taking twelve arguments, which is worse than what you started with.
@@ -1067,19 +456,18 @@ pass.
 
 ### 7a. Manifest provenance  *(quick win, ~½ day)*
 
-Add the **git commit** (`git rev-parse --short HEAD` via subprocess, `"unknown"` on failure,
-`-dirty` suffix when `git status --porcelain` is non-empty) and the **package version**
-(`importlib.metadata.version("hypnose-behavior-analysis")`) alongside the existing `created_at`
-date in `manifest.json`.
+Add the **git commit** and the **package version** alongside the existing `created_at` date in
+`manifest.json`. **Phase 2c already did the work:** call
+`hypnose_helpers.provenance.provenance()` rather than writing a second implementation — it
+handles the `-dirty` suffix and the fact that the import package and the distribution differ
+here (`hypnose_behavior` ← `hypnose-behavior-analysis`), which makes the naive
+underscore-to-hyphen guess return `None`.
 
 Keep these **in the manifest only** — the regression already ignores it, so they never enter
 the fingerprint and never cause spurious RED.
 
-**Use the same `provenance()` helper as Phase 2c** (figure metadata) rather than a second
-implementation; both want commit + dirty flag + version.
-
-**Risk:** low. **Progress:** ~40% (date exists; commit/version missing).
-**Done:** manifest carries commit + version + date; regression unaffected.
+**Risk:** low. **Progress:** ~40%. **Done:** manifest carries commit + version + date;
+regression unaffected.
 
 ### 7b. Schema & save formats
 
@@ -1094,54 +482,37 @@ implementation; both want commit + dirty flag + version.
   `__post_init__`, and `.to_row()` for the DataFrame.
 - **Flatten the JSON-blob columns** (`position_valve_times`, `position_poke_times`,
   `presentations`) into a tidy long-format side-table `position_data` — one row per
-  `trial_id × position` with odor / valve_start / valve_end / poke_time_ms.
-- **Decide where the per-trial metric tables live** *(added 2026-08-07)*. Nine registered
-  metrics return per-trial or per-poke tables rather than session values — the latencies,
-  `inter_trial_interval`, `trial_poke_span` / `_total`, `hr_abort_poke_gap`, and
-  `poke_durations` (739 rows for one session). They are deliberately absent from
-  `metrics_*.json`, which is a summary; they are the same shape as the `position_data`
-  side-table above and should ride with it if they are to be saved at all. See "Load vs
-  compute" in Phase 5, item 3.
+  `trial_id × position` with odor / valve_start / valve_end / poke_time_ms. `frames.build_position_data`
+  already derives exactly this shape at load time; 7b is where it becomes a written artifact,
+  and where the loader can stop expanding blobs. **Carry its provenance flags across —
+  `DECISIONS.md` §2.**
+- **Decide where the per-trial metric tables live.** Nine registered metrics return per-trial or
+  per-poke tables rather than session values — the latencies, `inter_trial_interval`,
+  `trial_poke_span` / `_total`, `hr_abort_poke_gap`, and `poke_durations` (739 rows for one
+  session). They are deliberately absent from `metrics_*.json`, which is a summary; they are the
+  same shape as the `position_data` side-table and should ride with it if they are to be saved
+  at all. See `DECISIONS.md` §5, item 3.
+- **Write the 0 ms positions and add `poke_source`.** Two data-writing bugs make the position
+  record incomplete and ambiguous; both surface as per-position metrics that cannot be defined
+  consistently. **The full specification, the measurements, and the one-line `sequence_depth`
+  change it unblocks are in `DECISIONS.md` §10.** The writing happens in `classify_trials`, so
+  it lands naturally with Phase 6's trial-loop cleanup; `position_data` is where `poke_source`
+  becomes a column. Alters `trial_data` ⇒ deliberate fixture regeneration.
 
-- **TODO, from the Phase 4a audit (Q5) — record every presented position, and mark how it
-  was derived.** Two data-writing bugs currently make the position record incomplete and
-  ambiguous; both surface as per-position metrics that cannot be defined consistently
-  (`docs/metric_audit.md`, "Q5 resolution").
-
-  1. **Write the 0 ms / no-poke positions.** A position whose poke registers as ~0 ms is
-     currently omitted from `position_poke_times`, `presentations` *and* `num_odors`, even
-     though the odor was presented and the sequence advanced through it. Write the position
-     with `poke_time_ms = 0` and null `poke_odor_start` / `poke_odor_end`. Until this lands,
-     "reached" has to be reconstructed as contiguous `1..max`, which is why the audit
-     mandates that form.
-  2. **Add `poke_source`** to every position entry: `"poke"` for a genuine poke inside the
-     odor window, `"grace"` for one synthesised by the `PRE_ODOR_GRACE_MS` path
-     (`classification_utils:1281-1293`, where the poke ended *before* the valve opened),
-     `"none"` for a 0 ms / no-poke position. Today a grace entry is indistinguishable from a
-     real short poke except by the fragile tell `poke_first_in == poke_odor_start`, and
-     animals genuinely poke for under 20 ms — so the marker is the only reliable way to
-     separate them. Direct measurement (grace period set to 0) puts grace-derived entries at
-     ~2-10 odors per session.
-
-  This unblocks `only_true_pokes` on the sampling metrics. Consumers must treat an **absent**
-  `poke_source` as "unknown" and omit the filtered variant, never as "all real pokes" — older
-  sessions will never carry the field. Alters `trial_data` ⇒ deliberate fixture regeneration,
-  with the diff confirming only the intended columns moved.
-
-  *Coordinate with Phase 6:* the writing happens in `classify_trials`, so it lands naturally
-  with the trial-loop cleanup; `position_data` above is where `poke_source` becomes a column.
-
-These two are complementary, not alternatives: the dataclass governs the flat per-trial table,
-the side-table replaces the per-position blobs that don't belong in it. Queryable, type-safe,
-smaller/faster parquet, kills the alias hacks.
+The dataclass and the side-table are complementary, not alternatives: the dataclass governs the
+flat per-trial table, the side-table replaces the per-position blobs that don't belong in it.
+Queryable, type-safe, smaller/faster parquet, kills the alias hacks.
 
 **Intended schema change → regenerate fixtures deliberately.** Phase it: add the side-table
 additively, keep blobs during transition, drop blobs last. Couples tightly with Phase 6.
 
 **Risk:** med (touches downstream readers). **Done:** no pickle outputs; `position_data`
-side-table exists; blobs removed; fixtures regenerated with only the intended diff.
+side-table exists; blobs removed; `poke_source` written; fixtures regenerated with only the
+intended diff.
 
---- OPTIONAL BONUS, NOT PART OF THE CORE CHANGES: Phase 8 and Phase 9
+---
+
+*OPTIONAL BONUS, NOT PART OF THE CORE CHANGES: Phases 8 and 9*
 
 ## Phase 8 — Profile, then vectorise
 
@@ -1152,10 +523,13 @@ dominate.
 
 Likely finding: **data loading** (harp/aeon `.bin` reads, timestamp interpolation, `concat`)
 dominates rather than the classification loops — in which case optimise I/O batching, fewer
-`concat`s and vectorised event-window math, not sequential event logic for its own sake.
+`concat`s and vectorised event-window math, not sequential event logic for its own sake. The
+Phase 5 measurements already point that way: a cold `derivatives.find_session` costs 14.6 s
+against 29 ms to compute every metric for the session it found.
 
 **Risk:** med — vectorisation can produce *almost* (not byte-) identical floats, so expect
-some intended RED; the per-column diff localises it and you decide tolerance per case.
+some intended RED; the per-column diff localises it and you decide tolerance per case. Note
+`DECISIONS.md` §1: summation order is part of several metrics' values.
 
 ---
 
@@ -1172,12 +546,37 @@ stripped under `python -O`. Reserve `assert` for internal invariants. Optionally
 
 ---
 
-## Parallel track — time-base audit for ephys/movement alignment - Keep this as a note! This will be checked later, as part of it lives within sleap-hypnose (where tracking is done)
+## Phase 10 — Modularise `visualization_utils.py`  *(proposed, after the restructure)*
+
+**4a did not de-bloat `visualization/`.** Measured, it went 16,627 → 15,124 lines, and almost
+all of that is one wholesale move (`compute_speed_analysis`). `visualization_utils.py` itself
+lost 1.9%, and `metric_analysis` gained what it lost — the metrics moved, they did not vanish.
+4a's value is **one definition per metric**, not line count; the plan overpromised a de-bloat
+here.
+
+So `visualization_utils.py` (6,690 lines) needs the same split 4b gave `metrics_utils.py`:
+plumbing apart from plotters, then per-plot-family modules. Pure function moves, so low risk —
+and `qc/plot_regression.py` gates it exactly, since it resolves each case across `MODULES` and
+a move is invisible to the diff.
+
+**Two traps:** add any new plotter module to the gate's `MODULES` list or its cases silently
+read as "not found"; and moving a plotter between modules changes `file`/`chain` in saved-figure
+provenance (`DECISIONS.md` §9).
+
+**Not scheduled.** If Phase 5 makes it unavoidable, say so and stop rather than starting it.
+
+---
+
+## Parallel track — time-base audit for ephys/movement alignment
+
+Keep this as a note — it will be checked later, as part of it lives within `sleap-hypnose`
+(where tracking is done).
 
 Ensure every saved event carries a **canonical, documented timestamp** suitable for aligning
 with electrophysiology and movement data. The pipeline already does harp timestamp
-interpolation plus a real-time (UK tz) offset; audit that (a) the time base is consistent and
-documented, (b) it is ideally tied to a hardware sync signal, (c) saved outputs expose it.
+interpolation plus a real-time (UK tz) offset — now `io/loaders.compute_real_time_offset`, one
+definition since 4a. Audit that (a) the time base is consistent and documented, (b) it is
+ideally tied to a hardware sync signal, (c) saved outputs expose it.
 
 Unblocks multi-modal alignment. Independent of the rest — can run in parallel.
 **Progress:** ~40%.
@@ -1186,16 +585,18 @@ Unblocks multi-modal alignment. Independent of the rest — can run in parallel.
 
 ## Cross-cutting
 
-**Unit tests** (`tests/`, or adjacent to `src/hypnose/qc/`): fast, mount-free tests for the
-outcome classifier, FR/FA buckets, `_get_single_reward_info`, `_parse_date_input`,
+**Unit tests** (`tests/`, or adjacent to `src/hypnose_behavior/qc/`): fast, mount-free tests for
+the outcome classifier, FR/FA buckets, `_get_single_reward_info`, `_parse_date_input`,
 `validate_subject`. **Build the outcome-classifier tests before Phase 6.**
+`hypnose-helpers/tests/test_layout.py` (20 tests, mount-free, runs without pytest) is the
+pattern.
 
 **Lightweight CI** (optional): `check_imports` + unit tests in GitHub Actions on PRs. The
 regression stays local — CI can't reach the data.
 
 ---
 
-## Afterthought — cross-repo API - Done later, kept as a TODO
+## Afterthought — cross-repo API  *(TODO, done later)*
 
 Previously planned as a facade (`hypnose.behavior.accuracy(subjid, date)`). **Demoted**: the
 repos do largely independent work and don't obviously need to call each other's analysis.
@@ -1204,7 +605,8 @@ What they *do* need is **well-defined tidy DataFrame loaders** — the
 `hypnose_somnotate.io.load_scores()` pattern: forgiving selectors in, one tidy DataFrame out,
 identifier columns prepended, fast enough to call across a cohort, downstream computation left
 to the caller. If this repo grows an equivalent `load_trials(...)` / `load_metrics(...)` with
-the same shape, that probably covers the real cross-repo need without a facade.
+the same shape, that probably covers the real cross-repo need without a facade. 4b's registry
+is most of `load_metrics(...)` already.
 
 Revisit only if a concrete consumer appears.
 
@@ -1213,19 +615,20 @@ Revisit only if a concrete consumer appears.
 ## Suggested order
 
 ```
-Phase 0   decisions + collapse loaders/readers            blocks Phases 1-2
-Phase 1   rename                                          ~½ day
-Phase 2   extract hypnose-helpers, session API, provenance 3–4 days
-Phase 3   re-baseline QC                                  ~1 hour, do not skip
-Phase 4   metrics single source of truth (4a then 4b)     the real de-bloat
-Phase 5   visualization primitives + thin plotters        only after 4a
+Phase 0   decisions + collapse loaders/readers            DONE
+Phase 1   rename                                          DONE
+Phase 2   extract hypnose-helpers, session API, provenance DONE
+Phase 3   re-baseline QC                                  DONE (superseded by 0)
+Phase 4   metrics single source of truth (4a then 4b)     DONE
+Phase 5   visualization primitives + thin plotters        <- next
 Phase 6   trial classification dedup + modularise         highest risk, tests first
 Phase 7   manifest provenance, schema & formats           couples with Phase 6
-Phase 8   profile, then vectorise                         evidence-led
-Phase 9   validation                                      woven throughout
+Phase 8   profile, then vectorise                         evidence-led, optional
+Phase 9   validation                                      woven throughout, optional
+Phase 10  modularise visualization_utils.py               proposed, not scheduled
 ∥         time-base audit                                 parallelisable
 ```
 
-After each step: `qc/regression.py` (+ `verify_scripts.py`, `check_imports.py`). GREEN ⇒
-commit. Intended change ⇒ regenerate fixtures in the same commit and confirm via the +/−/~
-diff. Tag the finished round **v2.0.0**.
+After each step, run the gate that can **see** the change (see §1 "gate on reachability").
+GREEN ⇒ commit. Intended change ⇒ regenerate fixtures in the same commit and confirm via the
++/−/~ diff. Tag the finished round **v2.0.0**.
