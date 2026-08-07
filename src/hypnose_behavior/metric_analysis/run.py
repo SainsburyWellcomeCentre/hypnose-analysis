@@ -28,7 +28,10 @@ from hypnose_behavior.metric_analysis.sing_rew_metrics import (
     is_singrew_session,
 )
 from hypnose_behavior.metric_analysis.registry import REGISTRY
-from hypnose_behavior.metric_analysis.summary import save_merged_metrics_txt
+from hypnose_behavior.metric_analysis.summary import (
+    format_fa_abortion_tables,
+    save_merged_metrics_txt,
+)
 from hypnose_behavior.utils.helpers import _filter_session_dirs
 # Imported for their **registrations**: a metric declares itself where it is
 # defined, so every definition module must be imported before REGISTRY is read.
@@ -94,12 +97,14 @@ def _report_fa_abortion_stats(results):
         'by_position': fa_ab_stats[1].to_dict(orient='records') if hasattr(fa_ab_stats[1], 'to_dict') else None,
         'by_odor_position': fa_ab_stats[2].to_dict(orient='records') if hasattr(fa_ab_stats[2], 'to_dict') else None,
     }
+    # The metric is numeric (finding 3); summary.py owns how it reads.
+    shown = format_fa_abortion_tables(*fa_ab_stats)
     print("\nFA Abortion Stats by Odor:")
-    print(fa_ab_stats[0].to_string(index=False) if hasattr(fa_ab_stats[0], 'to_string') else fa_ab_stats[0])
+    print(shown[0].to_string(index=False) if hasattr(shown[0], 'to_string') else shown[0])
     print("\nFA Abortion Stats by Position:")
-    print(fa_ab_stats[1].to_string(index=False) if hasattr(fa_ab_stats[1], 'to_string') else fa_ab_stats[1])
+    print(shown[1].to_string(index=False) if hasattr(shown[1], 'to_string') else shown[1])
     print("\nFA Abortion Stats by Odor and Position:")
-    print(fa_ab_stats[2].to_string(index=False) if hasattr(fa_ab_stats[2], 'to_string') else fa_ab_stats[2])
+    print(shown[2].to_string(index=False) if hasattr(shown[2], 'to_string') else shown[2])
     return payload
 
 __all__ = ["run_all_metrics", "batch_run_all_metrics_with_merge"]

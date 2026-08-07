@@ -1922,6 +1922,56 @@ def plot_sampling_times_analysis(
 
     return fig, axes
 
+def _fa_stat_count(item, key):
+    """A count out of `fa_abortion_stats`, numeric or in the legacy string form.
+
+    Phase 4b made the metric numeric (the audit's finding 3), but every
+    `metrics_*.json` written before that holds `"5 (0.50)"`, and this reads
+    those files rather than recomputing -- so both forms have to be understood
+    until the whole tree has been re-analysed.
+    """
+    val = item.get(key)
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return int(val)
+    if isinstance(val, str) and val.strip():
+        try:
+            return int(val.split()[0])
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
+def _fa_stat_rate(item, key):
+    """A rate out of `fa_abortion_stats`; parses the legacy `"n/d (v)"` string.
+
+    The parenthesised value is rounded to 2dp, so a legacy file is slightly
+    coarser than a numeric one -- which is why the caller still prefers
+    `"Abortion Rate Value"`, the exact number those files also carry.
+    """
+    val = item.get(key)
+    if isinstance(val, bool):
+        return None
+    if isinstance(val, (int, float)):
+        return float(val)
+    if not isinstance(val, str):
+        return None
+    if "(" in val and ")" in val:
+        try:
+            return float(val.split("(")[-1].split(")")[0])
+        except ValueError:
+            pass
+    if "/" in val:
+        try:
+            num_s, denom_s = val.split("/")[:2]
+            denom = float(denom_s.split()[0].strip())
+            return float(num_s.strip()) / denom if denom > 0 else None
+        except (ValueError, IndexError):
+            return None
+    return None
+
+
 def plot_abortion_and_fa_rates(
     subjid,
     dates=None,
@@ -1998,21 +2048,15 @@ def plot_abortion_and_fa_rates(
                     if isinstance(item, dict) and "Odor" in item:
                         odor = item["Odor"]
                         total_ab = item.get("Total Abortions")
-                        fa_time_in_str = item.get("FA Time In", "")
-                        # Extract count from format like "5 (0.50)"
-                        if "(" in fa_time_in_str and total_ab is not None:
-                            try:
-                                fa_time_in_count = int(fa_time_in_str.split()[0])
-                                fa_ratio = fa_time_in_count / total_ab
-                                rows.append({
-                                    "date": int(date_str),
-                                    "metric_type": "fa_rate",
-                                    "category": "odor",
-                                    "position_or_odor": str(odor),
-                                    "rate": fa_ratio
-                                })
-                            except (ValueError, IndexError):
-                                continue
+                        fa_time_in_count = _fa_stat_count(item, "FA Time In")
+                        if fa_time_in_count is not None and total_ab:
+                            rows.append({
+                                "date": int(date_str),
+                                "metric_type": "fa_rate",
+                                "category": "odor",
+                                "position_or_odor": str(odor),
+                                "rate": fa_time_in_count / total_ab
+                            })
 
             # FA rate per position (FA Time In only)
             fa_by_position = fa_stats.get("by_position", [])
@@ -2021,22 +2065,19 @@ def plot_abortion_and_fa_rates(
                     if isinstance(item, dict) and "Position" in item:
                         pos = item["Position"]
                         total_ab = item.get("Total Abortions")
-                        fa_time_in_str = item.get("FA Time In", "")
-                        # Extract count from format like "5 (0.50)"
-                        if "(" in fa_time_in_str and total_ab is not None:
+                        fa_time_in_count = _fa_stat_count(item, "FA Time In")
+                        if fa_time_in_count is not None and total_ab:
                             try:
                                 pos_int = int(pos)
-                                fa_time_in_count = int(fa_time_in_str.split()[0])
-                                fa_ratio = fa_time_in_count / total_ab
-                                rows.append({
-                                    "date": int(date_str),
-                                    "metric_type": "fa_rate",
-                                    "category": "position",
-                                    "position_or_odor": pos_int,
-                                    "rate": fa_ratio
-                                })
-                            except (ValueError, IndexError):
+                            except (TypeError, ValueError):
                                 continue
+                            rows.append({
+                                "date": int(date_str),
+                                "metric_type": "fa_rate",
+                                "category": "position",
+                                "position_or_odor": pos_int,
+                                "rate": fa_time_in_count / total_ab
+                            })
             
             # ============ FA PORT RATIO - from trial_data aborted_fa ============
             try:
@@ -2067,46 +2108,15 @@ def plot_abortion_and_fa_rates(
                         continue
                     pos = item.get("Position")
 
-                    # Prefer explicit numeric field if present
-                    rate_val = item.get("Abortion Rate Value") if isinstance(item.get("Abortion Rate Value"), (int, float)) else None
-
-                    # Next, parse Abortion Rate string (n/d (v))
+                    # "Abortion Rate Value" first: legacy files carry both it and
+                    # the string, and only it is exact -- the string's
+                    # parenthesised value is rounded to 2dp. Numeric files (Phase
+                    # 4b) have dropped it, and their "Abortion Rate" is exact.
+                    rate_val = _fa_stat_rate(item, "Abortion Rate Value")
                     if rate_val is None:
-                        ab_rate_str = item.get("Abortion Rate", "")
-                        if isinstance(ab_rate_str, str):
-                            if "(" in ab_rate_str and ")" in ab_rate_str:
-                                try:
-                                    rate_val = float(ab_rate_str.split("(")[-1].split(")")[0])
-                                except Exception:
-                                    rate_val = None
-                            if rate_val is None and "/" in ab_rate_str:
-                                try:
-                                    num_s, denom_s = ab_rate_str.split("/")[:2]
-                                    num = float(num_s.strip())
-                                    denom = float(denom_s.split()[0].strip())
-                                    if denom > 0:
-                                        rate_val = num / denom
-                                except Exception:
-                                    pass
-
-                    # Fallback: parse legacy FA Abortion Rate field
+                        rate_val = _fa_stat_rate(item, "Abortion Rate")
                     if rate_val is None:
-                        fa_abort_str = item.get("FA Abortion Rate", "")
-                        if isinstance(fa_abort_str, str):
-                            if "(" in fa_abort_str and ")" in fa_abort_str:
-                                try:
-                                    rate_val = float(fa_abort_str.split("(")[-1].split(")")[0])
-                                except Exception:
-                                    rate_val = None
-                            if rate_val is None and "/" in fa_abort_str:
-                                try:
-                                    num_s, denom_s = fa_abort_str.split("/")[:2]
-                                    num = float(num_s.strip())
-                                    denom = float(denom_s.split()[0].strip())
-                                    if denom > 0:
-                                        rate_val = num / denom
-                                except Exception:
-                                    pass
+                        rate_val = _fa_stat_rate(item, "FA Abortion Rate")
 
                     if rate_val is None:
                         continue

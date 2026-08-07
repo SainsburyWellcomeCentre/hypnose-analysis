@@ -63,7 +63,7 @@
     "total_supply_count": "b1593d5e7549c1ab0dae0e61d54af483",
     "trial_id": "243ac04e93b390be1b469ce51b48bd17"
   },
-  "metrics": "25a8c9dd925a9f075e78bd34e67efdf2",
+  "metrics": "6fdee16871b2198328b1b3404eb4e21c",
   "metrics_keys": {
     "decision_accuracy": "5276ee3250b9a68dbb458e8b1d55baee",
     "decision_accuracy_by_odor": "726c05da72ea68a11dbc74a82f81a1cf",
@@ -88,7 +88,7 @@
     "response_rate": "2b2b4a96d04c577091dc539e6459820c",
     "manual_vs_auto_stop_preference": "63c9fb5a9b1c717ca633efb69093d689",
     "odor_initiation_bias": "b76704069a2305b64c3dac5db02a1d4e",
-    "fa_abortion_stats": "26fdabf8b3376741b6b9d60847ca6bc2",
+    "fa_abortion_stats": "6441002d325ebe8b0a889c252caff6a9",
     "fa_port_ratio_by_odor": "023cde917686fea6233376d74f0d9a60"
   }
 }

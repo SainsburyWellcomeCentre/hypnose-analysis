@@ -1284,6 +1284,7 @@ docstring, and `movement_analysis_utils` no longer imports scipy at all.
 `astype(str).str.lower().isin(["true", "1", "1.0"])`, which accepts `"1.0"` where `_is_truthy`
 -- and so `hidden_rule_mask` -- does not. The move kept today's rule rather than silently
 adopting the other; `metric_analysis` now holds both, and 4b should reconcile them.
+*Done 2026-08-07 — resolved by widening `_is_truthy`; see "Phase 4b — the split as built".*
 
 #### Explicitly NOT 4a
 
@@ -1352,3 +1353,106 @@ Then 4b executes the grouping confirmed above.
 
 **Phase 4a is done.** `visualization/` fetches and plots; every metric has exactly one
 definition, in `metric_analysis`.
+---
+
+## Phase 4b — the split as built *(2026-08-07)*
+
+`metrics_utils.py` (2,639 lines) is **gone**. What replaces it:
+
+| module | holds | lines |
+|---|---|---|
+| `io/results.py` | `load_session_results`, `merged_results_output_dir`, `merged_metrics_filename` | 127 |
+| `metric_analysis/run.py` | `run_all_metrics`, `batch_run_all_metrics_with_merge`, `REPORT` | ~520 |
+| `metric_analysis/merge.py` | `pool_results_dicts` | 67 |
+| `metric_analysis/summary.py` | `save_merged_metrics_txt`, `format_fa_abortion_tables` | ~140 |
+| `metric_analysis/registry.py` | `@metric` / `@session_metric`, `MetricSpec`, `REGISTRY` | ~150 |
+| `metric_analysis/metrics/common.py` | the predicates, rate reduction and frame slicing the six share | 175 |
+| `metric_analysis/metrics/accuracy.py` | 6 metrics | 232 |
+| `metric_analysis/metrics/false_alarm.py` | 13 metrics | ~710 |
+| `metric_analysis/metrics/sequence.py` | 5 metrics | 184 |
+| `metric_analysis/metrics/hidden_rule.py` | 6 metrics + `hr_odor_associations` | 539 |
+| `metric_analysis/metrics/sampling.py` | 9 metrics | 263 |
+| `metric_analysis/metrics/timing.py` | 4 metrics | 119 |
+
+`metric_analysis/` now mirrors `trial_classification/` (`run` / `merge` / `summary`), and
+the definitions sit one module per behavioural construct under `metrics/`.
+
+**How the moves were gated.** Every carve was checked structurally as well as behaviourally:
+an ast pass compared each of the **112** top-level functions in the pre-4b `metrics_utils.py`
+against its new home and required the body to be *byte-identical*. Across the whole phase
+exactly two bodies changed, both deliberately (`_is_truthy`, `hr_odor_associations`). The
+7-second parity check ran on every commit — it compares both the return value **and the
+captured stdout** of `run_all_metrics` on all 9 sessions against a `git archive` of `25dab00`,
+so print-only drift, which `regression.py` cannot see, was gated too.
+
+### Four things 4b decided
+
+**1. `parse_json_columns` does not exist.** The plan's §4b moves it to `io/` alongside
+`load_session_results`. 4a had already moved the singular `parse_json_column` into
+`frames.py` as frame construction. By the same "knows the data vs knows the layout" test
+that settled `build_position_data`, it stays there — moving it to `io/` would give one
+function two homes. That plan bullet is stale, not unfinished.
+
+**2. `merged_results_output_dir` / `merged_metrics_filename` have no callers.**
+`batch_run_all_metrics_with_merge` builds its merged paths inline. They moved to
+`io/results.py` as the plan says rather than being deleted, since 4b is a restructuring
+phase — but they are dead code and a Phase 9/10 deletion candidate.
+
+**3. The two truthiness rules are now one, resolved on `_is_truthy`'s side.**
+`hr_odor_associations` arrived from `visualization/` testing
+`isin(["true", "1", "1.0"])`; `_is_truthy` rejected the string `"1.0"`. Measured on all
+9 fixture sessions they **never disagree** — `hidden_rule_success` and `hit_hidden_rule`
+both arrive as native `bool` through parquet — so the divergence was latent, reachable only
+through the CSV fallback where a float column renders `True` as `"1.0"`. Resolved by
+widening `_is_truthy`, because the inconsistency was its own: it already treats the *float*
+`1.0` as true and rejected only its string form. A string that parses as a non-zero number
+is now truthy, which strictly widens what is accepted, so no caller can lose a row.
+
+**4. `metrics/common.py` exists because grouping is by construct.** Eleven helpers are
+needed by more than one construct (`_aborted_mask`, `_flag`, `_truthy`, `_is_truthy`,
+`_initiated`, `reduce_rate`, `_position_rows`, `_tz_naive`, `_trial_position_frame`,
+`_trial_timestamp`, `_latency_ms`). Putting them in whichever behavioural module happened to
+need them first would have made the other five import it. There is exactly **one** edge
+between metric modules: `hidden_rule` imports `presentation_counts_by_odor` from `sequence`,
+the same presentation count `odorx_abortion_rate` uses, restricted to the HR odors.
+
+### The registry
+
+`@metric(frame="trials" | "position_data" | "trials+position_data")` on the core,
+`@session_metric(core)` on the printing wrapper. **43 metrics registered, 25 reported.**
+
+- **The frame is a decorator argument, not a file boundary**, so grouping stays by construct
+  and `fa_latency_from_pokeout` sits with the false alarms. `MetricSpec.call(results)` is
+  what makes the declaration load-bearing rather than decorative.
+- **Only `f(frame) -> value` is registrable** — the shape D0 delivered. `fa_port_ratio(n_a,
+  n_b)` and `get_fa_ratio_a_stats(subjid, dates)` are deliberately absent; they are useful
+  functions, not metrics over a frame.
+- **The report order lives in `run.REPORT`, not in registration order**, which would make it
+  a function of import order — i.e. of the file layout this phase just changed twice. Being
+  in `REGISTRY` makes a metric discoverable; being in `REPORT` is the separate decision to
+  save it. The 18 metrics 4a recovered from `visualization/` are registered and not reported.
+- **Re-registering the same function is a reload, not a clash.** The notebooks run under
+  `%autoreload 2`, which re-executes a module body on every edit; raising there would make
+  the registry unusable in exactly the place metrics get written. A *different* function
+  claiming a registered name still raises, as does an unknown `frame=`.
+- `run_all_metrics` iterates `REPORT`, printing `f"\n--- {spec.title} ---"` and applying an
+  optional `adapter` to the wrapper's return. One `if`, for `fa_abortion_stats`, whose report
+  is three tables rather than a value.
+
+### Finding 3 — the one intended output change
+
+`fa_abortion_stats` built its tables out of pre-formatted strings (`"3/10 (0.30)"`,
+`"2 (0.20)"`), so `metrics['fa_abortion_stats']` was a table of prose and
+`plot_abortion_and_fa_rates` parsed the numbers back out with `int(s.split()[0])`. Now:
+counts are `int`, rates `float`, positions `int`, and the redundant `"Abortion Rate Value"`
+column is gone from the metric — `"Abortion Rate"` *is* that value.
+
+`summary.format_fa_abortion_tables` renders the readable form, so the **txt report is
+unchanged** except that positions print as `2` rather than `2.0`. It derives the subtype
+columns from the frame instead of naming them, so adding an FA subtype to the metric renders
+without touching the formatter.
+
+`plot_abortion_and_fa_rates` reads either form. That is not politeness: every
+`metrics_*.json` already on the server holds the string form, and the plotter reads those
+files directly rather than recomputing, so a numeric-only reader would have drawn nothing
+for every session until it was re-analysed.

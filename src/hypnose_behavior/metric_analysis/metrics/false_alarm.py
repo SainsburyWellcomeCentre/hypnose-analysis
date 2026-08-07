@@ -48,6 +48,9 @@ from hypnose_behavior.metric_analysis.registry import (
     metric,
     session_metric,
 )
+# The report form of `fa_abortion_stats`. One-way edge into a leaf:
+# `summary` imports nothing from `metrics/`.
+from hypnose_behavior.metric_analysis.summary import format_fa_abortion_tables
 
 __all__ = [
     "premature_response_rate_contributions", "premature_response_rate",
@@ -297,9 +300,16 @@ def _fa_abortion_frames_missing(trials):
 def fa_abortion_stats(trials):
     """FA abortion breakdown by odor / position / odor x position.
 
-    Returns three DataFrames, empty when the frame lacks what they need. Values
-    are pre-formatted strings (`"3/10 (0.30)"`) -- the audit's finding 3 wants
-    them numeric, which is a 4b/`summary.py` change, not a 4a one.
+    Returns three DataFrames, empty when the frame lacks what they need. Counts
+    are `int`, rates `float`, positions `int`.
+
+    **Numeric since Phase 4b** -- the audit's finding 3. These tables used to be
+    built out of pre-formatted strings (`"3/10 (0.30)"`, `"2 (0.20)"`), so the
+    saved `metrics['fa_abortion_stats']` was a table of prose and its one
+    consumer, `plot_abortion_and_fa_rates`, parsed the numbers back out with
+    `int(s.split()[0])`. `summary.format_fa_abortion_tables` renders the
+    readable form for the txt report. The `"Abortion Rate Value"` column is gone
+    from the metric: `"Abortion Rate"` *is* that value now.
     """
     df = trials
     empty = (pd.DataFrame(), pd.DataFrame(), pd.DataFrame())
@@ -318,6 +328,23 @@ def fa_abortion_stats(trials):
         ("FA_late", "FA Late"),
     ]
 
+    def _counts(sub_all):
+        """The counts all three tables share, for one slice of the abortions."""
+        sub_fa = sub_all[sub_all["fa_label"].isin(allowed_fa)]
+        fa_labels = sub_fa["fa_label"].astype(str)
+        n_total, n_fa = len(sub_all), len(sub_fa)
+        row = {
+            "Total Abortions": int(n_total),
+            "FA Abortions": int(n_fa),
+            "FA Abortion Rate": n_fa / n_total,
+        }
+        for subtype, pretty in subtype_labels:
+            # int(): `.sum()` gives np.int64, which `json.dumps(default=str)`
+            # writes as a *string* -- the trap the audit records for
+            # `manual_vs_auto_stop_preference`.
+            row[pretty] = int((fa_labels == subtype).sum())
+        return row
+
     # Odor+Position table
     rows = []
     odors = sorted(aborted_all[odor_col].dropna().unique())
@@ -327,20 +354,7 @@ def fa_abortion_stats(trials):
             sub_all = aborted_all[(aborted_all[odor_col] == odor) & (aborted_all[pos_col] == pos)]
             if sub_all.empty:
                 continue
-            sub_fa = sub_all[sub_all["fa_label"].isin(allowed_fa)]
-            n_total = len(sub_all)
-            fa_labels = sub_fa["fa_label"].astype(str)
-            row = {
-                "Odor": odor,
-                "Position": pos,
-                "Total Abortions": n_total,
-            }
-            n_fa = len(sub_fa)
-            row["FA Abortion Rate"] = f"{n_fa}/{n_total} ({n_fa/n_total:.2f})"
-            for subtype, pretty in subtype_labels:
-                count = (fa_labels == subtype).sum()
-                row[pretty] = f"{count} ({count/n_total:.2f})"
-            rows.append(row)
+            rows.append({"Odor": odor, "Position": int(pos), **_counts(sub_all)})
     df_out = pd.DataFrame(rows)
 
     # Per-odor table
@@ -349,19 +363,7 @@ def fa_abortion_stats(trials):
         sub_all = aborted_all[aborted_all[odor_col] == odor]
         if sub_all.empty:
             continue
-        sub_fa = sub_all[sub_all["fa_label"].isin(allowed_fa)]
-        n_total = len(sub_all)
-        fa_labels = sub_fa["fa_label"].astype(str)
-        row = {
-            "Odor": odor,
-            "Total Abortions": n_total,
-        }
-        n_fa = len(sub_fa)
-        row["FA Abortion Rate"] = f"{n_fa}/{n_total} ({n_fa/n_total:.2f})"
-        for subtype, pretty in subtype_labels:
-            count = (fa_labels == subtype).sum()
-            row[pretty] = f"{count} ({count/n_total:.2f})"
-        odor_rows.append(row)
+        odor_rows.append({"Odor": odor, **_counts(sub_all)})
     df_odor = pd.DataFrame(odor_rows)
 
     # Compute reached counts per position (denominator for overall abortion rate)
@@ -373,26 +375,16 @@ def fa_abortion_stats(trials):
         sub_all = aborted_all[aborted_all[pos_col] == pos]
         if sub_all.empty:
             continue
-        sub_fa = sub_all[sub_all["fa_label"].isin(allowed_fa)]
-        n_total = len(sub_all)
-        fa_labels = sub_fa["fa_label"].astype(str)
-        reached_pos = reached.get(int(pos), 0)
-        rate_val = (n_total / reached_pos) if reached_pos > 0 else np.nan
-        rate_str = f"{n_total}/{reached_pos} ({rate_val:.2f})" if reached_pos > 0 else "N/A"
-
-        row = {
-            "Position": pos,
+        counts = _counts(sub_all)
+        n_total = counts.pop("Total Abortions")
+        reached_pos = int(reached.get(int(pos), 0))
+        pos_rows.append({
+            "Position": int(pos),
             "Total Abortions": n_total,
             "Reached Trials": reached_pos,
-            "Abortion Rate": rate_str,
-            "Abortion Rate Value": rate_val,
-        }
-        n_fa = len(sub_fa)
-        row["FA Abortion Rate"] = f"{n_fa}/{n_total} ({n_fa/n_total:.2f})"
-        for subtype, pretty in subtype_labels:
-            count = (fa_labels == subtype).sum()
-            row[pretty] = f"{count} ({count/n_total:.2f})"
-        pos_rows.append(row)
+            "Abortion Rate": (n_total / reached_pos) if reached_pos > 0 else np.nan,
+            **counts,
+        })
     df_pos = pd.DataFrame(pos_rows)
 
     return df_odor, df_pos, df_out
@@ -409,15 +401,17 @@ def fa_abortion_stats_session(results, return_df=False):
     df_odor, df_pos, df_out = fa_abortion_stats(trials)
 
     if not return_df:
+        # Readable form for a human at a notebook; the metric stays numeric.
+        shown_odor, shown_pos, shown_out = format_fa_abortion_tables(df_odor, df_pos, df_out)
         if not df_odor.empty:
             print("=== By Odor ===")
-            display(df_odor)
+            display(shown_odor)
         if not df_pos.empty:
             print("=== By Position ===")
-            display(df_pos)
+            display(shown_pos)
         if not df_out.empty:
             print("=== By Odor+Position ===")
-            display(df_out)
+            display(shown_out)
         if df_odor.empty and df_pos.empty and df_out.empty:
             print("No FA abortions found.")
     return (df_odor, df_pos, df_out) if return_df else None
