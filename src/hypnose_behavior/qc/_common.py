@@ -37,7 +37,8 @@ import pandas as pd
 # fingerprints they produce must remain identical at every step.
 import hypnose_behavior.io.paths as _paths
 from hypnose_behavior.trial_classification.classification_utils import analyze_session_multi_run_by_id_date
-from hypnose_behavior.metric_analysis.metrics_utils import load_session_results, run_all_metrics
+from hypnose_behavior.io.results import load_session_results
+from hypnose_behavior.metric_analysis.metrics_utils import run_all_metrics
 # ---------------------------------------------------------------------------
 
 

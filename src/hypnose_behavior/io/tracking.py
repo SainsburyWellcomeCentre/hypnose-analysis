@@ -21,6 +21,9 @@ from hypnose_behavior.io.paths import (
     get_rawdata_root,
     get_server_root,
 )
+# Was a function-level import while `load_session_results` lived in
+# `metric_analysis`, to keep `io/` from importing it. Phase 4b moved it here.
+from hypnose_behavior.io.results import load_session_results
 from hypnose_behavior.utils.helpers import (
     _get_from_cache,
     _update_cache,
@@ -76,10 +79,6 @@ def _load_tracking_and_behavior(subjid, date, tracking_source='sleap'):
         if x_cols and y_cols:
             tracking['X'] = tracking[x_cols[0]]
             tracking['Y'] = tracking[y_cols[0]]
-
-    # Local import: io/ stays a leaf package. Phase 4b moves
-    # load_session_results into io/ and this becomes a top-level import.
-    from hypnose_behavior.metric_analysis.metrics_utils import load_session_results
 
     behavior = load_session_results(subjid, date)
 

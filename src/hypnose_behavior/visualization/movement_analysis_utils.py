@@ -13,8 +13,8 @@ from matplotlib.collections import LineCollection
 from matplotlib.colors import Normalize
 from collections import defaultdict
 from typing import Iterable, Optional, Union, Tuple
+from hypnose_behavior.io.results import load_session_results
 from hypnose_behavior.metric_analysis.metrics_utils import (
-    load_session_results,
     run_all_metrics,
     parse_json_column,
 )

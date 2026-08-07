@@ -24,6 +24,10 @@ from hypnose_behavior.utils.helpers import _filter_session_dirs, _iter_subject_d
 from hypnose_behavior.io.paths import get_derivatives_root
 from hypnose_behavior.io.layout import derivatives, list_sessions, normalize_subjid
 from hypnose_behavior.io.loaders import _load_trial_views, _odor_to_letter
+# `load_session_results` is the read side of `io/save_results.py` and lives there
+# now (restructure_2 Phase 4b). Imported because `batch_run_all_metrics_with_merge`
+# calls it, and re-exported so importers of this module keep working.
+from hypnose_behavior.io.results import load_session_results  # noqa: F401
 from hypnose_behavior.metric_analysis.sing_rew_metrics import (
     compute_sing_rew_metrics,
     compute_sing_rew_rates,
@@ -41,63 +45,7 @@ from hypnose_behavior.metric_analysis.frames import (  # noqa: F401
     sampled_positions,
     sequence_depth,
 )
-# ================== Loading, Wrapper, and Helper Functions ==================
-
-def load_session_results(subjid, date):
-    """
-    Load saved analysis results for a given subject and date.
-    Returns a dict with trial_data, non-initiated tables, and metadata.
-    """
-    # One resolver for the whole family (restructure_2 Phase 2b); it reports the
-    # available sessions on a miss and raises rather than warning on an ambiguous
-    # subject or date.
-    session = derivatives.find_session(subjid, date=date)
-    subject_dir = session.subject_dir
-    session_dir = session.path
-
-    results_dir = session_dir / "saved_analysis_results"
-    if not results_dir.exists():
-        raise FileNotFoundError(f"Results directory not found: {results_dir}")
-
-    # Load manifest and summary
-    manifest = json.load(open(results_dir / "manifest.json"))
-    summary = json.load(open(results_dir / "summary.json"))
-
-    results: dict = {}
-
-    # Prefer the unified trial_data parquet; fall back to CSV if needed
-    trial_parquet = results_dir / "trial_data.parquet"
-    trial_csv = results_dir / "trial_data.csv"
-    trial_df = pd.DataFrame()
-    if trial_parquet.exists():
-        try:
-            trial_df = pd.read_parquet(trial_parquet)
-        except Exception as e:
-            print(f"Warning: failed to read {trial_parquet}: {e}")
-    if trial_df.empty and trial_csv.exists():
-        trial_df = pd.read_csv(trial_csv)
-    results["trial_data"] = trial_df
-
-    # Long per-position frame, derived here rather than written by the classifier,
-    # so metrics never parse a JSON blob and legacy sessions need no
-    # compatibility branch (D0, tier 2). Phase 7b's position_data side-table
-    # turns this from a derivation into a read.
-    results["position_data"] = build_position_data(trial_df)
-
-    # The three `non_initiated_*` tables are deliberately not loaded. Phase 4a
-    # step 6 dropped non-initiated trials from the metric set: they are not in
-    # `trial_data`, so every metric over them needed its own frame and its own
-    # shape, and integrating them properly is its own piece of work. Trial
-    # classification still writes the tables; nothing in `metric_analysis` reads
-    # them.
-
-    # Attach manifest and summary
-    results["manifest"] = manifest
-    results["summary"] = summary
-    results["results_dir"] = str(results_dir)
-
-    return results
-
+# ================== Orchestration, Merging and Saving ==================
 
 def run_all_metrics(results, save_txt=True, save_json=True):
     """
@@ -434,37 +382,6 @@ def save_merged_metrics_txt(metrics, header, txt_path, pretty_print_str=None):
                     f.write(f"{k.replace('_',' ').title()}: {v:.3f}\n")
                 else:
                     f.write(f"{k.replace('_',' ').title()}: {v}\n")
-
-def merged_results_output_dir(subjids, dates, protocol):
-    """
-    Determine the output directory for merged results based on subjids, dates, and protocol.
-    """
-    derivatives_dir = get_derivatives_root()
-    subjids = sorted(set(str(s) for s in subjids))
-    dates = sorted(set(str(d) for d in dates))
-    if len(subjids) == 1:
-        subj_dir = derivatives.subject_dir(subjids[0])
-        merged_dir = subj_dir / "merged_results"
-    else:
-        merged_dir = derivatives_dir / "merged"
-        merged_dir = merged_dir / ("protocol_merged" if protocol else "merged")
-    merged_dir.mkdir(parents=True, exist_ok=True)
-    return merged_dir
-
-def merged_metrics_filename(subjids, dates, protocol):
-    """
-    Construct merged metrics filename based on subjids, dates, and protocol.
-    """
-    subjids = sorted(set(str(s) for s in subjids))
-    dates = sorted(set(str(d) for d in dates))
-    n_dates = len(dates)
-    if len(subjids) == 1:
-        proto = protocol if protocol else "all"
-        fname = f"merged_{proto}_{n_dates}_dates"
-    else:
-        subj_str = "_".join(subjids)
-        fname = f"merged_subjids_{subj_str}_{n_dates}_dates"
-    return fname
 
 def batch_run_all_metrics_with_merge(
     subjids=None,
