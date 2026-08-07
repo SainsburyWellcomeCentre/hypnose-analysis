@@ -825,7 +825,90 @@ sessions — see "State at the end of 2b" §2. `index` selects; it does not posi
 **Risk:** low–med (plot-only changes don't affect the regression fingerprint, which covers
 `trial_data` + metrics — visual output needs eyeballing). **Done:** no metric math in
 `visualization/`; primitives used by all plotters; no plot function over ~100 lines; every
-public plotter accepts `dates`/`ses`/`index` and their range forms.
+public plotter accepts `dates`/`ses`/`index` and their range forms; and no plotter reads
+`metrics_*.json` (see "Load vs compute" immediately below).
+
+### Load vs compute — decided 2026-08-07, measured before deciding
+
+**Question raised after 4b:** only 25 of the 43 registered metrics are reported and saved, so
+some plotters call a metric function instead of reading `metrics_*.json`. Should everything be
+saved, so `visualization/` only ever loads?
+
+**No — that end state is unreachable, and the cache is buying less than it looks.**
+
+**1. It cannot be reached.** Three unreported metrics take a `window`, two take an `fa_types`
+filter. Those are properties of the *figure*, not of the session: there is no value to save,
+and freezing one arbitrary window would be a lie dressed as an artifact. Nine more return
+per-trial or per-poke tables (`poke_durations` is **739 rows for one session**), which do not
+belong in a summary JSON at all — they belong with Phase 7b's `position_data` side-table. What
+is left is one genuinely missing parameter-free scalar, `false_response_ratio`.
+
+**2. The cache saves the cheap part.** Measured warm on sub-040 20251124:
+
+| path | per session |
+|---|---|
+| read `trial_data.parquet` (205 KB) | 6.7 ms |
+| `build_position_data` → 1022 rows | 21.9 ms |
+| **compute total** | **29 ms** |
+| read `metrics_*.json` (17 KB) | 4.2 ms |
+
+7x the time and 12x the bytes — but both paths already paid the expensive part.
+`_ensure_metrics_json` receives an **already-resolved** `results_dir`, so the caller's walk over
+the mount happened either way, and that walk is what costs seconds (measured: 14.6 s for one
+`derivatives.find_session` on a cold mount, against 0.2 s on rawdata). The cache saves one small
+file read and 25 ms of CPU, not the thing that hurts.
+
+**3. The real defect is not the unreported metrics — it is dual sourcing.**
+`decision_accuracy`, `avg_response_time` and `FA_avg_response_times` are each obtained **both**
+ways in `visualization/`: read from the saved JSON at some sites, computed live at others. Two
+plots can therefore show the same quantity and disagree, because one reflects whatever code
+last analysed that session. The lag is real and demonstrable — every `metrics_*.json` on the
+server still holds the **pre-finding-3** encoding, which is why `plot_regression` stayed green
+through the legacy reader. Today it is harmless (finding 3 changed encoding, not values, and no
+plotter reads the keys 4a step 6 deleted), but the mechanism is live and silent.
+
+**4. A provenance stamp was considered and rejected.** Stamping the JSON with the commit that
+wrote it invalidates the cache on every unrelated commit — a docstring fix would force a
+re-analysis of the whole server. The correct key would be a hash of the *metric definitions*
+plus an mtime check against `trial_data.parquet` (re-running classification alone also
+invalidates them). That works, but it is machinery in service of a cache worth 25 ms.
+
+**Decision: `metrics_*.json` / `.txt` stop being a plotting input.** They stay as the export and
+the record of an analysis run — that is what they are good at. Plotters compute. This deletes
+the staleness problem rather than managing it: no stamp, no invalidation rule, no backfill, and
+no way for two plots to disagree.
+
+**What makes this newly practical is 4b's registry.** The reason a plotter read the saved dict
+was that wanting "the metric named X" had no other expression. `REGISTRY[name].call(results)` is
+now exactly that, and returns the same shape the saved key holds.
+
+**Two things keep the cost off the table:**
+
+- **Make `position_data` lazy.** It is 22 of the 29 ms and most metrics never touch it, yet
+  `load_session_results` builds it unconditionally. Build it on first access and the compute
+  path drops to ~8 ms against the cache's 4.2 ms — the same order, not 7x. Small, self-contained,
+  gated by `regression.py`.
+- **If a cold cross-subject figure ever is slow, cache in memory, not on disk.**
+  `utils/helpers._get_from_cache` / `_update_cache` already exist. A process-level cache cannot
+  go stale across code versions because it dies with the process; that is strictly the better
+  cache.
+
+**The caveat, and why this is not a silent cleanup:** switching a plotter from load to compute
+*can* move a curve, for any session whose saved JSON predates a metric change. That is the
+staleness surfacing, which is the point — but it makes this a `plot_regression`-gated change
+with a deliberate look at the diffs.
+
+**Sequencing** *(none of it urgent; Phase 5 is the phase that touches every plotter anyway)*:
+
+1. **Phase 5** — while repointing plotters, route the three dual-sourced quantities through one
+   path. Pick compute.
+2. **Phase 5 or 7b** — lazy `position_data`, then convert the remaining JSON readers
+   (`_ensure_metrics_json`'s 6 call sites).
+3. **Phase 7b** — decide where the nine per-trial tables live; they ride with the `position_data`
+   side-table it already plans to write.
+4. **Anytime** — `false_response_ratio` into `run.REPORT` if it should be saved. It needs a
+   `*_session` wrapper and is a deliberate output change (a new key on every session, so
+   `--generate` in its own commit).
 
 ### Handoff prompt — Phase 5 *(written 2026-08-07, 4b complete)*
 
@@ -849,9 +932,11 @@ if Phase 5 makes it unavoidable, say so and stop).
 ## Read these first, targeted, not cover to cover
 
 1. docs/restructure_2_plan.md → section 1 (QC safety net + operating rules) and the whole
-   Phase 5 section. Two subsections in it are the actual work orders: **"Two defects 4a found
-   and deliberately did not fix"** and **"Thread the session selectors through the plotters"**.
-   Skip the completed-phase narratives.
+   Phase 5 section. Three subsections in it are the actual work orders: **"Two defects 4a found
+   and deliberately did not fix"**, **"Thread the session selectors through the plotters"**, and
+   **"Load vs compute — decided 2026-08-07"** (items 1 and 2 of its sequencing list are Phase 5
+   work; it is measured and settled, so do not re-derive it). Skip the completed-phase
+   narratives.
 2. docs/metric_audit.md → **"The gate the audit said did not exist"** (what
    `qc/plot_regression.py` is, why Phase 5 depends on it, and the two things it works
    *around* rather than fixes), and **"Phase 4b — the split as built"** for where every
@@ -867,6 +952,10 @@ data prep, axis construction and styling — and the audit measured the real rep
 shape is thin primitives (`line`, `scatter`, `boxplot`, `rolling_mean`, `style_axis`) in
 shared helper modules, plus one small explicit function per metric. **Deliberately not** a
 `plot_metric(kind, ses)` dispatcher — the plan rejects it by name as a god-function.
+
+Also in scope, decided 2026-08-07: **plotters stop reading `metrics_*.json`** and compute
+through the registry instead. Items 1 and 2 of "Load vs compute" are this phase's share; it is
+measured and settled, including why a provenance stamp was rejected.
 
 Also in scope, decided 2026-08-04: every public plotter should accept `dates` / `ses` /
 `index` and their range forms and forward them to `find_sessions`, which already takes exactly
@@ -1006,6 +1095,13 @@ implementation; both want commit + dirty flag + version.
 - **Flatten the JSON-blob columns** (`position_valve_times`, `position_poke_times`,
   `presentations`) into a tidy long-format side-table `position_data` — one row per
   `trial_id × position` with odor / valve_start / valve_end / poke_time_ms.
+- **Decide where the per-trial metric tables live** *(added 2026-08-07)*. Nine registered
+  metrics return per-trial or per-poke tables rather than session values — the latencies,
+  `inter_trial_interval`, `trial_poke_span` / `_total`, `hr_abort_poke_gap`, and
+  `poke_durations` (739 rows for one session). They are deliberately absent from
+  `metrics_*.json`, which is a summary; they are the same shape as the `position_data`
+  side-table above and should ride with it if they are to be saved at all. See "Load vs
+  compute" in Phase 5, item 3.
 
 - **TODO, from the Phase 4a audit (Q5) — record every presented position, and mark how it
   was derived.** Two data-writing bugs currently make the position record incomplete and
